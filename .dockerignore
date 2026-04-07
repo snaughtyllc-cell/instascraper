@@ -1,0 +1,8 @@
+node_modules
+client/node_modules
+client/build
+server/instascraper.db
+server/thumbnails
+.env
+.git
+.claude
