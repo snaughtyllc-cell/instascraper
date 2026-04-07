@@ -8,6 +8,8 @@ RUN cd server && npm ci --omit=dev
 
 # Install client deps + build
 COPY client/package*.json ./client/
+ARG REACT_APP_API_URL=https://instascraper-production-7281.up.railway.app
+ENV REACT_APP_API_URL=$REACT_APP_API_URL
 RUN cd client && npm install --legacy-peer-deps
 COPY client/ ./client/
 RUN cd client && npm run build
