@@ -21,4 +21,10 @@ export const exportContent = (format = 'json') => {
   window.open(`${api.defaults.baseURL}/export?format=${format}&tag=recreate`, '_blank');
 };
 
+export const getEngagementSummary = (handle) => api.get(`/engagement/summary/${handle}`);
+export const getEngagementLeaderboard = () => api.get('/engagement/leaderboard');
+export const exportEngagement = (handle, format = 'csv') => {
+  window.open(`${api.defaults.baseURL}/engagement/export/${handle}?format=${format}`, '_blank');
+};
+
 export default api;

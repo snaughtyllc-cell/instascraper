@@ -44,6 +44,9 @@ db.exec(`
 const migrations = [
   `ALTER TABLE posts ADD COLUMN archived INTEGER DEFAULT 0`,
   `ALTER TABLE posts ADD COLUMN content_type TEXT DEFAULT NULL`,
+  `ALTER TABLE posts ADD COLUMN followers_at_scrape INTEGER DEFAULT 0`,
+  `ALTER TABLE posts ADD COLUMN er_percent REAL DEFAULT 0`,
+  `ALTER TABLE posts ADD COLUMN er_label TEXT DEFAULT NULL`,
 ];
 for (const sql of migrations) {
   try { db.exec(sql); } catch (e) { /* column already exists */ }

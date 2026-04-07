@@ -73,6 +73,7 @@ function requireAuth(req, res, next) {
 app.use('/scrape', requireAuth);
 app.use('/content', requireAuth);
 app.use('/creators', requireAuth);
+app.use('/engagement', requireAuth);
 app.use('/export', requireAuth);
 app.use('/thumb', requireAuth);
 app.use('/thumbnails', requireAuth);
@@ -154,7 +155,7 @@ app.get('/content', (req, res) => {
     params.tag = tag;
   }
   if (account) {
-    where.push('account_handle = @account');
+    where.push('posts.account_handle = @account');
     params.account = account;
   }
   if (minViews) {
@@ -181,6 +182,8 @@ app.get('/content', (req, res) => {
     oldest: 'posted_at ASC',
     most_viewed: 'view_count DESC',
     most_liked: 'like_count DESC',
+    highest_er: 'er_percent DESC',
+    lowest_er: 'er_percent ASC',
   };
   const orderBy = sortMap[sort] || 'posted_at DESC';
 
@@ -267,6 +270,115 @@ app.post('/content/:id/archive', (req, res) => {
   const result = db.prepare('UPDATE posts SET archived = ? WHERE id = ?').run(val, Number(req.params.id));
   if (result.changes === 0) return res.status(404).json({ error: 'Post not found' });
   res.json({ success: true });
+});
+
+// ─── Engagement Rate Routes ─────────────────────────────────────
+
+app.get('/engagement/summary/:handle', (req, res) => {
+  const handle = req.params.handle;
+
+  const posts = db.prepare(`
+    SELECT shortcode, posted_at, like_count, comment_count, followers_at_scrape, er_percent, er_label
+    FROM posts
+    WHERE account_handle = ? AND (archived = 0 OR archived IS NULL)
+    ORDER BY posted_at ASC
+  `).all(handle);
+
+  if (posts.length === 0) {
+    return res.json({ handle, postCount: 0, avgER: 0, erLabel: null, best: null, worst: null, trend: 'Stable' });
+  }
+
+  // Average ER
+  const totalER = posts.reduce((sum, p) => sum + (p.er_percent || 0), 0);
+  const avgER = Math.round((totalER / posts.length) * 100) / 100;
+
+  // Label for average
+  let avgLabel = 'Low';
+  if (avgER >= 6) avgLabel = 'Viral';
+  else if (avgER >= 3) avgLabel = 'Good';
+  else if (avgER >= 1) avgLabel = 'Average';
+
+  // Best and worst
+  const sorted = [...posts].sort((a, b) => (b.er_percent || 0) - (a.er_percent || 0));
+  const best = sorted[0];
+  const worst = sorted[sorted.length - 1];
+
+  // Trend: compare first half vs second half
+  const mid = Math.floor(posts.length / 2);
+  const firstHalf = posts.slice(0, mid || 1);
+  const secondHalf = posts.slice(mid || 1);
+  const firstAvg = firstHalf.reduce((s, p) => s + (p.er_percent || 0), 0) / firstHalf.length;
+  const secondAvg = secondHalf.length > 0
+    ? secondHalf.reduce((s, p) => s + (p.er_percent || 0), 0) / secondHalf.length
+    : firstAvg;
+
+  const diff = secondAvg - firstAvg;
+  let trend = 'Stable';
+  if (diff > 0.5) trend = 'Up';
+  else if (diff < -0.5) trend = 'Down';
+
+  res.json({
+    handle,
+    postCount: posts.length,
+    avgER,
+    erLabel: avgLabel,
+    best: { shortcode: best.shortcode, er_percent: best.er_percent, er_label: best.er_label, posted_at: best.posted_at },
+    worst: { shortcode: worst.shortcode, er_percent: worst.er_percent, er_label: worst.er_label, posted_at: worst.posted_at },
+    trend,
+    firstHalfAvg: Math.round(firstAvg * 100) / 100,
+    secondHalfAvg: Math.round(secondAvg * 100) / 100,
+  });
+});
+
+// All accounts engagement leaderboard
+app.get('/engagement/leaderboard', (req, res) => {
+  const accounts = db.prepare(`
+    SELECT account_handle,
+      COUNT(*) as post_count,
+      ROUND(AVG(er_percent), 2) as avg_er,
+      MAX(er_percent) as best_er,
+      MIN(er_percent) as worst_er,
+      MAX(followers_at_scrape) as followers
+    FROM posts
+    WHERE account_handle != '' AND (archived = 0 OR archived IS NULL)
+    GROUP BY account_handle
+    ORDER BY avg_er DESC
+  `).all();
+
+  const labeled = accounts.map(a => {
+    let label = 'Low';
+    if (a.avg_er >= 6) label = 'Viral';
+    else if (a.avg_er >= 3) label = 'Good';
+    else if (a.avg_er >= 1) label = 'Average';
+    return { ...a, er_label: label };
+  });
+
+  res.json(labeled);
+});
+
+// CSV export of all posts with engagement data for an account
+app.get('/engagement/export/:handle', (req, res) => {
+  const handle = req.params.handle;
+  const posts = db.prepare(`
+    SELECT shortcode, posted_at, like_count, comment_count, view_count, followers_at_scrape, er_percent, er_label, post_url, caption
+    FROM posts
+    WHERE account_handle = ? AND (archived = 0 OR archived IS NULL)
+    ORDER BY posted_at DESC
+  `).all(handle);
+
+  const format = req.query.format || 'json';
+
+  if (format === 'csv') {
+    const { Parser } = require('json2csv');
+    const fields = ['shortcode', 'posted_at', 'like_count', 'comment_count', 'view_count', 'followers_at_scrape', 'er_percent', 'er_label', 'post_url'];
+    const parser = new Parser({ fields });
+    const csv = parser.parse(posts);
+    res.setHeader('Content-Type', 'text/csv');
+    res.setHeader('Content-Disposition', `attachment; filename=${handle}-engagement.csv`);
+    return res.send(csv);
+  }
+
+  res.json({ handle, posts });
 });
 
 // ─── Export Route ────────────────────────────────────────────────

@@ -5,6 +5,16 @@ const APIFY_BASE = 'https://api.apify.com/v2';
 const REEL_ACTOR_ID = 'apify~instagram-reel-scraper';
 const GENERIC_ACTOR_ID = 'apify~instagram-scraper';
 
+function calcER(likes, comments, followers) {
+  if (!followers || followers <= 0) return { er_percent: 0, er_label: null };
+  const er = ((likes + comments) / followers) * 100;
+  let label = 'Low';
+  if (er >= 6) label = 'Viral';
+  else if (er >= 3) label = 'Good';
+  else if (er >= 1) label = 'Average';
+  return { er_percent: Math.round(er * 100) / 100, er_label: label };
+}
+
 class InstagramScraper {
   constructor(apiKey) {
     this.apiKey = apiKey;
@@ -152,11 +162,18 @@ class InstagramScraper {
     );
     const items = await res.json();
 
+    // Extract followers count from the first item that has it (same account for username scrapes)
+    let followersCount = 0;
+    for (const item of items) {
+      const fc = item.ownerFollowerCount || item.followersCount || item.owner?.followerCount || 0;
+      if (fc > 0) { followersCount = fc; break; }
+    }
+
     const insert = db.prepare(`
       INSERT OR IGNORE INTO posts
-        (shortcode, video_url, thumbnail_url, caption, like_count, comment_count, view_count, posted_at, account_handle, post_url, source_query)
+        (shortcode, video_url, thumbnail_url, caption, like_count, comment_count, view_count, posted_at, account_handle, post_url, source_query, followers_at_scrape, er_percent, er_label)
       VALUES
-        (@shortcode, @videoUrl, @thumbnailUrl, @caption, @likeCount, @commentCount, @viewCount, @postedAt, @accountHandle, @postUrl, @sourceQuery)
+        (@shortcode, @videoUrl, @thumbnailUrl, @caption, @likeCount, @commentCount, @viewCount, @postedAt, @accountHandle, @postUrl, @sourceQuery, @followersAtScrape, @erPercent, @erLabel)
     `);
 
     let count = 0;
@@ -186,6 +203,12 @@ class InstagramScraper {
         postedAt = new Date(item.takenAtTimestamp * 1000).toISOString();
       }
 
+      // Per-item followers (prefer item-level, fall back to account-level)
+      const itemFollowers = item.ownerFollowerCount || item.followersCount || item.owner?.followerCount || followersCount;
+
+      // Calculate engagement rate
+      const { er_percent, er_label } = calcER(likes, comments, itemFollowers);
+
       return {
         _type: item.type || 'Unknown',
         _productType: item.productType || '',
@@ -200,6 +223,9 @@ class InstagramScraper {
         accountHandle: item.ownerUsername || item.owner?.username || '',
         postUrl: item.url || (item.shortCode ? `https://www.instagram.com/p/${item.shortCode}/` : ''),
         sourceQuery: filters.query || '',
+        followersAtScrape: itemFollowers,
+        erPercent: er_percent,
+        erLabel: er_label,
       };
     });
 

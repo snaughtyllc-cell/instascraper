@@ -2,11 +2,13 @@ import React, { useState, useEffect } from 'react';
 import api from './api';
 import ScrapeTab from './pages/ScrapeTab';
 import LibraryTab from './pages/LibraryTab';
+import EngagementTab from './pages/EngagementTab';
 import LoginPage from './components/LoginPage';
 
 const TABS = [
   { id: 'scrape', label: 'Scrape New Content' },
   { id: 'library', label: 'Content Library' },
+  { id: 'engagement', label: 'Engagement' },
 ];
 
 export default function App() {
@@ -97,7 +99,9 @@ export default function App() {
 
       {/* Content */}
       <main className="max-w-7xl mx-auto px-4 sm:px-6 py-6">
-        {activeTab === 'scrape' ? <ScrapeTab /> : <LibraryTab />}
+        {activeTab === 'scrape' && <ScrapeTab />}
+        {activeTab === 'library' && <LibraryTab />}
+        {activeTab === 'engagement' && <EngagementTab />}
       </main>
     </div>
   );

@@ -14,6 +14,8 @@ export default function FilterBar({ filters, accounts, total, onChange, onExport
           <option value="oldest">Oldest</option>
           <option value="most_viewed">Most Viewed</option>
           <option value="most_liked">Most Liked</option>
+          <option value="highest_er">Highest ER%</option>
+          <option value="lowest_er">Lowest ER%</option>
         </select>
 
         {/* Tag Filter */}

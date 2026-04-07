@@ -30,6 +30,13 @@ function formatDate(d) {
   return new Date(d).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
 }
 
+const ER_COLORS = {
+  Viral: 'bg-red-500/80 text-white',
+  Good: 'bg-green-500/80 text-white',
+  Average: 'bg-yellow-500/80 text-gray-900',
+  Low: 'bg-gray-600/80 text-gray-300',
+};
+
 export default function ContentCard({ post, creatorTypes = {}, onUpdate }) {
   const [expanded, setExpanded] = useState(false);
   const [notes, setNotes] = useState(post.notes || '');
@@ -115,6 +122,13 @@ export default function ContentCard({ post, creatorTypes = {}, onUpdate }) {
             {tagBadge.icon} {tagBadge.label}
           </div>
         )}
+
+        {/* ER badge */}
+        {post.er_label && (
+          <div className={`absolute top-2 left-2 ${ER_COLORS[post.er_label] || ER_COLORS.Low} px-2 py-0.5 rounded-full text-xs font-bold`}>
+            {post.er_percent}% ER
+          </div>
+        )}
       </div>
 
       <div className="p-3 space-y-2.5">
@@ -139,6 +153,14 @@ export default function ContentCard({ post, creatorTypes = {}, onUpdate }) {
             </svg>
             {formatCount(post.comment_count)}
           </span>
+          {post.followers_at_scrape > 0 && (
+            <span title="Followers at scrape time" className="flex items-center gap-1">
+              <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                <path strokeLinecap="round" strokeLinejoin="round" d="M17 20h5v-2a3 3 0 00-5.356-1.857M17 20H7m10 0v-2c0-.656-.126-1.283-.356-1.857M7 20H2v-2a3 3 0 015.356-1.857M7 20v-2c0-.656.126-1.283.356-1.857m0 0a5.002 5.002 0 019.288 0M15 7a3 3 0 11-6 0 3 3 0 016 0z" />
+              </svg>
+              {formatCount(post.followers_at_scrape)}
+            </span>
+          )}
         </div>
 
         {/* Handle + Date */}
