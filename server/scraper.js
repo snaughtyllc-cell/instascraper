@@ -1,267 +1,251 @@
 const fetch = require('node-fetch');
-const db = require('./db');
+const pool = require('./db');
 
 const APIFY_BASE = 'https://api.apify.com/v2';
 const REEL_ACTOR_ID = 'apify~instagram-reel-scraper';
 const GENERIC_ACTOR_ID = 'apify~instagram-scraper';
 
 function calcER(likes, comments, followers) {
-  if (!followers || followers <= 0) return { er_percent: 0, er_label: null };
-  const er = ((likes + comments) / followers) * 100;
-  let label = 'Low';
-  if (er >= 6) label = 'Viral';
-  else if (er >= 3) label = 'Good';
-  else if (er >= 1) label = 'Average';
-  return { er_percent: Math.round(er * 100) / 100, er_label: label };
+    if (!followers || followers <= 0) return { er_percent: 0, er_label: null };
+    const er = ((likes + comments) / followers) * 100;
+    let label = 'Low';
+    if (er >= 6) label = 'Viral';
+    else if (er >= 3) label = 'Good';
+    else if (er >= 1) label = 'Average';
+    return { er_percent: Math.round(er * 100) / 100, er_label: label };
 }
 
 class InstagramScraper {
-  constructor(apiKey) {
-    this.apiKey = apiKey;
-  }
+    constructor(apiKey) {
+          this.apiKey = apiKey;
+    }
 
   async startScrapeJob({ query, queryType, minLikes, minViews, startDate, endDate }) {
-    const job = db.prepare(`
-      INSERT INTO scrape_jobs (query, query_type, status)
-      VALUES (?, ?, 'running')
-    `).run(query, queryType);
+        const result = await pool.query(
+                `INSERT INTO scrape_jobs (query, query_type, status) VALUES ($1, $2, 'running') RETURNING id`,
+                [query, queryType]
+              );
+        const jobId = result.rows[0].id;
 
-    const jobId = job.lastInsertRowid;
+      try {
+              const { actorId, input } = this._buildInput(query, queryType);
+              const run = await this._startApifyRun(actorId, input);
 
-    try {
-      const { actorId, input } = this._buildInput(query, queryType);
-      const run = await this._startApifyRun(actorId, input);
+          await pool.query('UPDATE scrape_jobs SET apify_run_id = $1 WHERE id = $2', [run.id, jobId]);
 
-      db.prepare('UPDATE scrape_jobs SET apify_run_id = ? WHERE id = ?')
-        .run(run.id, jobId);
-
-      // Poll for completion in background
-      this._pollAndStore(run.id, jobId, { minLikes, minViews, startDate, endDate, query });
-
-      return { jobId, apifyRunId: run.id, status: 'running' };
-    } catch (err) {
-      db.prepare('UPDATE scrape_jobs SET status = ?, error = ? WHERE id = ?')
-        .run('failed', err.message, jobId);
-      throw err;
-    }
+          this._pollAndStore(run.id, jobId, { minLikes, minViews, startDate, endDate, query });
+              return { jobId, apifyRunId: run.id, status: 'running' };
+      } catch (err) {
+              await pool.query('UPDATE scrape_jobs SET status = $1, error = $2 WHERE id = $3', ['failed', err.message, jobId]);
+              throw err;
+      }
   }
 
   _buildInput(query, queryType) {
-    if (queryType === 'username') {
-      // Use the dedicated reel scraper for usernames
-      return {
-        actorId: REEL_ACTOR_ID,
-        input: {
-          username: [query.replace('@', '')],
-          resultsLimit: 50,
-        },
-      };
-    } else if (queryType === 'hashtag') {
-      return {
-        actorId: GENERIC_ACTOR_ID,
-        input: {
-          directUrls: [`https://www.instagram.com/explore/tags/${query.replace('#', '')}/`],
-          resultsLimit: 50,
-          resultsType: 'posts',
-        },
-      };
-    } else if (queryType === 'url') {
-      return {
-        actorId: REEL_ACTOR_ID,
-        input: {
-          directUrls: [query],
-          resultsLimit: 50,
-        },
-      };
-    }
-    return { actorId: REEL_ACTOR_ID, input: { username: [query], resultsLimit: 50 } };
+        if (queryType === 'username') {
+                return {
+                          actorId: REEL_ACTOR_ID,
+                          input: { username: [query.replace('@', '')], resultsLimit: 50 },
+                };
+        } else if (queryType === 'hashtag') {
+                return {
+                          actorId: GENERIC_ACTOR_ID,
+                          input: {
+                                      directUrls: [`https://www.instagram.com/explore/tags/${query.replace('#', '')}/`],
+                                      resultsLimit: 50,
+                                      resultsType: 'posts',
+                          },
+                };
+        } else if (queryType === 'url') {
+                return {
+                          actorId: REEL_ACTOR_ID,
+                          input: { directUrls: [query], resultsLimit: 50 },
+                };
+        }
+        return { actorId: REEL_ACTOR_ID, input: { username: [query], resultsLimit: 50 } };
   }
 
   async _startApifyRun(actorId, input) {
-    const res = await fetch(
-      `${APIFY_BASE}/acts/${actorId}/runs?token=${this.apiKey}`,
-      {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(input),
-      }
-    );
-
-    if (!res.ok) {
-      const text = await res.text();
-      throw new Error(`Apify API error: ${res.status} — ${text}`);
-    }
-
-    const data = await res.json();
-    return data.data;
+        const res = await fetch(
+                `${APIFY_BASE}/acts/${actorId}/runs?token=${this.apiKey}`,
+          {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(input),
+          }
+              );
+        if (!res.ok) {
+                const text = await res.text();
+                throw new Error(`Apify API error: ${res.status} — ${text}`);
+        }
+        const data = await res.json();
+        return data.data;
   }
 
   async _pollAndStore(runId, jobId, filters) {
-    const maxAttempts = 60;
-    let attempts = 0;
-    const resultsLimit = 50;
+        const maxAttempts = 60;
+        let attempts = 0;
+        const resultsLimit = 50;
 
-    const poll = async () => {
-      attempts++;
-      try {
-        const res = await fetch(
-          `${APIFY_BASE}/actor-runs/${runId}?token=${this.apiKey}`
-        );
-        const data = await res.json();
-        const run = data.data;
-        const status = run.status;
+      await pool.query(
+              'UPDATE scrape_jobs SET progress = 5, status_message = $1 WHERE id = $2',
+              ['Starting Apify actor...', jobId]
+            );
 
-        // Calculate progress from Apify stats
-        const statusMessage = run.statusMessage || '';
-        let progress = Math.min(Math.round((attempts / maxAttempts) * 80), 80); // fallback: time-based estimate
+      const poll = async () => {
+              attempts++;
+              try {
+                        const res = await fetch(`${APIFY_BASE}/actor-runs/${runId}?token=${this.apiKey}`);
+                        const data = await res.json();
+                        const run = data.data;
+                        const status = run.status;
+                        const statusMessage = run.statusMessage || '';
 
-        if (run.stats) {
-          const itemCount = run.stats.itemCount || run.stats.pagesLoaded || 0;
-          if (itemCount > 0) {
-            progress = Math.min(Math.round((itemCount / resultsLimit) * 90), 90);
-          }
-        }
+                let progress = Math.min(Math.round((attempts / maxAttempts) * 80), 80);
+                        if (run.stats) {
+                                    const itemCount = run.stats.itemCount || run.stats.pagesLoaded || 0;
+                                    if (itemCount > 0) {
+                                                  progress = Math.min(Math.round((itemCount / resultsLimit) * 90), 90);
+                                    }
+                        }
 
-        if (status === 'SUCCEEDED') {
-          db.prepare('UPDATE scrape_jobs SET progress = 95, status_message = ? WHERE id = ?')
-            .run('Saving results...', jobId);
-          await this._fetchAndStoreResults(runId, jobId, filters);
-          return;
-        } else if (status === 'FAILED' || status === 'ABORTED' || status === 'TIMED-OUT') {
-          db.prepare('UPDATE scrape_jobs SET status = ?, error = ?, progress = ?, status_message = ?, completed_at = datetime(\'now\') WHERE id = ?')
-            .run('failed', `Apify run ${status}`, progress, statusMessage, jobId);
-          return;
-        }
+                if (status === 'SUCCEEDED') {
+                            await pool.query(
+                                          'UPDATE scrape_jobs SET progress = 95, status_message = $1 WHERE id = $2',
+                                          ['Saving results...', jobId]
+                                        );
+                            await this._fetchAndStoreResults(runId, jobId, filters);
+                            return;
+                } else if (status === 'FAILED' || status === 'ABORTED' || status === 'TIMED-OUT') {
+                            await pool.query(
+                                          `UPDATE scrape_jobs SET status = $1, error = $2, progress = $3, status_message = $4, completed_at = TO_CHAR(NOW(), 'YYYY-MM-DD"T"HH24:MI:SS"Z"') WHERE id = $5`,
+                                          ['failed', `Apify run ${status}`, progress, statusMessage, jobId]
+                                        );
+                            return;
+                }
 
-        // Update progress while running
-        db.prepare('UPDATE scrape_jobs SET progress = ?, status_message = ? WHERE id = ?')
-          .run(progress, statusMessage || `Scraping... (poll ${attempts}/${maxAttempts})`, jobId);
+                await pool.query(
+                            'UPDATE scrape_jobs SET progress = $1, status_message = $2 WHERE id = $3',
+                            [progress, statusMessage || `Scraping... (poll ${attempts}/${maxAttempts})`, jobId]
+                          );
 
-        if (attempts < maxAttempts) {
-          setTimeout(poll, 5000);
-        } else {
-          db.prepare('UPDATE scrape_jobs SET status = ?, error = ?, progress = ?, completed_at = datetime(\'now\') WHERE id = ?')
-            .run('failed', 'Polling timeout', progress, jobId);
-        }
-      } catch (err) {
-        db.prepare('UPDATE scrape_jobs SET status = ?, error = ?, completed_at = datetime(\'now\') WHERE id = ?')
-          .run('failed', err.message, jobId);
-      }
-    };
+                if (attempts < maxAttempts) {
+                            setTimeout(poll, 5000);
+                } else {
+                            await pool.query(
+                                          `UPDATE scrape_jobs SET status = $1, error = $2, progress = $3, completed_at = TO_CHAR(NOW(), 'YYYY-MM-DD"T"HH24:MI:SS"Z"') WHERE id = $4`,
+                                          ['failed', 'Polling timeout', progress, jobId]
+                                        );
+                }
+              } catch (err) {
+                        await pool.query(
+                                    `UPDATE scrape_jobs SET status = $1, error = $2, completed_at = TO_CHAR(NOW(), 'YYYY-MM-DD"T"HH24:MI:SS"Z"') WHERE id = $3`,
+                                    ['failed', err.message, jobId]
+                                  );
+              }
+      };
 
-    // Initial progress
-    db.prepare('UPDATE scrape_jobs SET progress = 5, status_message = ? WHERE id = ?')
-      .run('Starting Apify actor...', jobId);
-
-    setTimeout(poll, 10000);
+      setTimeout(poll, 10000);
   }
 
   async _fetchAndStoreResults(runId, jobId, filters) {
-    const res = await fetch(
-      `${APIFY_BASE}/actor-runs/${runId}/dataset/items?token=${this.apiKey}`
-    );
-    const items = await res.json();
+        const res = await fetch(`${APIFY_BASE}/actor-runs/${runId}/dataset/items?token=${this.apiKey}`);
+        const items = await res.json();
 
-    // Extract followers count from the first item that has it (same account for username scrapes)
-    let followersCount = 0;
-    for (const item of items) {
-      const fc = item.ownerFollowerCount || item.followersCount || item.owner?.followerCount || 0;
-      if (fc > 0) { followersCount = fc; break; }
-    }
-
-    const insert = db.prepare(`
-      INSERT OR IGNORE INTO posts
-        (shortcode, video_url, thumbnail_url, caption, like_count, comment_count, view_count, posted_at, account_handle, post_url, source_query, followers_at_scrape, er_percent, er_label)
-      VALUES
-        (@shortcode, @videoUrl, @thumbnailUrl, @caption, @likeCount, @commentCount, @viewCount, @postedAt, @accountHandle, @postUrl, @sourceQuery, @followersAtScrape, @erPercent, @erLabel)
-    `);
-
-    let count = 0;
-    let matched = 0;
-    const insertMany = db.transaction((posts) => {
-      for (const post of posts) {
-        if (this._passesFilters(post, filters)) {
-          matched++;
-          const result = insert.run(post);
-          if (result.changes > 0) count++;
+      let followersCount = 0;
+        for (const item of items) {
+                const fc = item.ownerFollowerCount || item.followersCount || item.owner?.followerCount || 0;
+                if (fc > 0) { followersCount = fc; break; }
         }
+
+      let count = 0;
+        let matched = 0;
+
+      for (const item of items) {
+              const likes = (item.likesCount != null && item.likesCount >= 0) ? item.likesCount : (item.likes || 0);
+              const comments = (item.commentsCount != null && item.commentsCount >= 0) ? item.commentsCount : (item.comments || 0);
+              const views = item.videoPlayCount || item.videoViewCount || 0;
+
+          let postedAt = null;
+              if (item.timestamp) {
+                        postedAt = typeof item.timestamp === 'string' ? item.timestamp : new Date(item.timestamp * 1000).toISOString();
+              } else if (item.takenAtTimestamp) {
+                        postedAt = new Date(item.takenAtTimestamp * 1000).toISOString();
+              }
+
+          const itemFollowers = item.ownerFollowerCount || item.followersCount || item.owner?.followerCount || followersCount;
+              const { er_percent, er_label } = calcER(likes, comments, itemFollowers);
+
+          const post = {
+                    _type: item.type || 'Unknown',
+                    _productType: item.productType || '',
+                    shortcode: item.shortCode || item.id || `post_${Date.now()}_${Math.random().toString(36).slice(2)}`,
+                    videoUrl: item.videoUrl || null,
+                    thumbnailUrl: item.displayUrl || (item.images && item.images[0]) || null,
+                    caption: item.caption || '',
+                    likeCount: likes,
+                    commentCount: comments,
+                    viewCount: views,
+                    postedAt,
+                    accountHandle: item.ownerUsername || item.owner?.username || '',
+                    postUrl: item.url || (item.shortCode ? `https://www.instagram.com/p/${item.shortCode}/` : ''),
+                    sourceQuery: filters.query || '',
+                    followersAtScrape: itemFollowers,
+                    erPercent: er_percent,
+                    erLabel: er_label,
+          };
+
+          if (!this._passesFilters(post, filters)) continue;
+              matched++;
+
+          try {
+                    const insertResult = await pool.query(`
+                              INSERT INTO posts (shortcode, video_url, thumbnail_url, caption, like_count, comment_count,
+                                          view_count, posted_at, account_handle, post_url, source_query, followers_at_scrape, er_percent, er_label)
+                                                    VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
+                                                              ON CONFLICT (shortcode) DO NOTHING
+                                                                      `, [
+                                post.shortcode, post.videoUrl, post.thumbnailUrl, post.caption,
+                                post.likeCount, post.commentCount, post.viewCount, post.postedAt,
+                                post.accountHandle, post.postUrl, post.sourceQuery,
+                                post.followersAtScrape, post.erPercent, post.erLabel,
+                              ]);
+                    if (insertResult.rowCount > 0) count++;
+          } catch (e) {
+                    // skip duplicates
+          }
       }
-    });
 
-    const mapped = items.map((item) => {
-      // Handle -1 values (Apify uses -1 for "unavailable")
-      const likes = (item.likesCount != null && item.likesCount >= 0) ? item.likesCount : (item.likes || 0);
-      const comments = (item.commentsCount != null && item.commentsCount >= 0) ? item.commentsCount : (item.comments || 0);
-      // Prefer videoPlayCount (total plays) > videoViewCount > 0
-      const views = item.videoPlayCount || item.videoViewCount || 0;
-
-      // Parse timestamp — Apify returns ISO string or unix seconds
-      let postedAt = null;
-      if (item.timestamp) {
-        postedAt = typeof item.timestamp === 'string' ? item.timestamp : new Date(item.timestamp * 1000).toISOString();
-      } else if (item.takenAtTimestamp) {
-        postedAt = new Date(item.takenAtTimestamp * 1000).toISOString();
-      }
-
-      // Per-item followers (prefer item-level, fall back to account-level)
-      const itemFollowers = item.ownerFollowerCount || item.followersCount || item.owner?.followerCount || followersCount;
-
-      // Calculate engagement rate
-      const { er_percent, er_label } = calcER(likes, comments, itemFollowers);
-
-      return {
-        _type: item.type || 'Unknown',
-        _productType: item.productType || '',
-        shortcode: item.shortCode || item.id || `post_${Date.now()}_${Math.random().toString(36).slice(2)}`,
-        videoUrl: item.videoUrl || null,
-        thumbnailUrl: item.displayUrl || (item.images && item.images[0]) || null,
-        caption: item.caption || '',
-        likeCount: likes,
-        commentCount: comments,
-        viewCount: views,
-        postedAt,
-        accountHandle: item.ownerUsername || item.owner?.username || '',
-        postUrl: item.url || (item.shortCode ? `https://www.instagram.com/p/${item.shortCode}/` : ''),
-        sourceQuery: filters.query || '',
-        followersAtScrape: itemFollowers,
-        erPercent: er_percent,
-        erLabel: er_label,
-      };
-    });
-
-    insertMany(mapped);
-
-    db.prepare('UPDATE scrape_jobs SET status = ?, posts_found = ?, progress = 100, status_message = ?, completed_at = datetime(\'now\') WHERE id = ?')
-      .run('completed', count, `Done — ${count} new, ${matched} reels matched (${items.length} total scraped)`, jobId);
+      await pool.query(
+              `UPDATE scrape_jobs SET status = $1, posts_found = $2, progress = 100, status_message = $3, completed_at = TO_CHAR(NOW(), 'YYYY-MM-DD"T"HH24:MI:SS"Z"') WHERE id = $4`,
+              ['completed', count, `Done — ${count} new, ${matched} reels matched (${items.length} total scraped)`, jobId]
+            );
   }
 
   _passesFilters(post, filters) {
-    // Only allow reels/videos
-    const isVideo = post._type === 'Video' || post._productType === 'clips' || !!post.videoUrl;
-    if (!isVideo) return false;
-
-    const likes = post.likeCount || 0;
-    const views = post.viewCount || 0;
-
-    if (filters.minLikes && likes < filters.minLikes) return false;
-    if (filters.minViews && views < filters.minViews) return false;
-
-    if (filters.startDate && post.postedAt) {
-      if (new Date(post.postedAt) < new Date(filters.startDate)) return false;
-    }
-    if (filters.endDate && post.postedAt) {
-      if (new Date(post.postedAt) > new Date(filters.endDate)) return false;
-    }
-
-    return true;
+        const isVideo = post._type === 'Video' || post._productType === 'clips' || !!post.videoUrl;
+        if (!isVideo) return false;
+        const likes = post.likeCount || 0;
+        const views = post.viewCount || 0;
+        if (filters.minLikes && likes < filters.minLikes) return false;
+        if (filters.minViews && views < filters.minViews) return false;
+        if (filters.startDate && post.postedAt) {
+                if (new Date(post.postedAt) < new Date(filters.startDate)) return false;
+        }
+        if (filters.endDate && post.postedAt) {
+                if (new Date(post.postedAt) > new Date(filters.endDate)) return false;
+        }
+        return true;
   }
 
-  getJobStatus(jobId) {
-    return db.prepare('SELECT * FROM scrape_jobs WHERE id = ?').get(jobId);
+  async getJobStatus(jobId) {
+        const result = await pool.query('SELECT * FROM scrape_jobs WHERE id = $1', [jobId]);
+        return result.rows[0] || null;
   }
 
-  getAllJobs() {
-    return db.prepare('SELECT * FROM scrape_jobs ORDER BY created_at DESC LIMIT 20').all();
+  async getAllJobs() {
+        const result = await pool.query('SELECT * FROM scrape_jobs ORDER BY created_at DESC LIMIT 20');
+        return result.rows;
   }
 }
 
