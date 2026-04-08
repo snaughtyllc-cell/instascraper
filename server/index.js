@@ -380,7 +380,8 @@ app.post('/engagement/backfill-bulk', async (req, res) => {
 
 app.get('/engagement/summary/:handle', async (req, res) => {
   const handle = req.params.handle;
-  const result = await pool.query(`SELECT shortcode, posted_at, like_count, comment_count, followers_at_scrape, er_percent, er_label FROM posts WHERE account_handle = $1 AND (archived = 0 OR archived IS NULL) AND (soft_deleted = 0 OR soft_deleted IS NULL) ORDER BY posted_at ASC`, [handle]);
+  const thirtyDaysAgo = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString();
+  const result = await pool.query(`SELECT shortcode, posted_at, like_count, comment_count, followers_at_scrape, er_percent, er_label FROM posts WHERE account_handle = $1 AND (archived = 0 OR archived IS NULL) AND (soft_deleted = 0 OR soft_deleted IS NULL) AND posted_at >= $2 ORDER BY posted_at ASC`, [handle, thirtyDaysAgo]);
   const posts = result.rows;
   if (posts.length === 0) return res.json({ handle, postCount: 0, avgER: 0, erLabel: null, best: null, worst: null, trend: 'Stable' });
 
@@ -415,7 +416,8 @@ app.get('/engagement/summary/:handle', async (req, res) => {
 
 app.get('/engagement/leaderboard', async (req, res) => {
   try {
-  const result = await pool.query(`SELECT account_handle, COUNT(*) as post_count, ROUND(AVG(er_percent)::numeric, 2) as avg_er, MAX(er_percent) as best_er, MIN(er_percent) as worst_er, MAX(followers_at_scrape) as followers FROM posts WHERE account_handle != '' AND (archived = 0 OR archived IS NULL) AND (soft_deleted = 0 OR soft_deleted IS NULL) GROUP BY account_handle ORDER BY avg_er DESC`);
+  const thirtyDaysAgo = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString();
+  const result = await pool.query(`SELECT account_handle, COUNT(*) as post_count, ROUND(AVG(er_percent)::numeric, 2) as avg_er, MAX(er_percent) as best_er, MIN(er_percent) as worst_er, MAX(followers_at_scrape) as followers FROM posts WHERE account_handle != '' AND (archived = 0 OR archived IS NULL) AND (soft_deleted = 0 OR soft_deleted IS NULL) AND posted_at >= $1 GROUP BY account_handle ORDER BY avg_er DESC`, [thirtyDaysAgo]);
   const labeled = result.rows.map(a => {
     const avgEr = parseFloat(a.avg_er) || 0;
     let label = 'Low';
