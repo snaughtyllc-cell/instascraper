@@ -115,6 +115,19 @@ app.get('/scrape/jobs/:id', async (req, res) => {
   res.json(job);
 });
 
+app.post('/scrape/import-urls', async (req, res) => {
+  const { urls } = req.body;
+  if (!urls || !Array.isArray(urls) || urls.length === 0) return res.status(400).json({ error: 'urls array required' });
+  if (urls.length > 20) return res.status(400).json({ error: 'Max 20 URLs at once' });
+  if (!process.env.APIFY_API_KEY) return res.status(400).json({ error: 'APIFY_API_KEY not configured' });
+  try {
+    const result = await scraper.importByUrls(urls);
+    res.json(result);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // ─── Content Routes ─────────────────────────────────────────────
 
 app.get('/content', async (req, res) => {

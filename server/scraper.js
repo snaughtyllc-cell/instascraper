@@ -522,6 +522,69 @@ class InstagramScraper {
     return { followers, bio, avgEr, postsPerWeek, contentBreakdown: parts.join(', '), topHashtags };
   }
 
+  async importByUrls(urls) {
+    if (!urls || urls.length === 0) throw new Error('No URLs provided');
+    const cleanUrls = urls.map(u => u.trim()).filter(Boolean);
+    if (cleanUrls.length === 0) throw new Error('No valid URLs');
+
+    // Use generic scraper with directUrls
+    const run = await this._startApifyRun(GENERIC_ACTOR_ID, {
+      directUrls: cleanUrls,
+      resultsType: 'posts',
+      resultsLimit: cleanUrls.length,
+    });
+
+    const items = await this._waitForRun(run.id, 40);
+    if (!items || items.length === 0) return { imported: 0, total: cleanUrls.length };
+
+    let followersCount = 0;
+    for (const item of items) {
+      const fc = item.ownerFollowerCount || item.followersCount || item.owner?.followerCount || 0;
+      if (fc > 0) { followersCount = fc; break; }
+    }
+
+    let count = 0;
+    for (const item of items) {
+      const likes = (item.likesCount != null && item.likesCount >= 0) ? item.likesCount : (item.likes || 0);
+      const comments = (item.commentsCount != null && item.commentsCount >= 0) ? item.commentsCount : (item.comments || 0);
+      const views = item.videoPlayCount || item.videoViewCount || 0;
+
+      let postedAt = null;
+      if (item.timestamp) {
+        postedAt = typeof item.timestamp === 'string' ? item.timestamp : new Date(item.timestamp * 1000).toISOString();
+      } else if (item.takenAtTimestamp) {
+        postedAt = new Date(item.takenAtTimestamp * 1000).toISOString();
+      }
+
+      const itemFollowers = item.ownerFollowerCount || item.followersCount || item.owner?.followerCount || followersCount;
+      const { er_percent, er_label } = calcER(likes, comments, itemFollowers);
+
+      const shortcode = item.shortCode || item.id || `import_${Date.now()}_${Math.random().toString(36).slice(2)}`;
+
+      try {
+        const insertResult = await pool.query(`
+          INSERT INTO posts (shortcode, video_url, thumbnail_url, caption, like_count, comment_count,
+            view_count, posted_at, account_handle, post_url, source_query, followers_at_scrape, er_percent, er_label)
+          VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
+          ON CONFLICT (shortcode) DO NOTHING
+        `, [
+          shortcode,
+          item.videoUrl || null,
+          item.displayUrl || (item.images && item.images[0]) || null,
+          item.caption || '',
+          likes, comments, views, postedAt,
+          item.ownerUsername || item.owner?.username || '',
+          item.url || (item.shortCode ? `https://www.instagram.com/p/${item.shortCode}/` : ''),
+          'manual_import',
+          itemFollowers, er_percent, er_label,
+        ]);
+        if (insertResult.rowCount > 0) count++;
+      } catch (e) { /* skip duplicates */ }
+    }
+
+    return { imported: count, total: cleanUrls.length, scraped: items.length };
+  }
+
   async getJobStatus(jobId) {
     const result = await pool.query('SELECT * FROM scrape_jobs WHERE id = $1', [jobId]);
     return result.rows[0] || null;

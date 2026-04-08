@@ -9,6 +9,7 @@ export const triggerScrape = (data) => api.post('/scrape', data);
 export const getScrapeJobs = () => api.get('/scrape/jobs');
 export const getJobStatus = (id) => api.get(`/scrape/jobs/${id}`);
 
+export const importUrls = (urls) => api.post('/scrape/import-urls', { urls });
 export const getContent = (params) => api.get('/content', { params });
 export const tagPost = (id, tag) => api.post(`/content/${id}/tag`, { tag });
 export const saveNotes = (id, notes) => api.post(`/content/${id}/notes`, { notes });
