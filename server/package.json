@@ -17,6 +17,7 @@
     "json2csv": "^6.0.0-alpha.2",
     "node-cron": "^4.2.1",
     "node-fetch": "^2.7.0",
+    "pdfkit": "^0.18.0",
     "pg": "^8.13.0"
   }
 }

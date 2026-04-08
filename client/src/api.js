@@ -65,5 +65,6 @@ export const getDeliveryLog = (modelId) => api.get(`/ideas/delivery-log/${modelI
 export const exportIdeas = (modelId, format = 'csv') => {
   window.open(`${api.defaults.baseURL}/ideas/export/${modelId}?format=${format}`, '_blank');
 };
+export const exportIdeasToNotion = (modelId, pageId) => api.post(`/ideas/export-notion/${modelId}`, { pageId });
 
 export default api;

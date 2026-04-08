@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useCallback } from 'react';
-import { getModels, createModel, updateModel, deleteModel, getAvailableNiches, generateIdeas, getIdeas, exportIdeas } from '../api';
+import { getModels, createModel, updateModel, deleteModel, getAvailableNiches, generateIdeas, getIdeas, exportIdeas, exportIdeasToNotion } from '../api';
 
 const DELIVERY_METHODS = [
   { value: 'whatsapp', label: 'WhatsApp' },
@@ -19,6 +19,7 @@ export default function ModelsTab() {
   const [expandedModel, setExpandedModel] = useState(null);
   const [ideas, setIdeas] = useState({});
   const [generating, setGenerating] = useState({});
+  const [exportOpen, setExportOpen] = useState(null);
   const [form, setForm] = useState({
     name: '', primary_niche: '', secondary_niches: '',
     delivery_method: 'whatsapp', delivery_contact: '', delivery_day: 'monday',
@@ -202,7 +203,7 @@ export default function ModelsTab() {
 
       <div className="space-y-4">
         {models.map(model => (
-          <div key={model.id} className="bg-gray-900 border border-gray-800 rounded-xl overflow-hidden">
+          <div key={model.id} className="bg-gray-900 border border-gray-800 rounded-xl">
             {/* Model Header */}
             <div className="p-5 flex items-center justify-between">
               <div className="flex items-center gap-4">
@@ -236,13 +237,36 @@ export default function ModelsTab() {
                 >
                   {expandedModel === model.id ? 'Hide Ideas' : 'View Ideas'}
                 </button>
-                <button
-                  onClick={() => exportIdeas(model.id)}
-                  className="px-3 py-1.5 bg-gray-800 text-gray-300 text-sm rounded-lg hover:bg-gray-700"
-                  title="Export ideas as CSV"
-                >
-                  Export
-                </button>
+                <div className="relative">
+                  <button
+                    onClick={() => setExportOpen(exportOpen === model.id ? null : model.id)}
+                    className="px-3 py-1.5 bg-gray-800 text-gray-300 text-sm rounded-lg hover:bg-gray-700"
+                  >
+                    Export &#9662;
+                  </button>
+                  {exportOpen === model.id && (
+                    <div className="absolute right-0 top-full mt-1 w-44 bg-gray-800 border border-gray-700 rounded-lg shadow-xl z-50 overflow-hidden">
+                      <button onClick={() => { exportIdeas(model.id, 'pdf'); setExportOpen(null); }}
+                        className="w-full text-left px-4 py-2 text-sm text-gray-200 hover:bg-gray-700">PDF</button>
+                      <button onClick={() => { exportIdeas(model.id, 'csv'); setExportOpen(null); }}
+                        className="w-full text-left px-4 py-2 text-sm text-gray-200 hover:bg-gray-700">CSV</button>
+                      <button onClick={() => { exportIdeas(model.id, 'json'); setExportOpen(null); }}
+                        className="w-full text-left px-4 py-2 text-sm text-gray-200 hover:bg-gray-700">JSON</button>
+                      <button onClick={async () => {
+                        setExportOpen(null);
+                        const pageId = window.prompt('Enter your Notion page ID:');
+                        if (!pageId) return;
+                        try {
+                          await exportIdeasToNotion(model.id, pageId);
+                          alert('Ideas sent to Notion!');
+                        } catch (err) {
+                          alert('Notion export failed: ' + (err.response?.data?.error || err.message));
+                        }
+                      }}
+                        className="w-full text-left px-4 py-2 text-sm text-gray-200 hover:bg-gray-700 border-t border-gray-700">Send to Notion</button>
+                    </div>
+                  )}
+                </div>
                 <button onClick={() => handleEdit(model)} className="p-1.5 text-gray-500 hover:text-white">
                   <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}><path strokeLinecap="round" strokeLinejoin="round" d="M15.232 5.232l3.536 3.536m-2.036-5.036a2.5 2.5 0 113.536 3.536L6.5 21.036H3v-3.572L16.732 3.732z" /></svg>
                 </button>

@@ -546,6 +546,61 @@ app.get('/ideas/export/:modelId', async (req, res) => {
     [Number(req.params.modelId)]
   );
   const format = req.query.format || 'csv';
+
+  if (format === 'pdf') {
+    const PDFDocument = require('pdfkit');
+    const doc = new PDFDocument({ margin: 50 });
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader('Content-Disposition', `attachment; filename=${model.name.toLowerCase()}-ideas.pdf`);
+    doc.pipe(res);
+
+    // Title
+    doc.fontSize(22).font('Helvetica-Bold').text(`Content Ideas — ${model.name}`, { align: 'center' });
+    doc.fontSize(10).font('Helvetica').fillColor('#666666')
+      .text(`${model.primary_niche}${model.secondary_niches ? ` + ${model.secondary_niches}` : ''} | Generated ${new Date().toLocaleDateString()}`, { align: 'center' });
+    doc.moveDown(1.5);
+
+    const ideas = result.rows.filter(r => !r.stale_warning || r.concept.length > 80);
+    ideas.forEach((idea, i) => {
+      // Check if we need a new page
+      if (doc.y > 650) doc.addPage();
+
+      // Idea number + format badge
+      doc.fontSize(14).font('Helvetica-Bold').fillColor('#000000')
+        .text(`${i + 1}. ${idea.concept}`);
+      doc.moveDown(0.3);
+
+      if (idea.format) {
+        doc.fontSize(9).font('Helvetica-Bold').fillColor('#4A90D9').text(`FORMAT: ${idea.format.toUpperCase()}`);
+      }
+      if (idea.hook_line) {
+        doc.fontSize(10).font('Helvetica-Oblique').fillColor('#333333').text(`Hook: "${idea.hook_line}"`);
+      }
+      if (idea.why_working) {
+        doc.fontSize(9).font('Helvetica').fillColor('#555555').text(`Why it works: ${idea.why_working}`);
+      }
+      if (idea.source_niche) {
+        doc.fontSize(9).font('Helvetica').fillColor('#888888').text(`Niche: ${idea.source_niche}`);
+      }
+      if (idea.source_post_ids) {
+        const urls = idea.source_post_ids.split(',').filter(Boolean);
+        urls.forEach((url, j) => {
+          const cleanUrl = url.trim();
+          doc.fontSize(8).font('Helvetica').fillColor('#7B61FF')
+            .text(`Reference ${j + 1}: ${cleanUrl}`, { link: cleanUrl.startsWith('http') ? cleanUrl : `https://www.instagram.com/reel/${cleanUrl}/`, underline: true });
+        });
+      }
+      doc.moveDown(1);
+      // Divider line
+      doc.strokeColor('#E0E0E0').lineWidth(0.5)
+        .moveTo(50, doc.y).lineTo(560, doc.y).stroke();
+      doc.moveDown(0.8);
+    });
+
+    doc.end();
+    return;
+  }
+
   if (format === 'csv') {
     const { Parser } = require('json2csv');
     const fields = ['concept', 'format', 'why_working', 'hook_line', 'source_niche', 'source_post_ids', 'status', 'created_at'];
@@ -557,6 +612,81 @@ app.get('/ideas/export/:modelId', async (req, res) => {
   }
   res.setHeader('Content-Disposition', `attachment; filename=${model.name.toLowerCase()}-ideas.json`);
   res.json(result.rows);
+});
+
+// Send ideas to Notion database
+app.post('/ideas/export-notion/:modelId', async (req, res) => {
+  const { pageId } = req.body;
+  const notionKey = process.env.NOTION_API_KEY;
+  if (!notionKey) return res.status(400).json({ error: 'NOTION_API_KEY not configured on server' });
+  if (!pageId) return res.status(400).json({ error: 'Notion page ID required' });
+
+  const modelResult = await pool.query('SELECT * FROM models WHERE id = $1', [Number(req.params.modelId)]);
+  const model = modelResult.rows[0];
+  if (!model) return res.status(404).json({ error: 'Model not found' });
+
+  const ideas = await pool.query(
+    'SELECT * FROM idea_cards WHERE model_id = $1 ORDER BY created_at DESC LIMIT 20',
+    [Number(req.params.modelId)]
+  );
+
+  try {
+    const children = [
+      { object: 'block', type: 'heading_2', heading_2: { rich_text: [{ text: { content: `Content Ideas — ${model.name} — ${new Date().toLocaleDateString()}` } }] } },
+    ];
+
+    for (const idea of ideas.rows) {
+      if (idea.stale_warning && idea.concept.length < 80) continue;
+      children.push({
+        object: 'block', type: 'callout',
+        callout: {
+          icon: { emoji: '💡' },
+          rich_text: [{ text: { content: `${idea.format ? `[${idea.format}] ` : ''}${idea.concept}` } }],
+        },
+      });
+      if (idea.hook_line) {
+        children.push({ object: 'block', type: 'quote', quote: { rich_text: [{ text: { content: `Hook: "${idea.hook_line}"` } }] } });
+      }
+      if (idea.why_working) {
+        children.push({ object: 'block', type: 'paragraph', paragraph: { rich_text: [{ text: { content: idea.why_working } }] } });
+      }
+      if (idea.source_post_ids) {
+        const urls = idea.source_post_ids.split(',').filter(Boolean);
+        const linkText = urls.map((u, i) => {
+          const url = u.trim().startsWith('http') ? u.trim() : `https://www.instagram.com/reel/${u.trim()}/`;
+          return { text: { content: `Reference ${i + 1}`, link: { url } } };
+        });
+        if (linkText.length > 0) {
+          // Add spaces between links
+          const richText = [];
+          linkText.forEach((lt, i) => {
+            if (i > 0) richText.push({ text: { content: '  |  ' } });
+            richText.push(lt);
+          });
+          children.push({ object: 'block', type: 'paragraph', paragraph: { rich_text: richText } });
+        }
+      }
+      children.push({ object: 'block', type: 'divider', divider: {} });
+    }
+
+    const notionRes = await fetch(`https://api.notion.com/v1/blocks/${pageId}/children`, {
+      method: 'PATCH',
+      headers: {
+        'Authorization': `Bearer ${notionKey}`,
+        'Notion-Version': '2022-06-28',
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ children }),
+    });
+
+    if (!notionRes.ok) {
+      const text = await notionRes.text();
+      throw new Error(`Notion API error: ${notionRes.status} — ${text}`);
+    }
+    res.json({ success: true, blocksAdded: children.length });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
 });
 
 // ─── Export Routes ──────────────────────────────────────────────
