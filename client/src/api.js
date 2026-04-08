@@ -23,8 +23,30 @@ export const exportContent = (format = 'json') => {
 
 export const getEngagementSummary = (handle) => api.get(`/engagement/summary/${handle}`);
 export const getEngagementLeaderboard = () => api.get('/engagement/leaderboard');
+export const getEngagementRollups = (handle) => api.get(`/engagement/rollups/${handle}`);
 export const exportEngagement = (handle, format = 'csv') => {
   window.open(`${api.defaults.baseURL}/engagement/export/${handle}?format=${format}`, '_blank');
 };
+
+// Tracked accounts
+export const getTrackedAccounts = () => api.get('/tracked');
+export const addTrackedAccount = (username, tags) => api.post('/tracked', { username, tags });
+export const updateTrackedAccount = (username, data) => api.patch(`/tracked/${username}`, data);
+export const removeTrackedAccount = (username) => api.delete(`/tracked/${username}`);
+export const scrapeNow = (username) => api.post(`/tracked/${username}/scrape`);
+
+// Suggested accounts
+export const getSuggestedAccounts = (params) => api.get('/suggested', { params });
+export const approveSuggested = (username) => api.post(`/suggested/${username}/approve`);
+export const dismissSuggested = (username) => api.post(`/suggested/${username}/dismiss`);
+export const snoozeSuggested = (username) => api.post(`/suggested/${username}/snooze`);
+
+// Delete log
+export const getDeleteLog = (params) => api.get('/delete-log', { params });
+export const restorePost = (id) => api.post(`/delete-log/${id}/restore`);
+
+// Scheduler
+export const getSchedulerStatus = () => api.get('/scheduler/status');
+export const triggerJob = (job) => api.post(`/scheduler/run/${job}`);
 
 export default api;

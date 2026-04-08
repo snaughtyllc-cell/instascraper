@@ -3,17 +3,23 @@ import api from './api';
 import ScrapeTab from './pages/ScrapeTab';
 import LibraryTab from './pages/LibraryTab';
 import EngagementTab from './pages/EngagementTab';
+import TrackedAccountsTab from './pages/TrackedAccountsTab';
+import SuggestedAccountsTab from './pages/SuggestedAccountsTab';
+import DeleteLogTab from './pages/DeleteLogTab';
 import LoginPage from './components/LoginPage';
 
 const TABS = [
-  { id: 'scrape', label: 'Scrape New Content' },
-  { id: 'library', label: 'Content Library' },
+  { id: 'tracked', label: 'Tracked' },
+  { id: 'scrape', label: 'Scrape' },
+  { id: 'library', label: 'Library' },
   { id: 'engagement', label: 'Engagement' },
+  { id: 'suggested', label: 'Suggested' },
+  { id: 'deletelog', label: 'Delete Log' },
 ];
 
 export default function App() {
-  const [activeTab, setActiveTab] = useState('library');
-  const [authState, setAuthState] = useState('loading'); // 'loading' | 'login' | 'app'
+  const [activeTab, setActiveTab] = useState('tracked');
+  const [authState, setAuthState] = useState('loading');
 
   useEffect(() => {
     checkAuth();
@@ -72,7 +78,7 @@ export default function App() {
                 <button
                   key={tab.id}
                   onClick={() => setActiveTab(tab.id)}
-                  className={`px-4 py-2 rounded-md text-sm font-medium transition-all ${
+                  className={`px-3 py-2 rounded-md text-sm font-medium transition-all ${
                     activeTab === tab.id
                       ? 'bg-gold text-gray-950'
                       : 'text-gray-400 hover:text-white hover:bg-gray-800'
@@ -99,9 +105,12 @@ export default function App() {
 
       {/* Content */}
       <main className="max-w-7xl mx-auto px-4 sm:px-6 py-6">
+        {activeTab === 'tracked' && <TrackedAccountsTab />}
         {activeTab === 'scrape' && <ScrapeTab />}
         {activeTab === 'library' && <LibraryTab />}
         {activeTab === 'engagement' && <EngagementTab />}
+        {activeTab === 'suggested' && <SuggestedAccountsTab />}
+        {activeTab === 'deletelog' && <DeleteLogTab />}
       </main>
     </div>
   );
