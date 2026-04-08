@@ -83,7 +83,7 @@ async function main() {
         console.log('  Example: node server/backfill-er.js sabrinasnowww 1200000');
   }
 
-  await pool.end();
+  if (pool.end) await pool.end();
 }
 
 main().catch(err => {

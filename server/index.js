@@ -317,6 +317,67 @@ app.post('/scheduler/run/:job', async (req, res) => {
 
 // ─── Engagement Routes ──────────────────────────────────────────
 
+// Backfill: set followers for an account and recalc ER for all posts
+app.post('/engagement/backfill', async (req, res) => {
+  try {
+    const { handle, followers } = req.body;
+    if (handle && followers) {
+      await pool.query('UPDATE posts SET followers_at_scrape = $1 WHERE account_handle = $2 AND (followers_at_scrape = 0 OR followers_at_scrape IS NULL)', [Number(followers), handle]);
+    }
+    // Recalc ER for all posts with followers
+    const postsResult = await pool.query('SELECT id, like_count, comment_count, followers_at_scrape FROM posts WHERE followers_at_scrape > 0');
+    let count = 0;
+    for (const post of postsResult.rows) {
+      const likes = post.like_count || 0;
+      const comments = post.comment_count || 0;
+      const f = post.followers_at_scrape;
+      if (f <= 0) continue;
+      const er = ((likes + comments) / f) * 100;
+      const erPercent = Math.round(er * 100) / 100;
+      let erLabel = 'Low';
+      if (er >= 6) erLabel = 'Viral';
+      else if (er >= 3) erLabel = 'Good';
+      else if (er >= 1) erLabel = 'Average';
+      await pool.query('UPDATE posts SET er_percent = $1, er_label = $2 WHERE id = $3', [erPercent, erLabel, post.id]);
+      count++;
+    }
+    res.json({ success: true, updated: count });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Bulk set followers for multiple accounts at once
+app.post('/engagement/backfill-bulk', async (req, res) => {
+  try {
+    const { accounts } = req.body; // [{ handle, followers }, ...]
+    if (!accounts || !Array.isArray(accounts)) return res.status(400).json({ error: 'accounts array required' });
+    for (const { handle, followers } of accounts) {
+      if (handle && followers) {
+        await pool.query('UPDATE posts SET followers_at_scrape = $1 WHERE account_handle = $2 AND (followers_at_scrape = 0 OR followers_at_scrape IS NULL)', [Number(followers), handle]);
+      }
+    }
+    // Recalc ER for all posts with followers
+    const postsResult = await pool.query('SELECT id, like_count, comment_count, followers_at_scrape FROM posts WHERE followers_at_scrape > 0');
+    let count = 0;
+    for (const post of postsResult.rows) {
+      const f = post.followers_at_scrape;
+      if (f <= 0) continue;
+      const er = (((post.like_count || 0) + (post.comment_count || 0)) / f) * 100;
+      const erPercent = Math.round(er * 100) / 100;
+      let erLabel = 'Low';
+      if (er >= 6) erLabel = 'Viral';
+      else if (er >= 3) erLabel = 'Good';
+      else if (er >= 1) erLabel = 'Average';
+      await pool.query('UPDATE posts SET er_percent = $1, er_label = $2 WHERE id = $3', [erPercent, erLabel, post.id]);
+      count++;
+    }
+    res.json({ success: true, updated: count });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 app.get('/engagement/summary/:handle', async (req, res) => {
   const handle = req.params.handle;
   const result = await pool.query(`SELECT shortcode, posted_at, like_count, comment_count, followers_at_scrape, er_percent, er_label FROM posts WHERE account_handle = $1 AND (archived = 0 OR archived IS NULL) AND (soft_deleted = 0 OR soft_deleted IS NULL) ORDER BY posted_at ASC`, [handle]);
