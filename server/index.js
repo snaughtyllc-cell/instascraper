@@ -537,6 +537,28 @@ app.get('/ideas/delivery-log/:modelId', async (req, res) => {
   res.json(result.rows);
 });
 
+app.get('/ideas/export/:modelId', async (req, res) => {
+  const modelResult = await pool.query('SELECT * FROM models WHERE id = $1', [Number(req.params.modelId)]);
+  const model = modelResult.rows[0];
+  if (!model) return res.status(404).json({ error: 'Model not found' });
+  const result = await pool.query(
+    'SELECT * FROM idea_cards WHERE model_id = $1 ORDER BY created_at DESC',
+    [Number(req.params.modelId)]
+  );
+  const format = req.query.format || 'csv';
+  if (format === 'csv') {
+    const { Parser } = require('json2csv');
+    const fields = ['concept', 'format', 'why_working', 'hook_line', 'source_niche', 'source_post_ids', 'status', 'created_at'];
+    const parser = new Parser({ fields });
+    const csv = parser.parse(result.rows);
+    res.setHeader('Content-Type', 'text/csv');
+    res.setHeader('Content-Disposition', `attachment; filename=${model.name.toLowerCase()}-ideas.csv`);
+    return res.send(csv);
+  }
+  res.setHeader('Content-Disposition', `attachment; filename=${model.name.toLowerCase()}-ideas.json`);
+  res.json(result.rows);
+});
+
 // ─── Export Routes ──────────────────────────────────────────────
 
 app.get('/export', async (req, res) => {

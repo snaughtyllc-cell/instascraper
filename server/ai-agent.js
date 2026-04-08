@@ -50,7 +50,7 @@ class ContentIdeaAgent {
          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
         [modelId, batchId, idea.concept, idea.format || '', idea.why_working || '',
          idea.hook_line || '', idea.source_niche || model.primary_niche,
-         idea.source_post_ids || '', idea.stale_warning || null]
+         Array.isArray(idea.source_posts) ? idea.source_posts.join(',') : (idea.source_post_ids || ''), idea.stale_warning || null]
       );
     }
 
@@ -141,7 +141,7 @@ class ContentIdeaAgent {
       : '';
 
     const postList = posts.slice(0, 25).map((p, i) =>
-      `${i + 1}. @${p.account_handle} [${p.niche || 'unknown'}] — ${(p.caption || '').slice(0, 120).replace(/\n/g, ' ')}... | Views: ${(p.view_count || 0).toLocaleString()} | Likes: ${(p.like_count || 0).toLocaleString()} | ER: ${p.er_percent || 0}%`
+      `${i + 1}. @${p.account_handle} [${p.niche || 'unknown'}] — ${(p.caption || '').slice(0, 120).replace(/\n/g, ' ')}... | Views: ${(p.view_count || 0).toLocaleString()} | Likes: ${(p.like_count || 0).toLocaleString()} | ER: ${p.er_percent || 0}% | URL: ${p.post_url || `https://www.instagram.com/reel/${p.shortcode}/`}`
     ).join('\n');
 
     const response = await this.client.messages.create({
@@ -163,6 +163,7 @@ Respond with a JSON array where each object has:
 - "why_working": why this type of content is performing well right now based on the data above (1-2 sentences)
 - "hook_line": suggested opening hook line for the first 3 seconds
 - "source_niche": which niche this idea comes from ("${model.primary_niche}"${model.secondary_niches ? ` or one of: ${model.secondary_niches}` : ''})
+- "source_posts": array of 1-3 post URLs that most inspired this idea (from the URLs listed above)
 
 Weight "${model.primary_niche}" content (70%) more than secondary niches (30%). Focus on patterns: recurring themes, hooks, formats, or topics driving high engagement.`
       }],

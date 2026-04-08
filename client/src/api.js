@@ -62,5 +62,8 @@ export const getIdeas = (modelId) => api.get(`/ideas/${modelId}`);
 export const getIdeaBatches = (modelId) => api.get(`/ideas/${modelId}/batches`);
 export const deliverIdeas = (modelId, batchId) => api.post(`/ideas/deliver/${modelId}/${batchId}`);
 export const getDeliveryLog = (modelId) => api.get(`/ideas/delivery-log/${modelId}`);
+export const exportIdeas = (modelId, format = 'csv') => {
+  window.open(`${api.defaults.baseURL}/ideas/export/${modelId}?format=${format}`, '_blank');
+};
 
 export default api;

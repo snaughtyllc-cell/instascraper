@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useCallback } from 'react';
-import { getModels, createModel, updateModel, deleteModel, getAvailableNiches, generateIdeas, getIdeas } from '../api';
+import { getModels, createModel, updateModel, deleteModel, getAvailableNiches, generateIdeas, getIdeas, exportIdeas } from '../api';
 
 const DELIVERY_METHODS = [
   { value: 'whatsapp', label: 'WhatsApp' },
@@ -236,6 +236,13 @@ export default function ModelsTab() {
                 >
                   {expandedModel === model.id ? 'Hide Ideas' : 'View Ideas'}
                 </button>
+                <button
+                  onClick={() => exportIdeas(model.id)}
+                  className="px-3 py-1.5 bg-gray-800 text-gray-300 text-sm rounded-lg hover:bg-gray-700"
+                  title="Export ideas as CSV"
+                >
+                  Export
+                </button>
                 <button onClick={() => handleEdit(model)} className="p-1.5 text-gray-500 hover:text-white">
                   <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}><path strokeLinecap="round" strokeLinejoin="round" d="M15.232 5.232l3.536 3.536m-2.036-5.036a2.5 2.5 0 113.536 3.536L6.5 21.036H3v-3.572L16.732 3.732z" /></svg>
                 </button>
@@ -272,6 +279,17 @@ export default function ModelsTab() {
                             )}
                             {idea.why_working && (
                               <p className="text-xs text-gray-500 mt-1">{idea.why_working}</p>
+                            )}
+                            {idea.source_post_ids && idea.source_post_ids.trim() && (
+                              <div className="flex flex-wrap gap-2 mt-2">
+                                {idea.source_post_ids.split(',').filter(Boolean).map((url, i) => (
+                                  <a key={i} href={url.trim().startsWith('http') ? url.trim() : `https://www.instagram.com/reel/${url.trim()}/`}
+                                    target="_blank" rel="noopener noreferrer"
+                                    className="text-xs px-2 py-0.5 rounded bg-purple-900/40 text-purple-300 hover:bg-purple-800/50 transition-colors">
+                                    Reference {i + 1}
+                                  </a>
+                                ))}
+                              </div>
                             )}
                             {idea.stale_warning && (
                               <p className="text-xs text-yellow-500 mt-1">Warning: {idea.stale_warning}</p>
