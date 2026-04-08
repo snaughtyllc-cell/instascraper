@@ -151,7 +151,27 @@ class InstagramScraper {
 
   async _fetchAndStoreResults(runId, jobId, filters) {
     const res = await fetch(`${APIFY_BASE}/actor-runs/${runId}/dataset/items?token=${this.apiKey}`);
-    const items = await res.json();
+    let items = await res.json();
+
+    // Fallback: if reel scraper returned very few items, retry with generic scraper
+    if (items.length <= 3 && filters.query && !filters.query.startsWith('#') && !filters.query.startsWith('http')) {
+      console.log(`[Scraper] Reel scraper returned only ${items.length} items for "${filters.query}", trying generic scraper...`);
+      await pool.query('UPDATE scrape_jobs SET status_message = $1 WHERE id = $2', ['Retrying with generic scraper...', jobId]);
+      try {
+        const fallbackRun = await this._startApifyRun(GENERIC_ACTOR_ID, {
+          directUrls: [`https://www.instagram.com/${filters.query.replace('@', '')}/`],
+          resultsType: 'posts',
+          resultsLimit: 50,
+        });
+        const fallbackItems = await this._waitForRun(fallbackRun.id, 30);
+        if (fallbackItems && fallbackItems.length > items.length) {
+          console.log(`[Scraper] Generic scraper returned ${fallbackItems.length} items (vs ${items.length})`);
+          items = fallbackItems;
+        }
+      } catch (err) {
+        console.log(`[Scraper] Generic fallback failed: ${err.message}`);
+      }
+    }
 
     let followersCount = 0;
     for (const item of items) {
