@@ -322,7 +322,7 @@ app.post('/engagement/backfill', async (req, res) => {
   try {
     const { handle, followers } = req.body;
     if (handle && followers) {
-      await pool.query('UPDATE posts SET followers_at_scrape = $1 WHERE account_handle = $2 AND (followers_at_scrape = 0 OR followers_at_scrape IS NULL)', [Number(followers), handle]);
+      await pool.query('UPDATE posts SET followers_at_scrape = $1 WHERE account_handle = $2', [Number(followers), handle]);
     }
     // Recalc ER for all posts with followers
     const postsResult = await pool.query('SELECT id, like_count, comment_count, followers_at_scrape FROM posts WHERE followers_at_scrape > 0');
@@ -354,7 +354,7 @@ app.post('/engagement/backfill-bulk', async (req, res) => {
     if (!accounts || !Array.isArray(accounts)) return res.status(400).json({ error: 'accounts array required' });
     for (const { handle, followers } of accounts) {
       if (handle && followers) {
-        await pool.query('UPDATE posts SET followers_at_scrape = $1 WHERE account_handle = $2 AND (followers_at_scrape = 0 OR followers_at_scrape IS NULL)', [Number(followers), handle]);
+        await pool.query('UPDATE posts SET followers_at_scrape = $1 WHERE account_handle = $2', [Number(followers), handle]);
       }
     }
     // Recalc ER for all posts with followers
