@@ -1,12 +1,16 @@
 const cron = require('node-cron');
 const pool = require('./db');
 
+const ContentIdeaAgent = require('./ai-agent');
+const { deliverBatch } = require('./delivery');
+
 let scraperInstance = null;
 const jobStatus = {
   autoScrape: { lastRun: null, nextRun: null, status: 'idle', message: '' },
   rollup: { lastRun: null, nextRun: null, status: 'idle', message: '' },
   cleanup: { lastRun: null, nextRun: null, status: 'idle', message: '' },
   discovery: { lastRun: null, nextRun: null, status: 'idle', message: '' },
+  ideaGeneration: { lastRun: null, nextRun: null, status: 'idle', message: '' },
 };
 
 async function runAutoScrape() {
@@ -116,15 +120,47 @@ async function runDiscovery() {
   } catch (err) { jobStatus.discovery.status = 'error'; jobStatus.discovery.message = err.message; }
 }
 
+async function runIdeaGeneration() {
+  jobStatus.ideaGeneration.status = 'running';
+  jobStatus.ideaGeneration.lastRun = new Date().toISOString();
+  console.log('[Scheduler] Idea generation starting...');
+  try {
+    const apiKey = process.env.ANTHROPIC_API_KEY;
+    if (!apiKey) { jobStatus.ideaGeneration.message = 'No ANTHROPIC_API_KEY'; jobStatus.ideaGeneration.status = 'idle'; return; }
+    const agent = new ContentIdeaAgent(apiKey);
+    const dayName = new Date().toLocaleDateString('en-US', { weekday: 'long' }).toLowerCase();
+    const models = await pool.query("SELECT * FROM models WHERE status = 'active' AND LOWER(delivery_day) = $1", [dayName]);
+    if (models.rows.length === 0) { jobStatus.ideaGeneration.message = `No models scheduled for ${dayName}`; jobStatus.ideaGeneration.status = 'idle'; return; }
+    let generated = 0;
+    let delivered = 0;
+    for (const model of models.rows) {
+      try {
+        const result = await agent.generateIdeasForModel(model.id);
+        generated++;
+        if (result.batchId && result.ideaCount > 0 && model.delivery_contact) {
+          try {
+            await deliverBatch(model.id, result.batchId);
+            delivered++;
+          } catch (delErr) { console.error(`[Scheduler] Delivery failed for ${model.name}:`, delErr.message); }
+        }
+      } catch (err) { console.error(`[Scheduler] Idea gen failed for ${model.name}:`, err.message); }
+    }
+    jobStatus.ideaGeneration.message = `Generated for ${generated}/${models.rows.length} models, delivered ${delivered}`;
+    jobStatus.ideaGeneration.status = 'idle';
+    console.log(`[Scheduler] Idea generation done: ${generated} generated, ${delivered} delivered`);
+  } catch (err) { jobStatus.ideaGeneration.status = 'error'; jobStatus.ideaGeneration.message = err.message; }
+}
+
 function startScheduler(scraper) {
   scraperInstance = scraper;
   cron.schedule('0 3 */3 * *', () => runAutoScrape());
   cron.schedule('0 0 * * 0', () => runEngagementRollup());
   cron.schedule('0 2 * * *', () => runAutoCleanup());
   cron.schedule('0 4 * * 1', () => runDiscovery());
+  cron.schedule('0 8 * * *', () => runIdeaGeneration()); // Daily 8am, checks delivery_day
   console.log('[Scheduler] All cron jobs registered');
 }
 
 function getSchedulerStatus() { return jobStatus; }
 
-module.exports = { startScheduler, getSchedulerStatus, runAutoScrape, runEngagementRollup, runAutoCleanup, runDiscovery };
+module.exports = { startScheduler, getSchedulerStatus, runAutoScrape, runEngagementRollup, runAutoCleanup, runDiscovery, runIdeaGeneration };

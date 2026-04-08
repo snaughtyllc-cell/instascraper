@@ -198,6 +198,54 @@ async function initDB() {
     )
   `);
 
+  // Model profiles for AI content ideas
+  await db.query(`
+    CREATE TABLE IF NOT EXISTS models (
+      id ${SERIAL},
+      name TEXT NOT NULL,
+      primary_niche TEXT NOT NULL,
+      secondary_niches TEXT DEFAULT '',
+      delivery_method TEXT DEFAULT 'whatsapp',
+      delivery_contact TEXT DEFAULT '',
+      delivery_day TEXT DEFAULT 'monday',
+      status TEXT DEFAULT 'active',
+      created_at TEXT DEFAULT ${NOW_DEFAULT},
+      updated_at TEXT DEFAULT ${NOW_DEFAULT}
+    )
+  `);
+
+  // AI-generated idea cards
+  await db.query(`
+    CREATE TABLE IF NOT EXISTS idea_cards (
+      id ${SERIAL},
+      model_id INTEGER NOT NULL,
+      batch_id TEXT NOT NULL,
+      concept TEXT NOT NULL,
+      format TEXT DEFAULT '',
+      why_working TEXT DEFAULT '',
+      hook_line TEXT DEFAULT '',
+      source_niche TEXT DEFAULT '',
+      source_post_ids TEXT DEFAULT '',
+      stale_warning TEXT DEFAULT NULL,
+      status TEXT DEFAULT 'pending',
+      delivered_at TEXT DEFAULT NULL,
+      created_at TEXT DEFAULT ${NOW_DEFAULT}
+    )
+  `);
+
+  // Delivery log
+  await db.query(`
+    CREATE TABLE IF NOT EXISTS idea_delivery_log (
+      id ${SERIAL},
+      model_id INTEGER NOT NULL,
+      batch_id TEXT NOT NULL,
+      delivery_method TEXT NOT NULL,
+      delivery_status TEXT DEFAULT 'pending',
+      error TEXT DEFAULT NULL,
+      sent_at TEXT DEFAULT ${NOW_DEFAULT}
+    )
+  `);
+
   // Migrations for existing tables
   if (USE_PG) {
     const migrations = [

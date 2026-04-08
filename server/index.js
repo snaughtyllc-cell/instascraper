@@ -8,7 +8,7 @@ const fs = require('fs');
 const fetch = require('node-fetch');
 const pool = require('./db');
 const InstagramScraper = require('./scraper');
-const { startScheduler, getSchedulerStatus, runAutoScrape, runEngagementRollup, runAutoCleanup, runDiscovery } = require('./scheduler');
+const { startScheduler, getSchedulerStatus, runAutoScrape, runEngagementRollup, runAutoCleanup, runDiscovery, runIdeaGeneration } = require('./scheduler');
 
 const app = express();
 const PORT = process.env.PORT || 4000;
@@ -74,8 +74,14 @@ app.use('/tracked', requireAuth);
 app.use('/suggested', requireAuth);
 app.use('/delete-log', requireAuth);
 app.use('/scheduler', requireAuth);
+app.use('/models', requireAuth);
+app.use('/ideas', requireAuth);
+
+const ContentIdeaAgent = require('./ai-agent');
+const { deliverBatch } = require('./delivery');
 
 const scraper = new InstagramScraper(process.env.APIFY_API_KEY || '');
+const ideaAgent = new ContentIdeaAgent(process.env.ANTHROPIC_API_KEY || '');
 startScheduler(scraper);
 
 // ─── Scrape Routes ──────────────────────────────────────────────
@@ -309,7 +315,7 @@ app.get('/scheduler/status', (req, res) => {
 
 app.post('/scheduler/run/:job', async (req, res) => {
   const job = req.params.job;
-  const jobs = { 'auto-scrape': runAutoScrape, 'rollup': runEngagementRollup, 'cleanup': runAutoCleanup, 'discovery': runDiscovery };
+  const jobs = { 'auto-scrape': runAutoScrape, 'rollup': runEngagementRollup, 'cleanup': runAutoCleanup, 'discovery': runDiscovery, 'idea-generation': runIdeaGeneration };
   if (!jobs[job]) return res.status(400).json({ error: `Unknown job: ${job}` });
   jobs[job]();
   res.json({ success: true, message: `Job '${job}' started` });
@@ -447,6 +453,88 @@ app.get('/engagement/export/:handle', async (req, res) => {
     return res.send(csv);
   }
   res.json({ handle, posts: result.rows });
+});
+
+// ─── Model Routes ──────────────────────────────────────────────
+
+app.get('/models/niches/available', async (req, res) => {
+  const result = await pool.query('SELECT DISTINCT content_type FROM creator_types WHERE content_type IS NOT NULL ORDER BY content_type');
+  res.json(result.rows.map(r => r.content_type));
+});
+
+app.get('/models', async (req, res) => {
+  const result = await pool.query("SELECT * FROM models WHERE status = 'active' ORDER BY created_at DESC");
+  res.json(result.rows);
+});
+
+app.post('/models', async (req, res) => {
+  const { name, primary_niche, secondary_niches, delivery_method, delivery_contact, delivery_day } = req.body;
+  if (!name || !primary_niche) return res.status(400).json({ error: 'name and primary_niche required' });
+  const result = await pool.query(
+    `INSERT INTO models (name, primary_niche, secondary_niches, delivery_method, delivery_contact, delivery_day) VALUES ($1, $2, $3, $4, $5, $6)`,
+    [name, primary_niche, secondary_niches || '', delivery_method || 'whatsapp', delivery_contact || '', delivery_day || 'monday']
+  );
+  res.json({ success: true, id: result.rows[0]?.id });
+});
+
+app.put('/models/:id', async (req, res) => {
+  const { name, primary_niche, secondary_niches, delivery_method, delivery_contact, delivery_day } = req.body;
+  await pool.query(
+    `UPDATE models SET name=$1, primary_niche=$2, secondary_niches=$3, delivery_method=$4, delivery_contact=$5, delivery_day=$6, updated_at=TO_CHAR(NOW(), 'YYYY-MM-DD"T"HH24:MI:SS"Z"') WHERE id=$7`,
+    [name, primary_niche, secondary_niches || '', delivery_method || 'whatsapp', delivery_contact || '', delivery_day || 'monday', Number(req.params.id)]
+  );
+  res.json({ success: true });
+});
+
+app.delete('/models/:id', async (req, res) => {
+  await pool.query("UPDATE models SET status = 'inactive' WHERE id = $1", [Number(req.params.id)]);
+  res.json({ success: true });
+});
+
+// ─── Idea Generation Routes ────────────────────────────────────
+
+app.post('/ideas/generate/:modelId', async (req, res) => {
+  try {
+    const result = await ideaAgent.generateIdeasForModel(Number(req.params.modelId));
+    res.json(result);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.get('/ideas/:modelId', async (req, res) => {
+  const result = await pool.query(
+    'SELECT * FROM idea_cards WHERE model_id = $1 ORDER BY created_at DESC LIMIT 50',
+    [Number(req.params.modelId)]
+  );
+  res.json(result.rows);
+});
+
+app.get('/ideas/:modelId/batches', async (req, res) => {
+  const result = await pool.query(
+    `SELECT batch_id, MIN(created_at) as created_at, COUNT(*) as idea_count, MAX(status) as status
+     FROM idea_cards WHERE model_id = $1
+     GROUP BY batch_id ORDER BY MIN(created_at) DESC LIMIT 20`,
+    [Number(req.params.modelId)]
+  );
+  res.json(result.rows);
+});
+
+app.post('/ideas/deliver/:modelId/:batchId', async (req, res) => {
+  try {
+    const result = await deliverBatch(Number(req.params.modelId), req.params.batchId);
+    res.json(result);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.get('/ideas/delivery-log/:modelId', async (req, res) => {
+  const result = await pool.query(
+    'SELECT * FROM idea_delivery_log WHERE model_id = $1 ORDER BY sent_at DESC LIMIT 20',
+    [Number(req.params.modelId)]
+  );
+  res.json(result.rows);
 });
 
 // ─── Export Routes ──────────────────────────────────────────────

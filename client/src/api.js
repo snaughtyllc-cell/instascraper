@@ -49,4 +49,18 @@ export const restorePost = (id) => api.post(`/delete-log/${id}/restore`);
 export const getSchedulerStatus = () => api.get('/scheduler/status');
 export const triggerJob = (job) => api.post(`/scheduler/run/${job}`);
 
+// Models
+export const getModels = () => api.get('/models');
+export const createModel = (data) => api.post('/models', data);
+export const updateModel = (id, data) => api.put(`/models/${id}`, data);
+export const deleteModel = (id) => api.delete(`/models/${id}`);
+export const getAvailableNiches = () => api.get('/models/niches/available');
+
+// Ideas
+export const generateIdeas = (modelId) => api.post(`/ideas/generate/${modelId}`);
+export const getIdeas = (modelId) => api.get(`/ideas/${modelId}`);
+export const getIdeaBatches = (modelId) => api.get(`/ideas/${modelId}/batches`);
+export const deliverIdeas = (modelId, batchId) => api.post(`/ideas/deliver/${modelId}/${batchId}`);
+export const getDeliveryLog = (modelId) => api.get(`/ideas/delivery-log/${modelId}`);
+
 export default api;

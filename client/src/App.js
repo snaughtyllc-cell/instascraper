@@ -6,6 +6,7 @@ import EngagementTab from './pages/EngagementTab';
 import TrackedAccountsTab from './pages/TrackedAccountsTab';
 import SuggestedAccountsTab from './pages/SuggestedAccountsTab';
 import DeleteLogTab from './pages/DeleteLogTab';
+import ModelsTab from './pages/ModelsTab';
 import LoginPage from './components/LoginPage';
 
 const TABS = [
@@ -13,6 +14,7 @@ const TABS = [
   { id: 'scrape', label: 'Scrape' },
   { id: 'library', label: 'Library' },
   { id: 'engagement', label: 'Engagement' },
+  { id: 'models', label: 'Models' },
   { id: 'suggested', label: 'Suggested' },
   { id: 'deletelog', label: 'Delete Log' },
 ];
@@ -109,6 +111,7 @@ export default function App() {
         {activeTab === 'scrape' && <ScrapeTab />}
         {activeTab === 'library' && <LibraryTab />}
         {activeTab === 'engagement' && <EngagementTab />}
+        {activeTab === 'models' && <ModelsTab />}
         {activeTab === 'suggested' && <SuggestedAccountsTab />}
         {activeTab === 'deletelog' && <DeleteLogTab />}
       </main>
