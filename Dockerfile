@@ -4,7 +4,7 @@ WORKDIR /app
 
 # Install server deps
 COPY server/package*.json ./server/
-RUN cd server && npm ci --omit=dev
+RUN cd server && npm install --legacy-peer-deps --omit=dev
 
 # Install client deps + build
 COPY client/package*.json ./client/
