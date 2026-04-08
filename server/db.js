@@ -1,16 +1,89 @@
-const { Pool } = require('pg');
+const path = require('path');
 
-const pool = new Pool({
-  connectionString: process.env.DATABASE_URL,
-  ssl: process.env.DATABASE_URL && process.env.DATABASE_URL.includes('railway')
-    ? { rejectUnauthorized: false }
-    : false,
-});
+const USE_PG = !!process.env.DATABASE_URL;
 
+// ─── Unified DB interface: .query(sql, params) → { rows } ──────
+let db;
+
+if (USE_PG) {
+  // PostgreSQL (Railway cloud)
+  const { Pool } = require('pg');
+  const pool = new Pool({
+    connectionString: process.env.DATABASE_URL,
+    ssl: process.env.DATABASE_URL.includes('railway') ? { rejectUnauthorized: false } : false,
+  });
+  db = {
+    query: (sql, params) => pool.query(sql, params),
+    _pool: pool,
+  };
+} else {
+  // SQLite (local dev)
+  const Database = require('better-sqlite3');
+  const sqlite = new Database(path.join(__dirname, 'instascraper.db'));
+  sqlite.pragma('journal_mode = WAL');
+  sqlite.pragma('foreign_keys = ON');
+
+  db = {
+    query: (sql, params = []) => {
+      // Convert PostgreSQL $1,$2 placeholders to SQLite ?
+      let convertedSql = sql;
+      let convertedParams = params;
+      if (sql.includes('$')) {
+        convertedSql = sql.replace(/\$(\d+)/g, '?');
+      }
+      // Convert PostgreSQL-specific syntax to SQLite
+      convertedSql = convertedSql.replace(/SERIAL PRIMARY KEY/gi, 'INTEGER PRIMARY KEY AUTOINCREMENT');
+      convertedSql = convertedSql.replace(/TO_CHAR\(NOW\(\),\s*'[^']*'\)/gi, "datetime('now')");
+      convertedSql = convertedSql.replace(/TO_CHAR\(NOW\(\)\s*-\s*INTERVAL\s*'(\d+)\s*days',\s*'[^']*'\)/gi, "datetime('now', '-$1 days')");
+      convertedSql = convertedSql.replace(/TO_CHAR\(NOW\(\)\s*\+\s*INTERVAL\s*'(\d+)\s*days',\s*'[^']*'\)/gi, "datetime('now', '+$1 days')");
+      convertedSql = convertedSql.replace(/ILIKE/gi, 'LIKE');
+      convertedSql = convertedSql.replace(/::numeric/gi, '');
+      convertedSql = convertedSql.replace(/RETURNING id/gi, '');
+      convertedSql = convertedSql.replace(/IF NOT EXISTS/gi, 'IF NOT EXISTS');
+      convertedSql = convertedSql.replace(/ADD COLUMN IF NOT EXISTS/gi, 'ADD COLUMN');
+      // FILTER (WHERE ...) → not supported in SQLite, handled per-query
+      convertedSql = convertedSql.replace(/COUNT\(\*\)\s*FILTER\s*\(WHERE\s+([^)]+)\)/gi, "SUM(CASE WHEN $1 THEN 1 ELSE 0 END)");
+
+      const trimmed = convertedSql.trim();
+      const isSelect = /^SELECT/i.test(trimmed);
+      const isInsert = /^INSERT/i.test(trimmed);
+      const isCreate = /^CREATE/i.test(trimmed);
+
+      try {
+        if (isSelect) {
+          const rows = sqlite.prepare(convertedSql).all(...convertedParams);
+          return { rows, rowCount: rows.length };
+        } else if (isInsert) {
+          const info = sqlite.prepare(convertedSql).run(...convertedParams);
+          return { rows: [{ id: info.lastInsertRowid }], rowCount: info.changes };
+        } else if (isCreate) {
+          sqlite.exec(convertedSql);
+          return { rows: [], rowCount: 0 };
+        } else {
+          const info = sqlite.prepare(convertedSql).run(...convertedParams);
+          return { rows: [], rowCount: info.changes };
+        }
+      } catch (e) {
+        // Duplicate column or table already exists — ignore safely
+        if (e.message.includes('duplicate column') || e.message.includes('already exists')) {
+          return { rows: [], rowCount: 0 };
+        }
+        throw e;
+      }
+    },
+  };
+}
+
+// ─── Initialize tables ──────────────────────────────────────────
 async function initDB() {
-  await pool.query(`
+  const NOW_DEFAULT = USE_PG
+    ? `TO_CHAR(NOW(), 'YYYY-MM-DD"T"HH24:MI:SS"Z"')`
+    : `(datetime('now'))`;
+  const SERIAL = USE_PG ? 'SERIAL PRIMARY KEY' : 'INTEGER PRIMARY KEY AUTOINCREMENT';
+
+  await db.query(`
     CREATE TABLE IF NOT EXISTS posts (
-      id SERIAL PRIMARY KEY,
+      id ${SERIAL},
       shortcode TEXT UNIQUE NOT NULL,
       video_url TEXT,
       thumbnail_url TEXT,
@@ -23,7 +96,7 @@ async function initDB() {
       post_url TEXT,
       tag TEXT DEFAULT NULL,
       notes TEXT DEFAULT '',
-      scraped_at TEXT DEFAULT TO_CHAR(NOW(), 'YYYY-MM-DD"T"HH24:MI:SS"Z"'),
+      scraped_at TEXT DEFAULT ${NOW_DEFAULT},
       source_query TEXT,
       archived INTEGER DEFAULT 0,
       content_type TEXT DEFAULT NULL,
@@ -35,9 +108,9 @@ async function initDB() {
     )
   `);
 
-  await pool.query(`
+  await db.query(`
     CREATE TABLE IF NOT EXISTS scrape_jobs (
-      id SERIAL PRIMARY KEY,
+      id ${SERIAL},
       query TEXT NOT NULL,
       query_type TEXT NOT NULL,
       status TEXT DEFAULT 'pending',
@@ -46,22 +119,22 @@ async function initDB() {
       progress INTEGER DEFAULT 0,
       status_message TEXT DEFAULT '',
       error TEXT,
-      created_at TEXT DEFAULT TO_CHAR(NOW(), 'YYYY-MM-DD"T"HH24:MI:SS"Z"'),
+      created_at TEXT DEFAULT ${NOW_DEFAULT},
       completed_at TEXT,
       source TEXT DEFAULT 'manual'
     )
   `);
 
-  await pool.query(`
+  await db.query(`
     CREATE TABLE IF NOT EXISTS creator_types (
       account_handle TEXT PRIMARY KEY,
       content_type TEXT NOT NULL
     )
   `);
 
-  await pool.query(`
+  await db.query(`
     CREATE TABLE IF NOT EXISTS tracked_accounts (
-      id SERIAL PRIMARY KEY,
+      id ${SERIAL},
       username TEXT UNIQUE NOT NULL,
       status TEXT DEFAULT 'active',
       tags TEXT DEFAULT '',
@@ -70,14 +143,14 @@ async function initDB() {
       avg_er REAL DEFAULT 0,
       last_scraped_at TEXT,
       last_post_count INTEGER DEFAULT 0,
-      added_at TEXT DEFAULT TO_CHAR(NOW(), 'YYYY-MM-DD"T"HH24:MI:SS"Z"'),
-      updated_at TEXT DEFAULT TO_CHAR(NOW(), 'YYYY-MM-DD"T"HH24:MI:SS"Z"')
+      added_at TEXT DEFAULT ${NOW_DEFAULT},
+      updated_at TEXT DEFAULT ${NOW_DEFAULT}
     )
   `);
 
-  await pool.query(`
+  await db.query(`
     CREATE TABLE IF NOT EXISTS engagement_rollups (
-      id SERIAL PRIMARY KEY,
+      id ${SERIAL},
       username TEXT NOT NULL,
       week_start TEXT NOT NULL,
       week_end TEXT NOT NULL,
@@ -88,26 +161,26 @@ async function initDB() {
       total_comments INTEGER DEFAULT 0,
       total_views INTEGER DEFAULT 0,
       followers_snapshot INTEGER DEFAULT 0,
-      computed_at TEXT DEFAULT TO_CHAR(NOW(), 'YYYY-MM-DD"T"HH24:MI:SS"Z"'),
+      computed_at TEXT DEFAULT ${NOW_DEFAULT},
       UNIQUE(username, week_start)
     )
   `);
 
-  await pool.query(`
+  await db.query(`
     CREATE TABLE IF NOT EXISTS deletion_log (
-      id SERIAL PRIMARY KEY,
+      id ${SERIAL},
       post_id INTEGER NOT NULL,
       shortcode TEXT NOT NULL,
       account_handle TEXT,
       reason TEXT,
-      deleted_at TEXT DEFAULT TO_CHAR(NOW(), 'YYYY-MM-DD"T"HH24:MI:SS"Z"'),
+      deleted_at TEXT DEFAULT ${NOW_DEFAULT},
       restored_at TEXT DEFAULT NULL
     )
   `);
 
-  await pool.query(`
+  await db.query(`
     CREATE TABLE IF NOT EXISTS suggested_accounts (
-      id SERIAL PRIMARY KEY,
+      id ${SERIAL},
       username TEXT UNIQUE NOT NULL,
       source TEXT NOT NULL,
       followers INTEGER DEFAULT 0,
@@ -120,24 +193,35 @@ async function initDB() {
       suggestion_score REAL DEFAULT 0,
       status TEXT DEFAULT 'pending',
       snoozed_until TEXT DEFAULT NULL,
-      discovered_at TEXT DEFAULT TO_CHAR(NOW(), 'YYYY-MM-DD"T"HH24:MI:SS"Z"'),
+      discovered_at TEXT DEFAULT ${NOW_DEFAULT},
       reviewed_at TEXT
     )
   `);
 
-  // Migrations for existing tables (safe to re-run)
-  const migrations = [
-    `ALTER TABLE posts ADD COLUMN IF NOT EXISTS soft_deleted INTEGER DEFAULT 0`,
-    `ALTER TABLE posts ADD COLUMN IF NOT EXISTS soft_deleted_at TEXT DEFAULT NULL`,
-    `ALTER TABLE scrape_jobs ADD COLUMN IF NOT EXISTS source TEXT DEFAULT 'manual'`,
-  ];
-  for (const sql of migrations) {
-    try { await pool.query(sql); } catch (e) { /* column already exists */ }
+  // Migrations for existing tables
+  if (USE_PG) {
+    const migrations = [
+      `ALTER TABLE posts ADD COLUMN IF NOT EXISTS soft_deleted INTEGER DEFAULT 0`,
+      `ALTER TABLE posts ADD COLUMN IF NOT EXISTS soft_deleted_at TEXT DEFAULT NULL`,
+      `ALTER TABLE scrape_jobs ADD COLUMN IF NOT EXISTS source TEXT DEFAULT 'manual'`,
+    ];
+    for (const sql of migrations) {
+      try { await db.query(sql); } catch (e) { /* ignore */ }
+    }
+  } else {
+    const migrations = [
+      `ALTER TABLE posts ADD COLUMN soft_deleted INTEGER DEFAULT 0`,
+      `ALTER TABLE posts ADD COLUMN soft_deleted_at TEXT DEFAULT NULL`,
+      `ALTER TABLE scrape_jobs ADD COLUMN source TEXT DEFAULT 'manual'`,
+    ];
+    for (const sql of migrations) {
+      try { await db.query(sql); } catch (e) { /* column already exists */ }
+    }
   }
 
-  console.log('Database initialized');
+  console.log(`Database initialized (${USE_PG ? 'PostgreSQL' : 'SQLite'})`);
 }
 
 initDB().catch(console.error);
 
-module.exports = pool;
+module.exports = db;

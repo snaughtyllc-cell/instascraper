@@ -353,15 +353,21 @@ app.get('/engagement/summary/:handle', async (req, res) => {
 });
 
 app.get('/engagement/leaderboard', async (req, res) => {
+  try {
   const result = await pool.query(`SELECT account_handle, COUNT(*) as post_count, ROUND(AVG(er_percent)::numeric, 2) as avg_er, MAX(er_percent) as best_er, MIN(er_percent) as worst_er, MAX(followers_at_scrape) as followers FROM posts WHERE account_handle != '' AND (archived = 0 OR archived IS NULL) AND (soft_deleted = 0 OR soft_deleted IS NULL) GROUP BY account_handle ORDER BY avg_er DESC`);
   const labeled = result.rows.map(a => {
+    const avgEr = parseFloat(a.avg_er) || 0;
     let label = 'Low';
-    if (a.avg_er >= 6) label = 'Viral';
-    else if (a.avg_er >= 3) label = 'Good';
-    else if (a.avg_er >= 1) label = 'Average';
-    return { ...a, er_label: label };
+    if (avgEr >= 6) label = 'Viral';
+    else if (avgEr >= 3) label = 'Good';
+    else if (avgEr >= 1) label = 'Average';
+    return { ...a, avg_er: avgEr, er_label: label };
   });
   res.json(labeled);
+  } catch (err) {
+    console.error('Leaderboard error:', err.message);
+    res.status(500).json({ error: err.message });
+  }
 });
 
 app.get('/engagement/export/:handle', async (req, res) => {
