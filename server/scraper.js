@@ -18,6 +18,60 @@ function calcER(likes, comments, followers) {
 class InstagramScraper {
   constructor(apiKey) {
     this.apiKey = apiKey;
+    this._anthropic = null;
+  }
+
+  _getAnthropic() {
+    if (this._anthropic) return this._anthropic;
+    const key = process.env.ANTHROPIC_API_KEY;
+    if (!key) return null;
+    try {
+      const Anthropic = require('@anthropic-ai/sdk');
+      this._anthropic = new Anthropic({ apiKey: key });
+      return this._anthropic;
+    } catch { return null; }
+  }
+
+  // Quick keyword check first, then AI classifier as fallback
+  // Returns 'female', 'male', or 'unknown'
+  async _classifyGender(username, bio) {
+    const text = `${username} ${bio || ''}`.toLowerCase();
+
+    // Strong signals first (free + instant)
+    const femalePronouns = /\b(she\/her|she\s*\/\s*her|her\/she|she-her)\b/.test(text);
+    const malePronouns = /\b(he\/him|he\s*\/\s*him|him\/he|he-him)\b/.test(text);
+    if (femalePronouns && !malePronouns) return 'female';
+    if (malePronouns && !femalePronouns) return 'male';
+
+    const femaleWords = /\b(woman|women|girl|girls|female|wife|mom|mama|mother|daughter|sister|gal|lady|ladies|miss|mrs|ms\.|queen|princess)\b/;
+    const maleWords = /\b(man|men|guy|guys|male|husband|dad|daddy|father|son|brother|king|prince|mr\.|sir|bro)\b/;
+    const f = femaleWords.test(text);
+    const m = maleWords.test(text);
+    if (f && !m) return 'female';
+    if (m && !f) return 'male';
+
+    // Fall back to AI classifier
+    const client = this._getAnthropic();
+    if (!client) return 'unknown';
+
+    try {
+      const response = await client.messages.create({
+        model: 'claude-haiku-4-5-20251001',
+        max_tokens: 20,
+        temperature: 0,
+        messages: [{
+          role: 'user',
+          content: `Classify the gender of this Instagram creator based on their username and bio. Respond with ONLY one word: "female", "male", or "unknown".\n\nUsername: ${username}\nBio: ${bio || '(empty)'}`,
+        }],
+      });
+      const result = response.content[0].text.trim().toLowerCase();
+      if (result.includes('female')) return 'female';
+      if (result.includes('male')) return 'male';
+      return 'unknown';
+    } catch (err) {
+      console.log(`[Gender] Classify failed for @${username}: ${err.message}`);
+      return 'unknown';
+    }
   }
 
   async startScrapeJob({ query, queryType, minLikes, minViews, startDate, endDate, source }) {
@@ -445,8 +499,23 @@ class InstagramScraper {
       enriched.push(candidate);
     }
 
-    const filtered = enriched.filter(c => c.followers <= 500000);
-    console.log(`[Discovery] Found ${filtered.length} candidates for @${username}`);
+    let filtered = enriched.filter(c => c.followers <= 500000);
+
+    // Gender filter: keep only female (or unknown when bio is empty/ambiguous)
+    console.log(`[Discovery] Classifying gender for ${filtered.length} candidates...`);
+    const genderResults = [];
+    for (const c of filtered) {
+      const gender = await this._classifyGender(c.username, c.bio || '');
+      if (gender !== 'male') {
+        c.gender = gender;
+        genderResults.push(c);
+      } else {
+        console.log(`[Discovery] Filtered out @${c.username} (male)`);
+      }
+    }
+    filtered = genderResults;
+
+    console.log(`[Discovery] Found ${filtered.length} female/unknown candidates for @${username}`);
     return filtered;
   }
 
