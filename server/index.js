@@ -18,6 +18,7 @@ const IS_PROD = process.env.NODE_ENV === 'production';
 if (!fs.existsSync(THUMB_DIR)) fs.mkdirSync(THUMB_DIR);
 
 const AUTH_PASSWORD = process.env.AUTH_PASSWORD || '';
+const API_KEY = process.env.INSTASCRAPER_API_KEY || '';
 let passwordHash = null;
 if (AUTH_PASSWORD) {
   passwordHash = bcrypt.hashSync(AUTH_PASSWORD, 10);
@@ -59,6 +60,7 @@ app.post('/logout', (req, res) => {
 
 function requireAuth(req, res, next) {
   if (!passwordHash) return next();
+  if (API_KEY && req.headers['x-api-key'] === API_KEY) return next();
   if (req.session && req.session.authenticated) return next();
   res.status(401).json({ error: 'Not authenticated' });
 }
