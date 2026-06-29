@@ -177,7 +177,7 @@ class InstagramScraper {
 
     try {
       const { actorId, input } = this._buildInput(query, queryType);
-      const run = await this._startApifyRun(actorId, input);
+      const run = await this._startApifyRun(actorId, input, { purpose: 'scrape', query, scrapeJobId: jobId });
 
       await pool.query('UPDATE scrape_jobs SET apify_run_id = $1 WHERE id = $2', [run.id, jobId]);
 
@@ -213,7 +213,10 @@ class InstagramScraper {
     return { actorId: REEL_ACTOR_ID, input: { username: [query], resultsLimit: 50 } };
   }
 
-  async _startApifyRun(actorId, input) {
+  async _startApifyRun(actorId, input, context = {}) {
+    const status = await budgetStatus(pool);
+    if (status.over) throw new BudgetExceededError(status);
+
     const res = await fetch(
       `${APIFY_BASE}/acts/${actorId}/runs?token=${this.apiKey}`,
       {
@@ -227,7 +230,19 @@ class InstagramScraper {
       throw new Error(`Apify API error: ${res.status} — ${text}`);
     }
     const data = await res.json();
-    return data.data;
+    const run = data.data;
+    try {
+      await recordRunLaunch(pool, {
+        runId: run.id,
+        actorId,
+        purpose: context.purpose || 'scrape',
+        query: context.query || null,
+        scrapeJobId: context.scrapeJobId || null,
+      });
+    } catch (e) {
+      console.error('[Apify] ledger launch insert failed:', e.message);
+    }
+    return run;
   }
 
   async _pollAndStore(runId, jobId, filters) {
@@ -263,12 +278,14 @@ class InstagramScraper {
             ['Saving results...', jobId]
           );
           await this._fetchAndStoreResults(runId, jobId, filters);
+          try { await recordRunCompletion(pool, { runId, runObject: run, status: 'succeeded' }); } catch (e) { console.error('[Apify] ledger finalize failed:', e.message); }
           return;
         } else if (status === 'FAILED' || status === 'ABORTED' || status === 'TIMED-OUT') {
           await pool.query(
             `UPDATE scrape_jobs SET status = $1, error = $2, progress = $3, status_message = $4, completed_at = TO_CHAR(NOW(), 'YYYY-MM-DD"T"HH24:MI:SS"Z"') WHERE id = $5`,
             ['failed', `Apify run ${status}`, progress, statusMessage, jobId]
           );
+          try { await recordRunCompletion(pool, { runId, runObject: run, status: 'failed' }); } catch (e) { console.error('[Apify] ledger finalize failed:', e.message); }
           return;
         }
 
@@ -284,12 +301,14 @@ class InstagramScraper {
             `UPDATE scrape_jobs SET status = $1, error = $2, progress = $3, completed_at = TO_CHAR(NOW(), 'YYYY-MM-DD"T"HH24:MI:SS"Z"') WHERE id = $4`,
             ['failed', 'Polling timeout', progress, jobId]
           );
+          try { await recordRunCompletion(pool, { runId, runObject: run, status: 'failed' }); } catch (e) { console.error('[Apify] ledger finalize failed:', e.message); }
         }
       } catch (err) {
         await pool.query(
           `UPDATE scrape_jobs SET status = $1, error = $2, completed_at = TO_CHAR(NOW(), 'YYYY-MM-DD"T"HH24:MI:SS"Z"') WHERE id = $3`,
           ['failed', err.message, jobId]
         );
+        try { await recordRunCompletion(pool, { runId, status: 'failed' }); } catch (e) { console.error('[Apify] ledger finalize failed:', e.message); }
       }
     };
 
@@ -309,7 +328,7 @@ class InstagramScraper {
           directUrls: [`https://www.instagram.com/${filters.query.replace('@', '')}/`],
           resultsType: 'posts',
           resultsLimit: 50,
-        });
+        }, { purpose: 'fallback', query: filters.query });
         const fallbackItems = await this._waitForRun(fallbackRun.id, 30);
         if (fallbackItems && fallbackItems.length > items.length) {
           console.log(`[Scraper] Generic scraper returned ${fallbackItems.length} items (vs ${items.length})`);
@@ -500,7 +519,7 @@ class InstagramScraper {
         directUrls: [`https://www.instagram.com/${username}/`],
         resultsType: 'posts',
         resultsLimit: 30,
-      });
+      }, { purpose: 'discovery', query: username });
 
       const items = await this._waitForRun(run.id, 30);
       if (!items) {
@@ -631,11 +650,16 @@ class InstagramScraper {
       const res = await fetch(`${APIFY_BASE}/actor-runs/${runId}?token=${this.apiKey}`);
       const data = await res.json();
       if (data.data.status === 'SUCCEEDED') {
+        try { await recordRunCompletion(pool, { runId, runObject: data.data, status: 'succeeded' }); } catch (e) { console.error('[Apify] ledger finalize failed:', e.message); }
         const itemsRes = await fetch(`${APIFY_BASE}/actor-runs/${runId}/dataset/items?token=${this.apiKey}`);
         return await itemsRes.json();
       }
-      if (['FAILED', 'ABORTED', 'TIMED-OUT'].includes(data.data.status)) return null;
+      if (['FAILED', 'ABORTED', 'TIMED-OUT'].includes(data.data.status)) {
+        try { await recordRunCompletion(pool, { runId, runObject: data.data, status: 'failed' }); } catch (e) { console.error('[Apify] ledger finalize failed:', e.message); }
+        return null;
+      }
     }
+    try { await recordRunCompletion(pool, { runId, status: 'failed' }); } catch (e) { console.error('[Apify] ledger finalize failed:', e.message); }
     return null;
   }
 
@@ -646,7 +670,7 @@ class InstagramScraper {
       directUrls: [`https://www.instagram.com/${username}/`],
       resultsType: 'details',
       resultsLimit: 1,
-    });
+    }, { purpose: 'enrichment', query: username });
 
     const items = await this._waitForRun(run.id, 12);
     if (!items || items.length === 0) return null;
@@ -706,7 +730,7 @@ class InstagramScraper {
       directUrls: cleanUrls,
       resultsType: 'posts',
       resultsLimit: cleanUrls.length,
-    });
+    }, { purpose: 'import', query: cleanUrls[0] || 'import' });
 
     const items = await this._waitForRun(run.id, 40);
     if (!items || items.length === 0) return { imported: 0, total: cleanUrls.length };
