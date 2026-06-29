@@ -1,6 +1,30 @@
 const Anthropic = require('@anthropic-ai/sdk');
 const pool = require('./db');
 
+const IDEAS_SCHEMA = {
+  type: 'object',
+  additionalProperties: false,
+  required: ['ideas'],
+  properties: {
+    ideas: {
+      type: 'array',
+      items: {
+        type: 'object',
+        additionalProperties: false,
+        required: ['concept', 'format', 'why_working', 'hook_line', 'source_niche', 'source_posts'],
+        properties: {
+          concept: { type: 'string' },
+          format: { type: 'string' },
+          why_working: { type: 'string' },
+          hook_line: { type: 'string' },
+          source_niche: { type: 'string' },
+          source_posts: { type: 'array', items: { type: 'string' } },
+        },
+      },
+    },
+  },
+};
+
 class ContentIdeaAgent {
   constructor(apiKey) {
     this.apiKey = apiKey;
@@ -38,20 +62,30 @@ class ContentIdeaAgent {
     }
 
     // Call Claude to generate ideas
-    const ideas = await this._callClaude(allPosts, model, staleNiches);
+    const { ideas, warning } = await this._callClaude(allPosts, model, staleNiches);
 
-    // Deduplicate against previous ideas
-    const freshIdeas = await this._deduplicateIdeas(modelId, ideas);
-
-    // Store idea cards
-    for (const idea of freshIdeas) {
+    let freshIdeas = [];
+    if (warning) {
+      // Surface the failure as a clear warning card instead of silently storing nothing.
       await pool.query(
-        `INSERT INTO idea_cards (model_id, batch_id, concept, format, why_working, hook_line, source_niche, source_post_ids, stale_warning)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
-        [modelId, batchId, idea.concept, idea.format || '', idea.why_working || '',
-         idea.hook_line || '', idea.source_niche || model.primary_niche,
-         Array.isArray(idea.source_posts) ? idea.source_posts.join(',') : (idea.source_post_ids || ''), idea.stale_warning || null]
+        `INSERT INTO idea_cards (model_id, batch_id, concept, format, why_working, hook_line, source_niche, stale_warning, status)
+         VALUES ($1, $2, $3, '', '', '', $4, $5, 'pending')`,
+        [modelId, batchId, warning, model.primary_niche, warning]
       );
+    } else {
+      // Deduplicate against previous ideas
+      freshIdeas = await this._deduplicateIdeas(modelId, ideas);
+
+      // Store idea cards
+      for (const idea of freshIdeas) {
+        await pool.query(
+          `INSERT INTO idea_cards (model_id, batch_id, concept, format, why_working, hook_line, source_niche, source_post_ids, stale_warning)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
+          [modelId, batchId, idea.concept, idea.format || '', idea.why_working || '',
+           idea.hook_line || '', idea.source_niche || model.primary_niche,
+           Array.isArray(idea.source_posts) ? idea.source_posts.join(',') : (idea.source_post_ids || ''), idea.stale_warning || null]
+        );
+      }
     }
 
     // Add stale niche warnings
@@ -64,8 +98,12 @@ class ContentIdeaAgent {
       );
     }
 
-    console.log(`[AI Agent] Generated ${freshIdeas.length} ideas for ${model.name} (batch ${batchId})`);
-    return { batchId, ideaCount: freshIdeas.length, staleNiches };
+    if (warning) {
+      console.warn(`[AI Agent] Idea generation warning for ${model.name}: ${warning} (batch ${batchId})`);
+    } else {
+      console.log(`[AI Agent] Generated ${freshIdeas.length} ideas for ${model.name} (batch ${batchId})`);
+    }
+    return { batchId, ideaCount: freshIdeas.length, staleNiches, warning: warning || undefined };
   }
 
   async _queryTopContent(primaryNiche, secondaryNiches) {
@@ -144,40 +182,66 @@ class ContentIdeaAgent {
       `${i + 1}. @${p.account_handle} [${p.niche || 'unknown'}] — ${(p.caption || '').slice(0, 120).replace(/\n/g, ' ')}... | Views: ${(p.view_count || 0).toLocaleString()} | Likes: ${(p.like_count || 0).toLocaleString()} | ER: ${p.er_percent || 0}% | URL: ${p.post_url || `https://www.instagram.com/reel/${p.shortcode}/`}`
     ).join('\n');
 
-    const response = await this.client.messages.create({
-      model: 'claude-sonnet-4-20250514',
-      max_tokens: 1500,
-      temperature: 0.8,
-      system: `You are a content strategist for Instagram Reels creators. You analyze trending content data and generate actionable content ideas. Always respond with ONLY a JSON array of idea objects — no other text, no markdown fences. Each idea must be specific and actionable, not generic advice. Reference specific trends you see in the data.`,
-      messages: [{
-        role: 'user',
-        content: `Generate 3-5 content ideas for ${model.name}, who creates "${model.primary_niche}" content${secondaryText}.
+    const system = `You are a content strategist for Instagram Reels creators. You analyze trending content performance data and generate specific, producible content ideas — never generic advice. Ground every idea in observable patterns from the data you are given (recurring hooks, formats, or topics driving high views and engagement), and cite the specific source posts that inspired each idea. Each hook line must be a literal, scroll-stopping opening for the first 3 seconds — not a topic label.`;
+
+    const userPrompt = `Generate 3-5 content ideas for ${model.name}, who creates "${model.primary_niche}" content${secondaryText}.
 
 Here are the top-performing posts in their niche from the last 30 days:
 
 ${postList}
 
-Respond with a JSON array where each object has:
-- "concept": specific idea description (2-3 sentences)
-- "format": suggested format (POV reel, talking head, trend audio, skit, duet, etc.)
-- "why_working": why this type of content is performing well right now based on the data above (1-2 sentences)
-- "hook_line": suggested opening hook line for the first 3 seconds
-- "source_niche": which niche this idea comes from ("${model.primary_niche}"${model.secondary_niches ? ` or one of: ${model.secondary_niches}` : ''})
-- "source_posts": array of 1-3 post URLs that most inspired this idea (from the URLs listed above)
+For each idea provide:
+- concept: a specific, producible-this-week idea in 2-3 sentences (not generic advice).
+- format: the production format (POV reel, talking head, trend audio, skit, duet, etc.).
+- why_working: the observable pattern in the data above that makes this work right now, and why now (1-2 sentences).
+- hook_line: the literal opening line for the first 3 seconds.
+- source_niche: the niche this idea comes from ("${model.primary_niche}"${model.secondary_niches ? ` or one of: ${model.secondary_niches}` : ''}).
+- source_posts: 1-3 post URLs from the list above that most directly inspired this idea.
 
-Weight "${model.primary_niche}" content (70%) more than secondary niches (30%). Focus on patterns: recurring themes, hooks, formats, or topics driving high engagement.`
-      }],
-    });
+Weight "${model.primary_niche}" content (70%) over secondary niches (30%). Focus on recurring themes, hooks, formats, and topics driving high engagement in the data.`;
 
-    const text = response.content[0].text.trim();
+    let response;
     try {
-      // Try to parse JSON, handling potential markdown fences
-      const cleaned = text.replace(/^```json?\s*/i, '').replace(/```\s*$/, '').trim();
-      const ideas = JSON.parse(cleaned);
-      return Array.isArray(ideas) ? ideas.slice(0, 5) : [];
+      response = await this.client.messages.create({
+        model: 'claude-opus-4-8',
+        max_tokens: 6000,
+        thinking: { type: 'adaptive' },
+        output_config: {
+          effort: 'high',
+          format: { type: 'json_schema', schema: IDEAS_SCHEMA },
+        },
+        system,
+        messages: [{ role: 'user', content: userPrompt }],
+      });
     } catch (e) {
-      console.error('[AI Agent] Failed to parse Claude response:', text.slice(0, 200));
-      return [];
+      console.error('[AI Agent] Claude request failed:', e.message);
+      return { ideas: [], warning: `Idea generation request failed: ${e.message}` };
+    }
+
+    // Refusal: stop_reason is the source of truth; content may be empty.
+    if (response.stop_reason === 'refusal') {
+      console.warn('[AI Agent] Claude refused idea generation:', response.stop_details?.explanation);
+      return { ideas: [], warning: 'Idea generation could not be completed this run — the model declined this request. No ideas were generated; try again or adjust the niche.' };
+    }
+
+    // With adaptive thinking, content[0] may be a thinking block — find the text block.
+    const textBlock = (response.content || []).find(b => b.type === 'text');
+    if (!textBlock || !textBlock.text) {
+      const why = response.stop_reason === 'max_tokens' ? ' (response was cut off — too long)' : '';
+      return { ideas: [], warning: `Idea generation returned no usable content${why}. Try again.` };
+    }
+
+    try {
+      const parsed = JSON.parse(textBlock.text);
+      const ideas = Array.isArray(parsed.ideas) ? parsed.ideas.slice(0, 5) : [];
+      if (ideas.length === 0) {
+        return { ideas: [], warning: 'Idea generation produced no ideas this run. Try again.' };
+      }
+      return { ideas, warning: null };
+    } catch (e) {
+      console.error('[AI Agent] Failed to parse structured response:', textBlock.text.slice(0, 200));
+      const why = response.stop_reason === 'max_tokens' ? ' (response was cut off — too long)' : '';
+      return { ideas: [], warning: `Idea generation returned malformed data${why}. Try again.` };
     }
   }
 
@@ -208,3 +272,4 @@ Weight "${model.primary_niche}" content (70%) more than secondary niches (30%). 
 }
 
 module.exports = ContentIdeaAgent;
+module.exports.IDEAS_SCHEMA = IDEAS_SCHEMA;
