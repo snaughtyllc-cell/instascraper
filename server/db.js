@@ -12,6 +12,7 @@ if (USE_PG) {
     connectionString: process.env.DATABASE_URL,
     ssl: process.env.DATABASE_URL.includes('railway') ? { rejectUnauthorized: false } : false,
   });
+  pool.on('error', (err) => console.error('[DB] idle client error:', err.code || err.message));
   db = {
     query: (sql, params) => pool.query(sql, params),
     _pool: pool,
@@ -274,6 +275,5 @@ async function initDB() {
   console.log(`Database initialized (${USE_PG ? 'PostgreSQL' : 'SQLite'})`);
 }
 
-initDB().catch(console.error);
-
 module.exports = db;
+module.exports.initDB = initDB;

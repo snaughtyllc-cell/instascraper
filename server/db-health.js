@@ -28,4 +28,22 @@ function dbErrorMiddleware(err, req, res, next) {
   return res.status(500).json({ error: 'internal error' });
 }
 
-module.exports = { isTransientDbError, classifyDbError, asyncHandler, dbErrorMiddleware };
+function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
+async function initWithRetry(initFn, opts = {}) {
+  const { maxAttempts = 30, baseDelayMs = 1000, maxDelayMs = 15000 } = opts;
+  for (let attempt = 1; ; attempt++) {
+    try { return await initFn(); }
+    catch (err) {
+      const kind = classifyDbError(err);
+      if (kind !== 'transient' || attempt >= maxAttempts) {
+        console.error(`[Boot] DB init failed (${kind}, attempt ${attempt}):`, err.code || err.message);
+        throw err;
+      }
+      const delay = Math.min(baseDelayMs * 2 ** (attempt - 1), maxDelayMs);
+      console.warn(`[Boot] DB not ready (${err.code || err.message}); retry ${attempt} in ${delay}ms`);
+      await sleep(delay);
+    }
+  }
+}
+
+module.exports = { isTransientDbError, classifyDbError, asyncHandler, dbErrorMiddleware, initWithRetry };
