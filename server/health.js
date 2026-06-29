@@ -21,11 +21,15 @@ function assertThumbDirWritable(dir) {
 
 const liveHandler = (req, res) => res.status(200).json({ status: 'live' });
 const readyHandler = (deps = {}) => async (req, res) => {
-  if (!isReady()) return res.status(503).json({ ready: false });
-  // informational only — does not affect the latch
-  let db = 'up';
-  try { await (deps.db || require('./db')).query('SELECT 1'); } catch { db = 'down'; }
-  return res.status(200).json({ ready: true, db });
+  // Strict readiness: 503 until the first successful init (deploy gate — init
+  // requires the DB), then 503 whenever the live DB probe fails.
+  if (!isReady()) return res.status(503).json({ ready: false, reason: 'initializing' });
+  try {
+    await (deps.db || require('./db')).query('SELECT 1');
+  } catch {
+    return res.status(503).json({ ready: false, db: 'down' });
+  }
+  return res.status(200).json({ ready: true, db: 'up' });
 };
 
 module.exports = { markReady, isReady, resetForTest, assertThumbDirWritable, liveHandler, readyHandler };
