@@ -247,6 +247,23 @@ async function initDB() {
     )
   `);
 
+  // Apify run cost ledger (one row per actor run) — see Sub-C cost control
+  await db.query(`
+    CREATE TABLE IF NOT EXISTS apify_runs (
+      id ${SERIAL},
+      run_id TEXT UNIQUE NOT NULL,
+      actor_id TEXT,
+      purpose TEXT,
+      query TEXT,
+      status TEXT DEFAULT 'running',
+      results_count INTEGER DEFAULT 0,
+      usage_usd REAL DEFAULT 0,
+      scrape_job_id INTEGER,
+      started_at TEXT DEFAULT ${NOW_DEFAULT},
+      completed_at TEXT
+    )
+  `);
+
   // Migrations for existing tables
   if (USE_PG) {
     const migrations = [

@@ -16,6 +16,95 @@ function calcER(likes, comments, followers) {
   return { er_percent: Math.round(er * 100) / 100, er_label: label };
 }
 
+function isoNoMillis(ms) {
+  return new Date(ms).toISOString().replace(/\.\d{3}Z$/, 'Z');
+}
+
+class BudgetExceededError extends Error {
+  constructor(status) {
+    super(`Apify 30-day budget reached: ~$${status.projectedUsd.toFixed(2)} projected vs $${status.ceilingUsd.toFixed(2)} ceiling`);
+    this.name = 'BudgetExceededError';
+    this.budget = status;
+  }
+}
+
+function extractUsageUsd(runObject) {
+  const u = runObject && runObject.usageTotalUsd;
+  return (typeof u === 'number' && isFinite(u)) ? u : 0;
+}
+
+async function budgetStatus(db, nowMs = Date.now()) {
+  const ceilingUsd = parseFloat(process.env.APIFY_BUDGET_USD_30D) || 0;
+  const enforced = ceilingUsd > 0;
+  const since = isoNoMillis(nowMs - 30 * 24 * 60 * 60 * 1000);
+  const res = await db.query(
+    `SELECT
+       COALESCE(SUM(usage_usd), 0) AS spent,
+       COALESCE(SUM(CASE WHEN status = 'running' THEN 1 ELSE 0 END), 0) AS running,
+       COALESCE(AVG(CASE WHEN status = 'succeeded' THEN usage_usd END), 0) AS avg_usd,
+       COALESCE(SUM(CASE WHEN status = 'succeeded' THEN 1 ELSE 0 END), 0) AS finished
+     FROM apify_runs WHERE started_at >= $1`,
+    [since]
+  );
+  const row = res.rows[0] || {};
+  const spentUsd = Number(row.spent) || 0;
+  const runningCount = Number(row.running) || 0;
+  const avgUsd = Number(row.avg_usd) || 0;
+  const finished = Number(row.finished) || 0;
+  const estPerRun = finished > 0 ? avgUsd : (parseFloat(process.env.APIFY_EST_USD_PER_RUN) || 0.05);
+  const projectedUsd = spentUsd + runningCount * estPerRun;
+  const over = enforced && projectedUsd >= ceilingUsd;
+  return { spentUsd, projectedUsd, ceilingUsd, enforced, over, runningCount, estPerRun };
+}
+
+async function recordRunLaunch(db, { runId, actorId, purpose, query, scrapeJobId = null, nowMs = Date.now() }) {
+  await db.query(
+    `INSERT INTO apify_runs (run_id, actor_id, purpose, query, status, started_at, scrape_job_id)
+     VALUES ($1, $2, $3, $4, 'running', $5, $6)`,
+    [runId, actorId, purpose, query, isoNoMillis(nowMs), scrapeJobId]
+  );
+}
+
+async function recordRunCompletion(db, { runId, runObject = null, status, nowMs = Date.now() }) {
+  const usd = extractUsageUsd(runObject);
+  const items = (runObject && runObject.stats && Number(runObject.stats.itemCount)) || 0;
+  await db.query(
+    `UPDATE apify_runs SET status = $1, results_count = $2, usage_usd = $3, completed_at = $4 WHERE run_id = $5`,
+    [status, items, usd, isoNoMillis(nowMs), runId]
+  );
+  console.log(`[Metric] apify_run run=${runId} status=${status} items=${items} usd=${usd.toFixed(4)}`);
+}
+
+async function usageSummary(db, nowMs = Date.now()) {
+  const status = await budgetStatus(db, nowMs);
+  const since = isoNoMillis(nowMs - 30 * 24 * 60 * 60 * 1000);
+  const totals = await db.query(`SELECT COUNT(*) AS run_count FROM apify_runs WHERE started_at >= $1`, [since]);
+  const top = await db.query(
+    `SELECT query, COALESCE(SUM(usage_usd), 0) AS usd, COUNT(*) AS runs
+     FROM apify_runs WHERE started_at >= $1 AND query IS NOT NULL
+     GROUP BY query ORDER BY usd DESC LIMIT 10`,
+    [since]
+  );
+  return {
+    window_days: 30,
+    spent_usd: status.spentUsd,
+    projected_usd: status.projectedUsd,
+    ceiling_usd: status.ceilingUsd,
+    enforced: status.enforced,
+    run_count: Number(totals.rows[0].run_count) || 0,
+    top_accounts: top.rows.map(r => ({ query: r.query, usd: Number(r.usd) || 0, runs: Number(r.runs) || 0 })),
+  };
+}
+
+async function hasActiveJob(db, query, nowMs = Date.now(), windowMin = parseInt(process.env.APIFY_SCRAPE_DEDUP_MINUTES, 10) || 10) {
+  const since = isoNoMillis(nowMs - windowMin * 60 * 1000);
+  const res = await db.query(
+    `SELECT 1 FROM scrape_jobs WHERE query = $1 AND status = 'running' AND created_at >= $2 LIMIT 1`,
+    [query, since]
+  );
+  return res.rows.length > 0;
+}
+
 class InstagramScraper {
   constructor(apiKey) {
     this.apiKey = apiKey;
@@ -679,3 +768,11 @@ class InstagramScraper {
 }
 
 module.exports = InstagramScraper;
+module.exports.isoNoMillis = isoNoMillis;
+module.exports.BudgetExceededError = BudgetExceededError;
+module.exports.extractUsageUsd = extractUsageUsd;
+module.exports.budgetStatus = budgetStatus;
+module.exports.recordRunLaunch = recordRunLaunch;
+module.exports.recordRunCompletion = recordRunCompletion;
+module.exports.usageSummary = usageSummary;
+module.exports.hasActiveJob = hasActiveJob;
