@@ -98,7 +98,11 @@ class ContentIdeaAgent {
       );
     }
 
-    console.log(`[AI Agent] Generated ${freshIdeas.length} ideas for ${model.name} (batch ${batchId})`);
+    if (warning) {
+      console.warn(`[AI Agent] Idea generation warning for ${model.name}: ${warning} (batch ${batchId})`);
+    } else {
+      console.log(`[AI Agent] Generated ${freshIdeas.length} ideas for ${model.name} (batch ${batchId})`);
+    }
     return { batchId, ideaCount: freshIdeas.length, staleNiches, warning: warning || undefined };
   }
 
@@ -217,7 +221,7 @@ Weight "${model.primary_niche}" content (70%) over secondary niches (30%). Focus
     // Refusal: stop_reason is the source of truth; content may be empty.
     if (response.stop_reason === 'refusal') {
       console.warn('[AI Agent] Claude refused idea generation:', response.stop_details?.explanation);
-      return { ideas: [], warning: 'Idea generation was declined by the safety system this run. No ideas were generated — try again or adjust the niche.' };
+      return { ideas: [], warning: 'Idea generation could not be completed this run — the model declined this request. No ideas were generated; try again or adjust the niche.' };
     }
 
     // With adaptive thinking, content[0] may be a thinking block — find the text block.
