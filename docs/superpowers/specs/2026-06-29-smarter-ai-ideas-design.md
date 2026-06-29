@@ -154,24 +154,33 @@ async _callClaude(posts, model, staleNiches) {
 
 ### Caller change in `generateIdeasForModel` (line ~41)
 
+The warning path writes a Claude-failure card **and then falls through to the existing stale-niche warning loop** — it must not early-return. Today the stale-niche loop ([lines 57–65](../../../server/ai-agent.js)) runs after `_callClaude` regardless of whether ideas came back, so an empty/failed batch still surfaces "scrape more accounts in niche X" cards. Suppressing those on a Claude failure would be an unintended behavior change.
+
 ```js
 const { ideas, warning } = await this._callClaude(allPosts, model, staleNiches);
 
+let freshIdeas = [];
 if (warning) {
-  // Surface as a clear warning card instead of silently storing nothing.
+  // Surface the Claude failure as a clear warning card instead of silently storing nothing.
   await pool.query(
     `INSERT INTO idea_cards (model_id, batch_id, concept, format, why_working, hook_line, source_niche, stale_warning, status)
      VALUES ($1, $2, $3, '', '', '', $4, $5, 'pending')`,
     [modelId, batchId, warning, model.primary_niche, warning]
   );
-  return { batchId, ideaCount: 0, warning };
+} else {
+  freshIdeas = await this._deduplicateIdeas(modelId, ideas);
+  // ... existing idea-card insert loop, unchanged ...
 }
 
-const freshIdeas = await this._deduplicateIdeas(modelId, ideas);
-// ... existing insert loop, unchanged ...
+// Stale-niche warnings ALWAYS run (preserves current behavior — they are written
+// whether or not Claude returned ideas). Existing loop, unchanged.
+for (const niche of staleNiches) { /* existing stale-warning insert */ }
+
+console.log(`[AI Agent] Generated ${freshIdeas.length} ideas for ${model.name} (batch ${batchId})`);
+return { batchId, ideaCount: freshIdeas.length, staleNiches, warning: warning || undefined };
 ```
 
-This reuses the existing warning-card pattern (the "No trending content found" card already written when `allPosts.length === 0`).
+This reuses the existing warning-card pattern (the "No trending content found" card already written when `allPosts.length === 0`), and keeps the stale-niche loop on **both** the success and warning paths — matching today's behavior exactly.
 
 ---
 
