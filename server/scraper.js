@@ -169,6 +169,17 @@ class InstagramScraper {
 
   async startScrapeJob({ query, queryType, minLikes, minViews, startDate, endDate, source }) {
     const jobSource = source || 'manual';
+
+    // Footgun #2: skip if an active scrape for the same query is already running.
+    try {
+      if (await hasActiveJob(pool, query)) {
+        console.log(`[Scraper] Skipping @${query} — an active scrape job already exists.`);
+        return { skipped: true, reason: 'already running' };
+      }
+    } catch (e) {
+      console.error('[Scraper] collision check failed (continuing):', e.message);
+    }
+
     const result = await pool.query(
       `INSERT INTO scrape_jobs (query, query_type, status, source) VALUES ($1, $2, 'running', $3) RETURNING id`,
       [query, queryType, jobSource]
@@ -184,6 +195,10 @@ class InstagramScraper {
       this._pollAndStore(run.id, jobId, { minLikes, minViews, startDate, endDate, query });
       return { jobId, apifyRunId: run.id, status: 'running' };
     } catch (err) {
+      if (err instanceof BudgetExceededError) {
+        await pool.query('UPDATE scrape_jobs SET status = $1, error = $2 WHERE id = $3', ['skipped', err.message, jobId]);
+        throw err; // let the caller (route / scheduler) handle it distinctly
+      }
       await pool.query('UPDATE scrape_jobs SET status = $1, error = $2 WHERE id = $3', ['failed', err.message, jobId]);
       throw err;
     }
@@ -320,7 +335,8 @@ class InstagramScraper {
     let items = await res.json();
 
     // Fallback: if reel scraper returned very few items, retry with generic scraper
-    if (items.length <= 3 && filters.query && !filters.query.startsWith('#') && !filters.query.startsWith('http')) {
+    const fallbackDisabled = /^(1|true|yes)$/i.test(process.env.APIFY_DISABLE_REEL_FALLBACK || '');
+    if (!fallbackDisabled && items.length <= 3 && filters.query && !filters.query.startsWith('#') && !filters.query.startsWith('http')) {
       console.log(`[Scraper] Reel scraper returned only ${items.length} items for "${filters.query}", trying generic scraper...`);
       await pool.query('UPDATE scrape_jobs SET status_message = $1 WHERE id = $2', ['Retrying with generic scraper...', jobId]);
       try {

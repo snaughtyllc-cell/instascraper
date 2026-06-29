@@ -8,6 +8,7 @@ const fs = require('fs');
 const fetch = require('node-fetch');
 const pool = require('./db');
 const InstagramScraper = require('./scraper');
+const { BudgetExceededError } = require('./scraper');
 const { startScheduler, getSchedulerStatus, runAutoScrape, runEngagementRollup, runAutoCleanup, runDiscovery, runIdeaGeneration } = require('./scheduler');
 const { asyncHandler, dbErrorMiddleware, initWithRetry, wrapAsyncRoutes } = require('./db-health');
 const health = require('./health');
@@ -103,8 +104,10 @@ app.post('/scrape', async (req, res) => {
       startDate: startDate || null,
       endDate: endDate || null,
     });
+    if (result && result.skipped) return res.json({ skipped: true, message: 'A scrape for this account is already running.' });
     res.json(result);
   } catch (err) {
+    if (err instanceof BudgetExceededError) return res.status(429).json({ error: err.message, budget: err.budget });
     res.status(500).json({ error: err.message });
   }
 });
@@ -241,8 +244,12 @@ app.post('/tracked', async (req, res) => {
 app.post('/tracked/:username/scrape', async (req, res) => {
   try {
     const result = await scraper.startScrapeJob({ query: req.params.username, queryType: 'username', minLikes: null, minViews: null, startDate: null, endDate: null, source: 'manual' });
+    if (result && result.skipped) return res.json({ skipped: true, message: 'A scrape for this account is already running.' });
     res.json(result);
-  } catch (err) { res.status(500).json({ error: err.message }); }
+  } catch (err) {
+    if (err instanceof BudgetExceededError) return res.status(429).json({ error: err.message, budget: err.budget });
+    res.status(500).json({ error: err.message });
+  }
 });
 
 app.patch('/tracked/:username', async (req, res) => {
