@@ -100,12 +100,17 @@ async function usageSummary(db, nowMs = Date.now()) {
 }
 
 async function hasActiveJob(db, query, nowMs = Date.now(), windowMin = parseInt(process.env.APIFY_SCRAPE_DEDUP_MINUTES, 10) || 10) {
-  const since = isoNoMillis(nowMs - windowMin * 60 * 1000);
+  const cutoffMs = nowMs - windowMin * 60 * 1000;
   const res = await db.query(
-    `SELECT 1 FROM scrape_jobs WHERE query = $1 AND status = 'running' AND created_at >= $2 LIMIT 1`,
-    [query, since]
+    `SELECT created_at FROM scrape_jobs WHERE query = $1 AND status = 'running'`,
+    [query]
   );
-  return res.rows.length > 0;
+  return res.rows.some((r) => {
+    let s = (r.created_at || '').trim().replace(' ', 'T'); // sqlite "YYYY-MM-DD HH:MM:SS" → "...T..."
+    if (s && !/(Z|[+-]\d\d:?\d\d)$/.test(s)) s += 'Z';      // treat a naive timestamp as UTC (both backends store UTC)
+    const t = Date.parse(s);
+    return Number.isFinite(t) && t >= cutoffMs;
+  });
 }
 
 class InstagramScraper {

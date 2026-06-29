@@ -170,3 +170,12 @@ test('BudgetExceededError carries the budget status and a descriptive message', 
   assert.strictEqual(err.budget, status);
   assert.match(err.message, /1\.50.*1\.00/);
 });
+
+test('hasActiveJob fires for a job written via the real datetime(\'now\') default (sqlite format)', async () => {
+  const db = makeDb();
+  // Production INSERT path: created_at comes from the DB default, sqlite-style "YYYY-MM-DD HH:MM:SS".
+  db.sqlite.prepare(`INSERT INTO scrape_jobs (query, query_type, status, created_at) VALUES (?,?,?, datetime('now'))`)
+    .run('@live', 'username', 'running');
+  // Default nowMs = Date.now(); the row was created ~now, well within the 10-min window.
+  assert.strictEqual(await hasActiveJob(db, '@live'), true);
+});
