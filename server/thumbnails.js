@@ -51,16 +51,23 @@ async function sweepThumbnails(opts = {}, deps = {}) {
   const { maxAgeDays = 14, batchLimit = 200, concurrency = 4 } = opts;
   const db = deps.db || require('./db');
   const download = deps.download || ((p) => downloadThumbnail(p, { thumbDir: deps.thumbDir }));
+  const delay = deps.delay || ((ms) => new Promise(r => setTimeout(r, ms)));
 
-  // Only recent posts: stored scraped_at is ISO 'YYYY-MM-DDThh:mm:ssZ' which sorts
-  // lexicographically = chronologically, so a string compare is PG/SQLite-safe.
+  // 'pending' is set by a scrape (insert OR conflict-upsert) the moment it refreshes
+  // thumbnail_url, so a pending row ALWAYS has a freshly-scraped URL — sweep it
+  // regardless of scraped_at (this is the heal path: a re-scraped OLD post keeps its
+  // old scraped_at but gets status='pending', and must still be downloaded). A pending
+  // row leaves the pool after one attempt (cached/expired/error), so this never
+  // repeatedly hammers a URL. Only legacy NULL-status rows (pre-migration, URLs likely
+  // already expired) get the recency filter, so we don't keep retrying dead URLs.
+  // Stored scraped_at is ISO 'YYYY-MM-DDThh:mm:ssZ' → lexicographic compare = chronological, PG/SQLite-safe.
   const now = deps.now ? deps.now() : Date.now();
   const cutoff = new Date(now - maxAgeDays * 86400000).toISOString().slice(0, 19) + 'Z';
   const sel = await db.query(
     `SELECT id, shortcode, thumbnail_url FROM posts
-     WHERE (thumbnail_cache_status IS NULL OR thumbnail_cache_status = 'pending')
-       AND thumbnail_url IS NOT NULL
-       AND scraped_at >= $1
+     WHERE thumbnail_url IS NOT NULL
+       AND ( thumbnail_cache_status = 'pending'
+             OR (thumbnail_cache_status IS NULL AND scraped_at >= $1) )
      ORDER BY id DESC LIMIT $2`,
     [cutoff, batchLimit]
   );
@@ -84,7 +91,7 @@ async function sweepThumbnails(opts = {}, deps = {}) {
       if (outcome === 'cached') tally.cached++;
       else if (outcome === 'expired') tally.expired++;
       else tally.errored++;
-      await new Promise(r => setTimeout(r, 100 + Math.floor(Math.random() * 200))); // jitter
+      await delay(100 + Math.floor(Math.random() * 200));
     }
   }
 

@@ -78,7 +78,7 @@ test('sweep downloads only pending/null recent posts and tallies outcomes', asyn
   const download = async (post) => post.shortcode === 'a'
     ? { status: 'cached' } : { status: 'expired', error: 'HTTP 403' };
 
-  const res = await sweepThumbnails({ batchLimit: 10 }, { db, download });
+  const res = await sweepThumbnails({ batchLimit: 10 }, { db, download, delay: () => Promise.resolve() });
   assert.equal(res.attempted, 2);
   assert.equal(res.cached, 1);
   assert.equal(res.expired, 1);
@@ -88,19 +88,22 @@ test('sweep downloads only pending/null recent posts and tallies outcomes', asyn
 test('sweep never throws when a download rejects', async () => {
   const db = { query: async (sql) => /SELECT/i.test(sql) ? { rows: [{ id: 1, shortcode: 'a', thumbnail_url: 'u' }] } : { rows: [] } };
   const download = async () => { throw new Error('boom'); };
-  const res = await sweepThumbnails({}, { db, download });
+  const res = await sweepThumbnails({}, { db, download, delay: () => Promise.resolve() });
   assert.equal(res.errored, 1);
 });
 
-test('sweep skips posts older than maxAgeDays (age filter actually applied)', async () => {
+test('sweep heals re-scraped old (pending) posts regardless of age, but recency-filters legacy NULL rows', async () => {
   const Database = require('better-sqlite3');
   const sqlite = new Database(':memory:');
   sqlite.exec(`CREATE TABLE posts (id INTEGER PRIMARY KEY, shortcode TEXT, thumbnail_url TEXT,
     thumbnail_cache_status TEXT, thumbnail_cache_error TEXT, scraped_at TEXT)`);
-  sqlite.prepare(`INSERT INTO posts (id,shortcode,thumbnail_url,thumbnail_cache_status,scraped_at) VALUES (?,?,?,?,?)`)
-    .run(1, 'old', 'u', 'pending', '2020-01-01T00:00:00Z');
-  sqlite.prepare(`INSERT INTO posts (id,shortcode,thumbnail_url,thumbnail_cache_status,scraped_at) VALUES (?,?,?,?,?)`)
-    .run(2, 'new', 'u', 'pending', '2026-06-28T00:00:00Z');
+  const ins = sqlite.prepare(`INSERT INTO posts (id,shortcode,thumbnail_url,thumbnail_cache_status,scraped_at) VALUES (?,?,?,?,?)`);
+  // legacy: old scraped_at, NULL status (pre-migration, URL likely expired) -> SKIP
+  ins.run(1, 'legacy_old', 'u', null, '2020-01-01T00:00:00Z');
+  // re-scraped old post: old scraped_at BUT status='pending' (upsert just set a FRESH url) -> MUST be swept (heal path / CX-011)
+  ins.run(2, 'rescraped_old', 'u', 'pending', '2020-02-02T00:00:00Z');
+  // recent legacy NULL within window -> swept
+  ins.run(3, 'recent_legacy', 'u', null, '2026-06-28T00:00:00Z');
   const db = { query: async (sql, params = []) => {
     const conv = sql.replace(/\$(\d+)/g, '?');
     if (/^\s*SELECT/i.test(sql)) return { rows: sqlite.prepare(conv).all(...params) };
@@ -108,8 +111,9 @@ test('sweep skips posts older than maxAgeDays (age filter actually applied)', as
   }};
   const seen = [];
   const download = async (p) => { seen.push(p.shortcode); return { status: 'cached' }; };
-  const res = await sweepThumbnails({ maxAgeDays: 14 },
-    { db, download, now: () => Date.parse('2026-06-29T00:00:00Z') });
-  assert.deepEqual(seen, ['new'], 'only the recent pending post is swept; the 2020 one is skipped');
-  assert.equal(res.cached, 1);
+  await sweepThumbnails({ maxAgeDays: 14 },
+    { db, download, delay: () => Promise.resolve(), now: () => Date.parse('2026-06-29T00:00:00Z') });
+  assert.ok(seen.includes('rescraped_old'), 'a re-scraped old post (pending, fresh URL) IS healed by the sweep');
+  assert.ok(seen.includes('recent_legacy'), 'a recent legacy post IS swept');
+  assert.ok(!seen.includes('legacy_old'), 'an old legacy NULL-status post is SKIPPED (do not hammer expired URLs)');
 });
