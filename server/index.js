@@ -9,13 +9,14 @@ const fetch = require('node-fetch');
 const pool = require('./db');
 const InstagramScraper = require('./scraper');
 const { startScheduler, getSchedulerStatus, runAutoScrape, runEngagementRollup, runAutoCleanup, runDiscovery, runIdeaGeneration } = require('./scheduler');
+const { asyncHandler, dbErrorMiddleware, initWithRetry, wrapAsyncRoutes } = require('./db-health');
+const health = require('./health');
+const { downloadThumbnail, DEFAULT_THUMB_DIR } = require('./thumbnails');
 
 const app = express();
+wrapAsyncRoutes(app);
 const PORT = process.env.PORT || 4000;
-const THUMB_DIR = path.join(__dirname, 'thumbnails');
 const IS_PROD = process.env.NODE_ENV === 'production';
-
-if (!fs.existsSync(THUMB_DIR)) fs.mkdirSync(THUMB_DIR);
 
 const AUTH_PASSWORD = process.env.AUTH_PASSWORD || '';
 const API_KEY = process.env.INSTASCRAPER_API_KEY || '';
@@ -37,6 +38,9 @@ app.use(session({
     maxAge: 7 * 24 * 60 * 60 * 1000,
   },
 }));
+
+app.get('/live', health.liveHandler);
+app.get('/ready', health.readyHandler());
 
 app.get('/auth/check', (req, res) => {
   if (!passwordHash) return res.json({ authenticated: true, authRequired: false });
@@ -84,7 +88,6 @@ const { deliverBatch } = require('./delivery');
 
 const scraper = new InstagramScraper(process.env.APIFY_API_KEY || '');
 const ideaAgent = new ContentIdeaAgent(process.env.ANTHROPIC_API_KEY || '');
-startScheduler(scraper);
 
 // ─── Scrape Routes ──────────────────────────────────────────────
 
@@ -724,26 +727,16 @@ app.get('/export', async (req, res) => {
 
 // ─── Thumbnail Proxy ────────────────────────────────────────────
 
-app.use('/thumbnails', express.static(THUMB_DIR));
+app.use('/thumbnails', express.static(DEFAULT_THUMB_DIR));
 
-app.get('/thumb/:postId', async (req, res) => {
+app.get('/thumb/:postId', asyncHandler(async (req, res) => {
   const result = await pool.query('SELECT thumbnail_url, shortcode FROM posts WHERE id = $1', [Number(req.params.postId)]);
   const post = result.rows[0];
   if (!post || !post.thumbnail_url) return res.status(404).send('No thumbnail');
-  const filename = `${post.shortcode}.jpg`;
-  const filepath = path.join(THUMB_DIR, filename);
-  if (fs.existsSync(filepath)) return res.sendFile(filepath);
-  try {
-    const response = await fetch(post.thumbnail_url, { headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36' } });
-    if (!response.ok) throw new Error(`HTTP ${response.status}`);
-    const buffer = await response.buffer();
-    fs.writeFileSync(filepath, buffer);
-    res.setHeader('Content-Type', 'image/jpeg');
-    res.send(buffer);
-  } catch (err) {
-    res.status(502).json({ error: 'Failed to fetch thumbnail: ' + err.message });
-  }
-});
+  const r = await downloadThumbnail(post);
+  if (r.status === 'cached') return res.sendFile(r.path);
+  return res.status(502).json({ error: `thumbnail ${r.status}: ${r.error || ''}` });
+}));
 
 // ─── Static Files ───────────────────────────────────────────────
 
@@ -755,8 +748,33 @@ if (fs.existsSync(clientBuild)) {
   });
 }
 
-app.listen(PORT, '0.0.0.0', () => {
-  console.log(`Server running on http://0.0.0.0:${PORT}`);
-  if (passwordHash) console.log('Auth enabled — password required');
-  else console.log('Auth disabled — no AUTH_PASSWORD set');
+app.use(dbErrorMiddleware); // must be last
+
+// Defense-in-depth: wrapAsyncRoutes already forwards route-handler rejections to
+// dbErrorMiddleware; this guard catches any non-route async rejection (e.g. a
+// background job) so a stray rejection can never crash the process.
+process.on('unhandledRejection', (err) => {
+  console.error('[unhandledRejection]', (err && (err.code || err.message)) || err);
 });
+
+async function boot() {
+  health.assertThumbDirWritable(DEFAULT_THUMB_DIR);
+  try {
+    await initWithRetry(() => pool.initDB());
+    health.markReady();
+    console.log('Database ready');
+  } catch (err) {
+    console.error('[Boot] fatal DB init error; exiting:', err.code || err.message);
+    process.exit(1); // fail the deploy rather than promote a broken release
+  }
+}
+
+if (require.main === module) {
+  app.listen(PORT, '0.0.0.0', () => {
+    console.log(`Server running on http://0.0.0.0:${PORT}`);
+    if (passwordHash) console.log('Auth enabled — password required'); else console.log('Auth disabled — no AUTH_PASSWORD set');
+  });
+  boot().then(() => startScheduler(scraper));
+}
+
+module.exports = app;

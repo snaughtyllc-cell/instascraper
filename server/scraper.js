@@ -1,5 +1,6 @@
 const fetch = require('node-fetch');
 const pool = require('./db');
+const { sweepThumbnails } = require('./thumbnails');
 
 const APIFY_BASE = 'https://api.apify.com/v2';
 const REEL_ACTOR_ID = 'apify~instagram-reel-scraper';
@@ -280,16 +281,25 @@ class InstagramScraper {
           INSERT INTO posts (shortcode, video_url, thumbnail_url, caption, like_count, comment_count,
             view_count, posted_at, account_handle, post_url, source_query, followers_at_scrape, er_percent, er_label)
           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
-          ON CONFLICT (shortcode) DO NOTHING
+          ON CONFLICT (shortcode) DO UPDATE SET
+            thumbnail_url = EXCLUDED.thumbnail_url,
+            video_url = EXCLUDED.video_url,
+            like_count = EXCLUDED.like_count,
+            comment_count = EXCLUDED.comment_count,
+            view_count = EXCLUDED.view_count,
+            followers_at_scrape = EXCLUDED.followers_at_scrape,
+            er_percent = EXCLUDED.er_percent,
+            er_label = EXCLUDED.er_label,
+            thumbnail_cache_status = 'pending'
         `, [
           post.shortcode, post.videoUrl, post.thumbnailUrl, post.caption,
           post.likeCount, post.commentCount, post.viewCount, post.postedAt,
           post.accountHandle, post.postUrl, post.sourceQuery,
           post.followersAtScrape, post.erPercent, post.erLabel,
         ]);
-        if (insertResult.rowCount > 0) count++;
+        if (insertResult.rowCount > 0) count++; // counts both new inserts and refreshed rows
       } catch (e) {
-        // skip duplicates
+        // skip on error
       }
     }
 
@@ -305,6 +315,9 @@ class InstagramScraper {
       `UPDATE scrape_jobs SET status = $1, posts_found = $2, progress = 100, status_message = $3, completed_at = TO_CHAR(NOW(), 'YYYY-MM-DD"T"HH24:MI:SS"Z"') WHERE id = $4`,
       ['completed', count, `Done — ${count} new, ${matched} reels matched (${items.length} total scraped)`, jobId]
     );
+
+    // Fire-and-forget: cache thumbnails for the just-scraped posts while URLs are fresh.
+    sweepThumbnails({ batchLimit: 80 }).catch(err => console.error('[Sweep] post-scrape sweep failed:', err.message));
   }
 
   _passesFilters(post, filters) {

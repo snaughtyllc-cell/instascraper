@@ -151,6 +151,19 @@ async function runIdeaGeneration() {
   } catch (err) { jobStatus.ideaGeneration.status = 'error'; jobStatus.ideaGeneration.message = err.message; }
 }
 
+async function runThumbnailSweep() {
+  const { sweepThumbnails } = require('./thumbnails');
+  jobStatus.thumbnailSweep = jobStatus.thumbnailSweep || {};
+  jobStatus.thumbnailSweep.status = 'running';
+  try {
+    const t = await sweepThumbnails({ maxAgeDays: 14, batchLimit: 200 });
+    jobStatus.thumbnailSweep.message = `Swept: ${t.cached} cached, ${t.expired} expired, ${t.errored} errored`;
+  } catch (err) {
+    jobStatus.thumbnailSweep.message = `Failed: ${err.message}`;
+  }
+  jobStatus.thumbnailSweep.status = 'idle';
+}
+
 function startScheduler(scraper) {
   scraperInstance = scraper;
   cron.schedule('0 3 */3 * *', () => runAutoScrape());
@@ -158,9 +171,10 @@ function startScheduler(scraper) {
   cron.schedule('0 2 * * *', () => runAutoCleanup());
   cron.schedule('0 4 * * 1', () => runDiscovery());
   cron.schedule('0 8 * * *', () => runIdeaGeneration()); // Daily 8am, checks delivery_day
+  cron.schedule('0 5 * * *', () => runThumbnailSweep());
   console.log('[Scheduler] All cron jobs registered');
 }
 
 function getSchedulerStatus() { return jobStatus; }
 
-module.exports = { startScheduler, getSchedulerStatus, runAutoScrape, runEngagementRollup, runAutoCleanup, runDiscovery, runIdeaGeneration };
+module.exports = { startScheduler, getSchedulerStatus, runAutoScrape, runEngagementRollup, runAutoCleanup, runDiscovery, runIdeaGeneration, runThumbnailSweep };
