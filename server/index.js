@@ -9,11 +9,12 @@ const fetch = require('node-fetch');
 const pool = require('./db');
 const InstagramScraper = require('./scraper');
 const { startScheduler, getSchedulerStatus, runAutoScrape, runEngagementRollup, runAutoCleanup, runDiscovery, runIdeaGeneration } = require('./scheduler');
-const { asyncHandler, dbErrorMiddleware, initWithRetry } = require('./db-health');
+const { asyncHandler, dbErrorMiddleware, initWithRetry, wrapAsyncRoutes } = require('./db-health');
 const health = require('./health');
 const { downloadThumbnail, DEFAULT_THUMB_DIR } = require('./thumbnails');
 
 const app = express();
+wrapAsyncRoutes(app);
 const PORT = process.env.PORT || 4000;
 const IS_PROD = process.env.NODE_ENV === 'production';
 
@@ -770,12 +771,11 @@ async function boot() {
 }
 
 if (require.main === module) {
-  boot();
-  startScheduler(scraper);
   app.listen(PORT, '0.0.0.0', () => {
     console.log(`Server running on http://0.0.0.0:${PORT}`);
     if (passwordHash) console.log('Auth enabled — password required'); else console.log('Auth disabled — no AUTH_PASSWORD set');
   });
+  boot().then(() => startScheduler(scraper));
 }
 
 module.exports = app;

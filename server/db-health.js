@@ -46,4 +46,13 @@ async function initWithRetry(initFn, opts = {}) {
   }
 }
 
-module.exports = { isTransientDbError, classifyDbError, asyncHandler, dbErrorMiddleware, initWithRetry };
+function wrapAsyncRoutes(app) {
+  for (const m of ['get', 'post', 'put', 'patch', 'delete']) {
+    const orig = app[m].bind(app);
+    app[m] = (path, ...handlers) =>
+      orig(path, ...handlers.map(h => (typeof h === 'function' && h.length < 4) ? asyncHandler(h) : h));
+  }
+  return app;
+}
+
+module.exports = { isTransientDbError, classifyDbError, asyncHandler, dbErrorMiddleware, initWithRetry, wrapAsyncRoutes };

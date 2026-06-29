@@ -10,6 +10,20 @@ function get(server, path) {
   });
 }
 
+test('wrapAsyncRoutes turns a rejected async route into a 503 (not a hang/crash)', async () => {
+  const express = require('express');
+  const { wrapAsyncRoutes, dbErrorMiddleware } = require('./db-health');
+  const a = express();
+  wrapAsyncRoutes(a);
+  a.get('/boom', async () => { const e = new Error('db down'); e.code = 'ECONNREFUSED'; throw e; });
+  a.use(dbErrorMiddleware);
+  const server = a.listen(0);
+  try {
+    const r = await get(server, '/boom');
+    assert.equal(r.status, 503, 'a DB-rejecting route returns a clean 503');
+  } finally { server.close(); }
+});
+
 test('/live always 200, /ready reflects latch', async () => {
   process.env.AUTH_PASSWORD = ''; // disable auth for the smoke test
   health.resetForTest();
