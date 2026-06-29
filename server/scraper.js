@@ -280,7 +280,16 @@ class InstagramScraper {
           INSERT INTO posts (shortcode, video_url, thumbnail_url, caption, like_count, comment_count,
             view_count, posted_at, account_handle, post_url, source_query, followers_at_scrape, er_percent, er_label)
           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
-          ON CONFLICT (shortcode) DO NOTHING
+          ON CONFLICT (shortcode) DO UPDATE SET
+            thumbnail_url = EXCLUDED.thumbnail_url,
+            video_url = EXCLUDED.video_url,
+            like_count = EXCLUDED.like_count,
+            comment_count = EXCLUDED.comment_count,
+            view_count = EXCLUDED.view_count,
+            followers_at_scrape = EXCLUDED.followers_at_scrape,
+            er_percent = EXCLUDED.er_percent,
+            er_label = EXCLUDED.er_label,
+            thumbnail_cache_status = 'pending'
         `, [
           post.shortcode, post.videoUrl, post.thumbnailUrl, post.caption,
           post.likeCount, post.commentCount, post.viewCount, post.postedAt,

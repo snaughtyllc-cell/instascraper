@@ -252,6 +252,8 @@ async function initDB() {
       `ALTER TABLE posts ADD COLUMN IF NOT EXISTS soft_deleted INTEGER DEFAULT 0`,
       `ALTER TABLE posts ADD COLUMN IF NOT EXISTS soft_deleted_at TEXT DEFAULT NULL`,
       `ALTER TABLE scrape_jobs ADD COLUMN IF NOT EXISTS source TEXT DEFAULT 'manual'`,
+      `ALTER TABLE posts ADD COLUMN IF NOT EXISTS thumbnail_cache_status TEXT`,
+      `ALTER TABLE posts ADD COLUMN IF NOT EXISTS thumbnail_cache_error TEXT`,
     ];
     for (const sql of migrations) {
       try { await db.query(sql); } catch (e) { /* ignore */ }
@@ -261,6 +263,8 @@ async function initDB() {
       `ALTER TABLE posts ADD COLUMN soft_deleted INTEGER DEFAULT 0`,
       `ALTER TABLE posts ADD COLUMN soft_deleted_at TEXT DEFAULT NULL`,
       `ALTER TABLE scrape_jobs ADD COLUMN source TEXT DEFAULT 'manual'`,
+      `ALTER TABLE posts ADD COLUMN thumbnail_cache_status TEXT`,
+      `ALTER TABLE posts ADD COLUMN thumbnail_cache_error TEXT`,
     ];
     for (const sql of migrations) {
       try { await db.query(sql); } catch (e) { /* column already exists */ }
