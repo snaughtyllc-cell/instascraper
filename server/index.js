@@ -8,7 +8,7 @@ const fs = require('fs');
 const fetch = require('node-fetch');
 const pool = require('./db');
 const InstagramScraper = require('./scraper');
-const { BudgetExceededError } = require('./scraper');
+const { BudgetExceededError, usageSummary } = InstagramScraper;
 const { startScheduler, getSchedulerStatus, runAutoScrape, runEngagementRollup, runAutoCleanup, runDiscovery, runIdeaGeneration } = require('./scheduler');
 const { asyncHandler, dbErrorMiddleware, initWithRetry, wrapAsyncRoutes } = require('./db-health');
 const health = require('./health');
@@ -83,6 +83,7 @@ app.use('/delete-log', requireAuth);
 app.use('/scheduler', requireAuth);
 app.use('/models', requireAuth);
 app.use('/ideas', requireAuth);
+app.use('/admin', requireAuth);
 
 const ContentIdeaAgent = require('./ai-agent');
 const { deliverBatch } = require('./delivery');
@@ -344,6 +345,17 @@ app.post('/scheduler/run/:job', async (req, res) => {
   if (!jobs[job]) return res.status(400).json({ error: `Unknown job: ${job}` });
   jobs[job]();
   res.json({ success: true, message: `Job '${job}' started` });
+});
+
+// ─── Admin Routes ───────────────────────────────────────────────
+
+app.get('/admin/apify-usage', async (req, res) => {
+  try {
+    const summary = await usageSummary(pool);
+    res.json(summary);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
 });
 
 // ─── Engagement Routes ──────────────────────────────────────────
