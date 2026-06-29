@@ -1,5 +1,6 @@
 const cron = require('node-cron');
 const pool = require('./db');
+const { BudgetExceededError } = require('./scraper');
 
 const ContentIdeaAgent = require('./ai-agent');
 const { deliverBatch } = require('./delivery');
@@ -26,7 +27,15 @@ async function runAutoScrape() {
         await scraperInstance.startScrapeJob({ query: account.username, queryType: 'username', minLikes: null, minViews: null, startDate: null, endDate: null, source: 'auto' });
         scraped++;
         if (scraped < result.rows.length) await new Promise(r => setTimeout(r, 30000));
-      } catch (err) { console.error(`[Scheduler] Failed to scrape @${account.username}:`, err.message); }
+      } catch (err) {
+        if (err instanceof BudgetExceededError) {
+          console.log(`[Metric] auto_scrape_budget_stop scraped=${scraped} total=${result.rows.length} msg="${err.message}"`);
+          jobStatus.autoScrape.message = `Stopped at ${scraped}/${result.rows.length} — ${err.message}`;
+          jobStatus.autoScrape.status = 'idle';
+          return;
+        }
+        console.error(`[Scheduler] Failed to scrape @${account.username}:`, err.message);
+      }
     }
     jobStatus.autoScrape.message = `Scraped ${scraped}/${result.rows.length} accounts`;
     jobStatus.autoScrape.status = 'idle';

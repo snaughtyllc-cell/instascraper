@@ -8,6 +8,7 @@ const fs = require('fs');
 const fetch = require('node-fetch');
 const pool = require('./db');
 const InstagramScraper = require('./scraper');
+const { BudgetExceededError, usageSummary } = InstagramScraper;
 const { startScheduler, getSchedulerStatus, runAutoScrape, runEngagementRollup, runAutoCleanup, runDiscovery, runIdeaGeneration } = require('./scheduler');
 const { asyncHandler, dbErrorMiddleware, initWithRetry, wrapAsyncRoutes } = require('./db-health');
 const health = require('./health');
@@ -82,6 +83,7 @@ app.use('/delete-log', requireAuth);
 app.use('/scheduler', requireAuth);
 app.use('/models', requireAuth);
 app.use('/ideas', requireAuth);
+app.use('/admin', requireAuth);
 
 const ContentIdeaAgent = require('./ai-agent');
 const { deliverBatch } = require('./delivery');
@@ -103,8 +105,10 @@ app.post('/scrape', async (req, res) => {
       startDate: startDate || null,
       endDate: endDate || null,
     });
+    if (result && result.skipped) return res.json({ skipped: true, message: 'A scrape for this account is already running.' });
     res.json(result);
   } catch (err) {
+    if (err instanceof BudgetExceededError) return res.status(429).json({ error: err.message, budget: err.budget });
     res.status(500).json({ error: err.message });
   }
 });
@@ -241,8 +245,12 @@ app.post('/tracked', async (req, res) => {
 app.post('/tracked/:username/scrape', async (req, res) => {
   try {
     const result = await scraper.startScrapeJob({ query: req.params.username, queryType: 'username', minLikes: null, minViews: null, startDate: null, endDate: null, source: 'manual' });
+    if (result && result.skipped) return res.json({ skipped: true, message: 'A scrape for this account is already running.' });
     res.json(result);
-  } catch (err) { res.status(500).json({ error: err.message }); }
+  } catch (err) {
+    if (err instanceof BudgetExceededError) return res.status(429).json({ error: err.message, budget: err.budget });
+    res.status(500).json({ error: err.message });
+  }
 });
 
 app.patch('/tracked/:username', async (req, res) => {
@@ -337,6 +345,17 @@ app.post('/scheduler/run/:job', async (req, res) => {
   if (!jobs[job]) return res.status(400).json({ error: `Unknown job: ${job}` });
   jobs[job]();
   res.json({ success: true, message: `Job '${job}' started` });
+});
+
+// ─── Admin Routes ───────────────────────────────────────────────
+
+app.get('/admin/apify-usage', async (req, res) => {
+  try {
+    const summary = await usageSummary(pool);
+    res.json(summary);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
 });
 
 // ─── Engagement Routes ──────────────────────────────────────────

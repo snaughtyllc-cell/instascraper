@@ -16,6 +16,103 @@ function calcER(likes, comments, followers) {
   return { er_percent: Math.round(er * 100) / 100, er_label: label };
 }
 
+function isoNoMillis(ms) {
+  return new Date(ms).toISOString().replace(/\.\d{3}Z$/, 'Z');
+}
+
+class BudgetExceededError extends Error {
+  constructor(status) {
+    super(`Apify 30-day budget reached: ~$${status.projectedUsd.toFixed(2)} projected vs $${status.ceilingUsd.toFixed(2)} ceiling`);
+    this.name = 'BudgetExceededError';
+    this.budget = status;
+  }
+}
+
+function extractUsageUsd(runObject) {
+  const u = runObject && runObject.usageTotalUsd;
+  return (typeof u === 'number' && isFinite(u)) ? u : 0;
+}
+
+async function budgetStatus(db, nowMs = Date.now()) {
+  const ceilingUsd = parseFloat(process.env.APIFY_BUDGET_USD_30D) || 0;
+  const enforced = ceilingUsd > 0;
+  const since = isoNoMillis(nowMs - 30 * 24 * 60 * 60 * 1000);
+  // `spent` sums usage_usd over every finished run in the window — failed runs
+  // included, since a failed Apify run still incurs cost. running rows are $0
+  // until finalized, so they don't inflate `spent` (they're estimated via projectedUsd).
+  const res = await db.query(
+    `SELECT
+       COALESCE(SUM(usage_usd), 0) AS spent,
+       COALESCE(SUM(CASE WHEN status = 'running' THEN 1 ELSE 0 END), 0) AS running,
+       COALESCE(AVG(CASE WHEN status = 'succeeded' THEN usage_usd END), 0) AS avg_usd,
+       COALESCE(SUM(CASE WHEN status = 'succeeded' THEN 1 ELSE 0 END), 0) AS finished
+     FROM apify_runs WHERE started_at >= $1`,
+    [since]
+  );
+  const row = res.rows[0] || {};
+  const spentUsd = Number(row.spent) || 0;
+  const runningCount = Number(row.running) || 0;
+  const avgUsd = Number(row.avg_usd) || 0;
+  const finished = Number(row.finished) || 0;
+  const estPerRun = finished > 0 ? avgUsd : (parseFloat(process.env.APIFY_EST_USD_PER_RUN) || 0.05);
+  const projectedUsd = spentUsd + runningCount * estPerRun;
+  const over = enforced && projectedUsd >= ceilingUsd;
+  return { spentUsd, projectedUsd, ceilingUsd, enforced, over, runningCount, estPerRun };
+}
+
+async function recordRunLaunch(db, { runId, actorId, purpose, query, scrapeJobId = null, nowMs = Date.now() }) {
+  await db.query(
+    `INSERT INTO apify_runs (run_id, actor_id, purpose, query, status, started_at, scrape_job_id)
+     VALUES ($1, $2, $3, $4, 'running', $5, $6)`,
+    [runId, actorId, purpose, query, isoNoMillis(nowMs), scrapeJobId]
+  );
+}
+
+async function recordRunCompletion(db, { runId, runObject = null, status, nowMs = Date.now() }) {
+  const usd = extractUsageUsd(runObject);
+  const items = (runObject && runObject.stats && Number(runObject.stats.itemCount)) || 0;
+  await db.query(
+    `UPDATE apify_runs SET status = $1, results_count = $2, usage_usd = $3, completed_at = $4 WHERE run_id = $5`,
+    [status, items, usd, isoNoMillis(nowMs), runId]
+  );
+  console.log(`[Metric] apify_run run=${runId} status=${status} items=${items} usd=${usd.toFixed(4)}`);
+}
+
+async function usageSummary(db, nowMs = Date.now()) {
+  const status = await budgetStatus(db, nowMs);
+  const since = isoNoMillis(nowMs - 30 * 24 * 60 * 60 * 1000);
+  const totals = await db.query(`SELECT COUNT(*) AS run_count FROM apify_runs WHERE started_at >= $1`, [since]);
+  const top = await db.query(
+    `SELECT query, COALESCE(SUM(usage_usd), 0) AS usd, COUNT(*) AS runs
+     FROM apify_runs WHERE started_at >= $1 AND query IS NOT NULL
+     GROUP BY query ORDER BY usd DESC LIMIT 10`,
+    [since]
+  );
+  return {
+    window_days: 30,
+    spent_usd: status.spentUsd,
+    projected_usd: status.projectedUsd,
+    ceiling_usd: status.ceilingUsd,
+    enforced: status.enforced,
+    run_count: Number(totals.rows[0].run_count) || 0,
+    top_accounts: top.rows.map(r => ({ query: r.query, usd: Number(r.usd) || 0, runs: Number(r.runs) || 0 })),
+  };
+}
+
+async function hasActiveJob(db, query, nowMs = Date.now(), windowMin = parseInt(process.env.APIFY_SCRAPE_DEDUP_MINUTES, 10) || 10) {
+  const cutoffMs = nowMs - windowMin * 60 * 1000;
+  const res = await db.query(
+    `SELECT created_at FROM scrape_jobs WHERE query = $1 AND status = 'running'`,
+    [query]
+  );
+  return res.rows.some((r) => {
+    let s = (r.created_at || '').trim().replace(' ', 'T'); // sqlite "YYYY-MM-DD HH:MM:SS" → "...T..."
+    if (s && !/(Z|[+-]\d\d:?\d\d)$/.test(s)) s += 'Z';      // treat a naive timestamp as UTC (both backends store UTC)
+    const t = Date.parse(s);
+    return Number.isFinite(t) && t >= cutoffMs;
+  });
+}
+
 class InstagramScraper {
   constructor(apiKey) {
     this.apiKey = apiKey;
@@ -77,6 +174,17 @@ class InstagramScraper {
 
   async startScrapeJob({ query, queryType, minLikes, minViews, startDate, endDate, source }) {
     const jobSource = source || 'manual';
+
+    // Footgun #2: skip if an active scrape for the same query is already running.
+    try {
+      if (await hasActiveJob(pool, query)) {
+        console.log(`[Scraper] Skipping @${query} — an active scrape job already exists.`);
+        return { skipped: true, reason: 'already running' };
+      }
+    } catch (e) {
+      console.error('[Scraper] collision check failed (continuing):', e.message);
+    }
+
     const result = await pool.query(
       `INSERT INTO scrape_jobs (query, query_type, status, source) VALUES ($1, $2, 'running', $3) RETURNING id`,
       [query, queryType, jobSource]
@@ -85,13 +193,17 @@ class InstagramScraper {
 
     try {
       const { actorId, input } = this._buildInput(query, queryType);
-      const run = await this._startApifyRun(actorId, input);
+      const run = await this._startApifyRun(actorId, input, { purpose: 'scrape', query, scrapeJobId: jobId });
 
       await pool.query('UPDATE scrape_jobs SET apify_run_id = $1 WHERE id = $2', [run.id, jobId]);
 
       this._pollAndStore(run.id, jobId, { minLikes, minViews, startDate, endDate, query });
       return { jobId, apifyRunId: run.id, status: 'running' };
     } catch (err) {
+      if (err instanceof BudgetExceededError) {
+        await pool.query('UPDATE scrape_jobs SET status = $1, error = $2 WHERE id = $3', ['skipped', err.message, jobId]);
+        throw err; // let the caller (route / scheduler) handle it distinctly
+      }
       await pool.query('UPDATE scrape_jobs SET status = $1, error = $2 WHERE id = $3', ['failed', err.message, jobId]);
       throw err;
     }
@@ -121,7 +233,10 @@ class InstagramScraper {
     return { actorId: REEL_ACTOR_ID, input: { username: [query], resultsLimit: 50 } };
   }
 
-  async _startApifyRun(actorId, input) {
+  async _startApifyRun(actorId, input, context = {}) {
+    const status = await budgetStatus(pool);
+    if (status.over) throw new BudgetExceededError(status);
+
     const res = await fetch(
       `${APIFY_BASE}/acts/${actorId}/runs?token=${this.apiKey}`,
       {
@@ -135,7 +250,19 @@ class InstagramScraper {
       throw new Error(`Apify API error: ${res.status} — ${text}`);
     }
     const data = await res.json();
-    return data.data;
+    const run = data.data;
+    try {
+      await recordRunLaunch(pool, {
+        runId: run.id,
+        actorId,
+        purpose: context.purpose || 'scrape',
+        query: context.query || null,
+        scrapeJobId: context.scrapeJobId || null,
+      });
+    } catch (e) {
+      console.error('[Apify] ledger launch insert failed:', e.message);
+    }
+    return run;
   }
 
   async _pollAndStore(runId, jobId, filters) {
@@ -171,12 +298,14 @@ class InstagramScraper {
             ['Saving results...', jobId]
           );
           await this._fetchAndStoreResults(runId, jobId, filters);
+          try { await recordRunCompletion(pool, { runId, runObject: run, status: 'succeeded' }); } catch (e) { console.error('[Apify] ledger finalize failed:', e.message); }
           return;
         } else if (status === 'FAILED' || status === 'ABORTED' || status === 'TIMED-OUT') {
           await pool.query(
             `UPDATE scrape_jobs SET status = $1, error = $2, progress = $3, status_message = $4, completed_at = TO_CHAR(NOW(), 'YYYY-MM-DD"T"HH24:MI:SS"Z"') WHERE id = $5`,
             ['failed', `Apify run ${status}`, progress, statusMessage, jobId]
           );
+          try { await recordRunCompletion(pool, { runId, runObject: run, status: 'failed' }); } catch (e) { console.error('[Apify] ledger finalize failed:', e.message); }
           return;
         }
 
@@ -192,12 +321,14 @@ class InstagramScraper {
             `UPDATE scrape_jobs SET status = $1, error = $2, progress = $3, completed_at = TO_CHAR(NOW(), 'YYYY-MM-DD"T"HH24:MI:SS"Z"') WHERE id = $4`,
             ['failed', 'Polling timeout', progress, jobId]
           );
+          try { await recordRunCompletion(pool, { runId, runObject: run, status: 'failed' }); } catch (e) { console.error('[Apify] ledger finalize failed:', e.message); }
         }
       } catch (err) {
         await pool.query(
           `UPDATE scrape_jobs SET status = $1, error = $2, completed_at = TO_CHAR(NOW(), 'YYYY-MM-DD"T"HH24:MI:SS"Z"') WHERE id = $3`,
           ['failed', err.message, jobId]
         );
+        try { await recordRunCompletion(pool, { runId, status: 'failed' }); } catch (e) { console.error('[Apify] ledger finalize failed:', e.message); }
       }
     };
 
@@ -209,7 +340,8 @@ class InstagramScraper {
     let items = await res.json();
 
     // Fallback: if reel scraper returned very few items, retry with generic scraper
-    if (items.length <= 3 && filters.query && !filters.query.startsWith('#') && !filters.query.startsWith('http')) {
+    const fallbackDisabled = /^(1|true|yes)$/i.test(process.env.APIFY_DISABLE_REEL_FALLBACK || '');
+    if (!fallbackDisabled && items.length <= 3 && filters.query && !filters.query.startsWith('#') && !filters.query.startsWith('http')) {
       console.log(`[Scraper] Reel scraper returned only ${items.length} items for "${filters.query}", trying generic scraper...`);
       await pool.query('UPDATE scrape_jobs SET status_message = $1 WHERE id = $2', ['Retrying with generic scraper...', jobId]);
       try {
@@ -217,7 +349,7 @@ class InstagramScraper {
           directUrls: [`https://www.instagram.com/${filters.query.replace('@', '')}/`],
           resultsType: 'posts',
           resultsLimit: 50,
-        });
+        }, { purpose: 'fallback', query: filters.query });
         const fallbackItems = await this._waitForRun(fallbackRun.id, 30);
         if (fallbackItems && fallbackItems.length > items.length) {
           console.log(`[Scraper] Generic scraper returned ${fallbackItems.length} items (vs ${items.length})`);
@@ -408,7 +540,7 @@ class InstagramScraper {
         directUrls: [`https://www.instagram.com/${username}/`],
         resultsType: 'posts',
         resultsLimit: 30,
-      });
+      }, { purpose: 'discovery', query: username });
 
       const items = await this._waitForRun(run.id, 30);
       if (!items) {
@@ -539,11 +671,16 @@ class InstagramScraper {
       const res = await fetch(`${APIFY_BASE}/actor-runs/${runId}?token=${this.apiKey}`);
       const data = await res.json();
       if (data.data.status === 'SUCCEEDED') {
+        try { await recordRunCompletion(pool, { runId, runObject: data.data, status: 'succeeded' }); } catch (e) { console.error('[Apify] ledger finalize failed:', e.message); }
         const itemsRes = await fetch(`${APIFY_BASE}/actor-runs/${runId}/dataset/items?token=${this.apiKey}`);
         return await itemsRes.json();
       }
-      if (['FAILED', 'ABORTED', 'TIMED-OUT'].includes(data.data.status)) return null;
+      if (['FAILED', 'ABORTED', 'TIMED-OUT'].includes(data.data.status)) {
+        try { await recordRunCompletion(pool, { runId, runObject: data.data, status: 'failed' }); } catch (e) { console.error('[Apify] ledger finalize failed:', e.message); }
+        return null;
+      }
     }
+    try { await recordRunCompletion(pool, { runId, status: 'failed' }); } catch (e) { console.error('[Apify] ledger finalize failed:', e.message); }
     return null;
   }
 
@@ -554,7 +691,7 @@ class InstagramScraper {
       directUrls: [`https://www.instagram.com/${username}/`],
       resultsType: 'details',
       resultsLimit: 1,
-    });
+    }, { purpose: 'enrichment', query: username });
 
     const items = await this._waitForRun(run.id, 12);
     if (!items || items.length === 0) return null;
@@ -614,7 +751,7 @@ class InstagramScraper {
       directUrls: cleanUrls,
       resultsType: 'posts',
       resultsLimit: cleanUrls.length,
-    });
+    }, { purpose: 'import', query: cleanUrls[0] || 'import' });
 
     const items = await this._waitForRun(run.id, 40);
     if (!items || items.length === 0) return { imported: 0, total: cleanUrls.length };
@@ -679,3 +816,11 @@ class InstagramScraper {
 }
 
 module.exports = InstagramScraper;
+module.exports.isoNoMillis = isoNoMillis;
+module.exports.BudgetExceededError = BudgetExceededError;
+module.exports.extractUsageUsd = extractUsageUsd;
+module.exports.budgetStatus = budgetStatus;
+module.exports.recordRunLaunch = recordRunLaunch;
+module.exports.recordRunCompletion = recordRunCompletion;
+module.exports.usageSummary = usageSummary;
+module.exports.hasActiveJob = hasActiveJob;
