@@ -1,5 +1,6 @@
 const TRANSIENT_CODES = new Set(['ENOTFOUND', 'ECONNREFUSED', 'ETIMEDOUT', 'ECONNRESET', '57P03']);
 const AUTH_CODES = new Set(['28P01', '28000', '3D000']);
+let dbDown = false;
 
 function isTransientDbError(err) {
   if (!err) return false;
@@ -21,6 +22,10 @@ function asyncHandler(fn) {
 function dbErrorMiddleware(err, req, res, next) {
   if (res.headersSent) return next(err);
   if (isTransientDbError(err)) {
+    if (!dbDown) {
+      dbDown = true;
+      console.log('[Metric] db_unavailable');
+    }
     console.error('[DB] transient error on request:', err.code || err.message);
     return res.status(503).json({ error: 'temporarily unavailable' });
   }

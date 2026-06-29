@@ -52,6 +52,7 @@ async function sweepThumbnails(opts = {}, deps = {}) {
   const db = deps.db || require('./db');
   const download = deps.download || ((p) => downloadThumbnail(p, { thumbDir: deps.thumbDir }));
   const delay = deps.delay || ((ms) => new Promise(r => setTimeout(r, ms)));
+  const started = Date.now();
 
   // 'pending' is set by a scrape (insert OR conflict-upsert) the moment it refreshes
   // thumbnail_url, so a pending row ALWAYS has a freshly-scraped URL — sweep it
@@ -97,6 +98,7 @@ async function sweepThumbnails(opts = {}, deps = {}) {
 
   const queue = posts.slice();
   await Promise.all(Array.from({ length: Math.min(concurrency, queue.length) }, () => worker(queue)));
+  console.log(`[Metric] thumbnail_sweep cached=${tally.cached} expired=${tally.expired} errored=${tally.errored} attempted=${tally.attempted} ms=${Date.now() - started}`);
   return tally;
 }
 

@@ -117,3 +117,12 @@ test('sweep heals re-scraped old (pending) posts regardless of age, but recency-
   assert.ok(seen.includes('recent_legacy'), 'a recent legacy post IS swept');
   assert.ok(!seen.includes('legacy_old'), 'an old legacy NULL-status post is SKIPPED (do not hammer expired URLs)');
 });
+
+test('sweep logs a metric line with timing', async () => {
+  const db = { query: async (sql) => /SELECT/i.test(sql) ? { rows: [] } : { rows: [] } };
+  const logs = [];
+  const orig = console.log; console.log = (...a) => logs.push(a.join(' '));
+  try { await sweepThumbnails({}, { db, download: async () => ({ status: 'cached' }) }); }
+  finally { console.log = orig; }
+  assert.ok(logs.some(l => l.includes('[Metric] thumbnail_sweep')), 'emits a metric line');
+});
