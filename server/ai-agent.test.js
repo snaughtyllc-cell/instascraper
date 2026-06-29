@@ -1,6 +1,7 @@
 const { test } = require('node:test');
 const assert = require('node:assert');
 const ContentIdeaAgent = require('./ai-agent');
+const { IDEAS_SCHEMA } = ContentIdeaAgent;
 
 // --- helpers -------------------------------------------------------------
 function mockClient(response) {
@@ -47,7 +48,7 @@ test('_callClaude sends Opus 4.8 with adaptive thinking, structured output, and 
   assert.strictEqual(params.thinking.type, 'adaptive');
   assert.strictEqual(params.output_config.effort, 'high');
   assert.strictEqual(params.output_config.format.type, 'json_schema');
-  assert.ok(params.output_config.format.schema, 'schema present');
+  assert.deepStrictEqual(params.output_config.format.schema, IDEAS_SCHEMA);
   assert.strictEqual(params.max_tokens, 6000);
 });
 
@@ -82,4 +83,13 @@ test('_callClaude returns a warning on truncated/unparseable JSON without throwi
   const { ideas, warning } = await agent._callClaude([samplePost()], sampleModel(), []);
   assert.deepStrictEqual(ideas, []);
   assert.ok(warning);
+  assert.ok(warning.includes('cut off'), 'truncated response warning mentions cut off');
+});
+
+test('_callClaude returns a warning containing the error message on SDK failure', async () => {
+  const agent = new ContentIdeaAgent('test-key');
+  agent.client = { messages: { create: async () => { throw new Error('network timeout'); } } };
+  const { ideas, warning } = await agent._callClaude([samplePost()], sampleModel(), []);
+  assert.deepStrictEqual(ideas, []);
+  assert.ok(warning.includes('network timeout'));
 });

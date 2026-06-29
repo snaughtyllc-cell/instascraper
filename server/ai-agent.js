@@ -226,7 +226,8 @@ Weight "${model.primary_niche}" content (70%) over secondary niches (30%). Focus
       return { ideas, warning: null };
     } catch (e) {
       console.error('[AI Agent] Failed to parse structured response:', textBlock.text.slice(0, 200));
-      return { ideas: [], warning: 'Idea generation returned malformed data. Try again.' };
+      const why = response.stop_reason === 'max_tokens' ? ' (response was cut off — too long)' : '';
+      return { ideas: [], warning: `Idea generation returned malformed data${why}. Try again.` };
     }
   }
 
@@ -257,3 +258,4 @@ Weight "${model.primary_niche}" content (70%) over secondary niches (30%). Focus
 }
 
 module.exports = ContentIdeaAgent;
+module.exports.IDEAS_SCHEMA = IDEAS_SCHEMA;
