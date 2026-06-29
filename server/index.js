@@ -750,10 +750,9 @@ if (fs.existsSync(clientBuild)) {
 
 app.use(dbErrorMiddleware); // must be last
 
-// Safety net: only /thumb is wrapped with asyncHandler, so a DB error in another
-// async route would otherwise reject unhandled and crash the process (the old
-// crash-loop). Log and stay up — the pg pool reconnects and the next request
-// succeeds. (Wrapping every route in asyncHandler for clean 503s is a follow-up.)
+// Defense-in-depth: wrapAsyncRoutes already forwards route-handler rejections to
+// dbErrorMiddleware; this guard catches any non-route async rejection (e.g. a
+// background job) so a stray rejection can never crash the process.
 process.on('unhandledRejection', (err) => {
   console.error('[unhandledRejection]', (err && (err.code || err.message)) || err);
 });

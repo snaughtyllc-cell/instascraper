@@ -63,7 +63,10 @@ async function sweepThumbnails(opts = {}, deps = {}) {
   // already expired) get the recency filter, so we don't keep retrying dead URLs.
   // Stored scraped_at is ISO 'YYYY-MM-DDThh:mm:ssZ' → lexicographic compare = chronological, PG/SQLite-safe.
   const now = deps.now ? deps.now() : Date.now();
-  const cutoff = new Date(now - maxAgeDays * 86400000).toISOString().slice(0, 19) + 'Z';
+  const usePg = !!process.env.DATABASE_URL;
+  const isoSec = new Date(now - maxAgeDays * 86400000).toISOString().slice(0, 19); // YYYY-MM-DDTHH:MM:SS
+  // Match the stored scraped_at format: Postgres "...T...Z", SQLite "... ..." (space, no Z).
+  const cutoff = usePg ? isoSec + 'Z' : isoSec.replace('T', ' ');
   const sel = await db.query(
     `SELECT id, shortcode, thumbnail_url FROM posts
      WHERE thumbnail_url IS NOT NULL
