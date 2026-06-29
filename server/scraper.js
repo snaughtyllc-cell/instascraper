@@ -1,5 +1,6 @@
 const fetch = require('node-fetch');
 const pool = require('./db');
+const { sweepThumbnails } = require('./thumbnails');
 
 const APIFY_BASE = 'https://api.apify.com/v2';
 const REEL_ACTOR_ID = 'apify~instagram-reel-scraper';
@@ -314,6 +315,9 @@ class InstagramScraper {
       `UPDATE scrape_jobs SET status = $1, posts_found = $2, progress = 100, status_message = $3, completed_at = TO_CHAR(NOW(), 'YYYY-MM-DD"T"HH24:MI:SS"Z"') WHERE id = $4`,
       ['completed', count, `Done — ${count} new, ${matched} reels matched (${items.length} total scraped)`, jobId]
     );
+
+    // Fire-and-forget: cache thumbnails for the just-scraped posts while URLs are fresh.
+    sweepThumbnails({ batchLimit: 80 }).catch(err => console.error('[Sweep] post-scrape sweep failed:', err.message));
   }
 
   _passesFilters(post, filters) {
