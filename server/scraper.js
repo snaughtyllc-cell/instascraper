@@ -296,9 +296,9 @@ class InstagramScraper {
           post.accountHandle, post.postUrl, post.sourceQuery,
           post.followersAtScrape, post.erPercent, post.erLabel,
         ]);
-        if (insertResult.rowCount > 0) count++;
+        if (insertResult.rowCount > 0) count++; // counts both new inserts and refreshed rows
       } catch (e) {
-        // skip duplicates
+        // skip on error
       }
     }
 
