@@ -47,4 +47,50 @@ async function downloadThumbnail(post, deps = {}) {
   return job;
 }
 
-module.exports = { downloadThumbnail, DEFAULT_THUMB_DIR };
+async function sweepThumbnails(opts = {}, deps = {}) {
+  const { maxAgeDays = 14, batchLimit = 200, concurrency = 4 } = opts;
+  const db = deps.db || require('./db');
+  const download = deps.download || ((p) => downloadThumbnail(p, { thumbDir: deps.thumbDir }));
+
+  // Only recent posts: stored scraped_at is ISO 'YYYY-MM-DDThh:mm:ssZ' which sorts
+  // lexicographically = chronologically, so a string compare is PG/SQLite-safe.
+  const now = deps.now ? deps.now() : Date.now();
+  const cutoff = new Date(now - maxAgeDays * 86400000).toISOString().slice(0, 19) + 'Z';
+  const sel = await db.query(
+    `SELECT id, shortcode, thumbnail_url FROM posts
+     WHERE (thumbnail_cache_status IS NULL OR thumbnail_cache_status = 'pending')
+       AND thumbnail_url IS NOT NULL
+       AND scraped_at >= $1
+     ORDER BY id DESC LIMIT $2`,
+    [cutoff, batchLimit]
+  );
+  const posts = sel.rows || [];
+  const tally = { attempted: 0, cached: 0, expired: 0, errored: 0 };
+
+  async function worker(queue) {
+    while (queue.length) {
+      const post = queue.shift();
+      tally.attempted++;
+      let outcome;
+      try {
+        const r = await download(post);
+        outcome = r.status;
+        await db.query(`UPDATE posts SET thumbnail_cache_status = $1, thumbnail_cache_error = $2 WHERE id = $3`,
+          [r.status, r.error || null, post.id]);
+      } catch (err) {
+        outcome = 'error';
+        try { await db.query(`UPDATE posts SET thumbnail_cache_status = 'error', thumbnail_cache_error = $1 WHERE id = $2`, [err.message, post.id]); } catch { /* ignore */ }
+      }
+      if (outcome === 'cached') tally.cached++;
+      else if (outcome === 'expired') tally.expired++;
+      else tally.errored++;
+      await new Promise(r => setTimeout(r, 100 + Math.floor(Math.random() * 200))); // jitter
+    }
+  }
+
+  const queue = posts.slice();
+  await Promise.all(Array.from({ length: Math.min(concurrency, queue.length) }, () => worker(queue)));
+  return tally;
+}
+
+module.exports = { downloadThumbnail, sweepThumbnails, DEFAULT_THUMB_DIR };

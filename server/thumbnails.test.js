@@ -3,7 +3,7 @@ const assert = require('node:assert');
 const os = require('os');
 const path = require('path');
 const fs = require('fs');
-const { downloadThumbnail } = require('./thumbnails');
+const { downloadThumbnail, sweepThumbnails } = require('./thumbnails');
 
 function tmpDir() {
   return fs.mkdtempSync(path.join(os.tmpdir(), 'thumbtest-'));
@@ -60,4 +60,56 @@ test('dedups concurrent downloads of the same shortcode', async () => {
   assert.equal(a.status, 'cached');
   assert.equal(b.status, 'cached');
   assert.equal(calls, 1, 'fetch should run once for two concurrent callers');
+});
+
+test('sweep downloads only pending/null recent posts and tallies outcomes', async () => {
+  const rows = [
+    { id: 1, shortcode: 'a', thumbnail_url: 'http://x/a' },
+    { id: 2, shortcode: 'b', thumbnail_url: 'http://x/b' },
+  ];
+  const updates = [];
+  const db = {
+    query: async (sql, params) => {
+      if (/SELECT/i.test(sql)) return { rows };
+      updates.push({ sql, params });
+      return { rows: [] };
+    },
+  };
+  const download = async (post) => post.shortcode === 'a'
+    ? { status: 'cached' } : { status: 'expired', error: 'HTTP 403' };
+
+  const res = await sweepThumbnails({ batchLimit: 10 }, { db, download });
+  assert.equal(res.attempted, 2);
+  assert.equal(res.cached, 1);
+  assert.equal(res.expired, 1);
+  assert.equal(updates.length, 2, 'writes a cache-status update per post');
+});
+
+test('sweep never throws when a download rejects', async () => {
+  const db = { query: async (sql) => /SELECT/i.test(sql) ? { rows: [{ id: 1, shortcode: 'a', thumbnail_url: 'u' }] } : { rows: [] } };
+  const download = async () => { throw new Error('boom'); };
+  const res = await sweepThumbnails({}, { db, download });
+  assert.equal(res.errored, 1);
+});
+
+test('sweep skips posts older than maxAgeDays (age filter actually applied)', async () => {
+  const Database = require('better-sqlite3');
+  const sqlite = new Database(':memory:');
+  sqlite.exec(`CREATE TABLE posts (id INTEGER PRIMARY KEY, shortcode TEXT, thumbnail_url TEXT,
+    thumbnail_cache_status TEXT, thumbnail_cache_error TEXT, scraped_at TEXT)`);
+  sqlite.prepare(`INSERT INTO posts (id,shortcode,thumbnail_url,thumbnail_cache_status,scraped_at) VALUES (?,?,?,?,?)`)
+    .run(1, 'old', 'u', 'pending', '2020-01-01T00:00:00Z');
+  sqlite.prepare(`INSERT INTO posts (id,shortcode,thumbnail_url,thumbnail_cache_status,scraped_at) VALUES (?,?,?,?,?)`)
+    .run(2, 'new', 'u', 'pending', '2026-06-28T00:00:00Z');
+  const db = { query: async (sql, params = []) => {
+    const conv = sql.replace(/\$(\d+)/g, '?');
+    if (/^\s*SELECT/i.test(sql)) return { rows: sqlite.prepare(conv).all(...params) };
+    sqlite.prepare(conv).run(...params); return { rows: [] };
+  }};
+  const seen = [];
+  const download = async (p) => { seen.push(p.shortcode); return { status: 'cached' }; };
+  const res = await sweepThumbnails({ maxAgeDays: 14 },
+    { db, download, now: () => Date.parse('2026-06-29T00:00:00Z') });
+  assert.deepEqual(seen, ['new'], 'only the recent pending post is swept; the 2020 one is skipped');
+  assert.equal(res.cached, 1);
 });
