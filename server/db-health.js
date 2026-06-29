@@ -1,0 +1,31 @@
+const TRANSIENT_CODES = new Set(['ENOTFOUND', 'ECONNREFUSED', 'ETIMEDOUT', 'ECONNRESET', '57P03']);
+const AUTH_CODES = new Set(['28P01', '28000', '3D000']);
+
+function isTransientDbError(err) {
+  if (!err) return false;
+  if (TRANSIENT_CODES.has(err.code)) return true;
+  if (typeof err.code === 'string' && err.code.startsWith('08')) return true; // connection exceptions
+  return false;
+}
+
+function classifyDbError(err) {
+  if (isTransientDbError(err)) return 'transient';
+  if (err && AUTH_CODES.has(err.code)) return 'auth';
+  return 'other';
+}
+
+function asyncHandler(fn) {
+  return (req, res, next) => Promise.resolve(fn(req, res, next)).catch(next);
+}
+
+function dbErrorMiddleware(err, req, res, next) {
+  if (res.headersSent) return next(err);
+  if (isTransientDbError(err)) {
+    console.error('[DB] transient error on request:', err.code || err.message);
+    return res.status(503).json({ error: 'temporarily unavailable' });
+  }
+  console.error('[Error]', err && err.stack ? err.stack : err);
+  return res.status(500).json({ error: 'internal error' });
+}
+
+module.exports = { isTransientDbError, classifyDbError, asyncHandler, dbErrorMiddleware };
