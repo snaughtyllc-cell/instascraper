@@ -62,20 +62,30 @@ class ContentIdeaAgent {
     }
 
     // Call Claude to generate ideas
-    const ideas = await this._callClaude(allPosts, model, staleNiches);
+    const { ideas, warning } = await this._callClaude(allPosts, model, staleNiches);
 
-    // Deduplicate against previous ideas
-    const freshIdeas = await this._deduplicateIdeas(modelId, ideas);
-
-    // Store idea cards
-    for (const idea of freshIdeas) {
+    let freshIdeas = [];
+    if (warning) {
+      // Surface the failure as a clear warning card instead of silently storing nothing.
       await pool.query(
-        `INSERT INTO idea_cards (model_id, batch_id, concept, format, why_working, hook_line, source_niche, source_post_ids, stale_warning)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
-        [modelId, batchId, idea.concept, idea.format || '', idea.why_working || '',
-         idea.hook_line || '', idea.source_niche || model.primary_niche,
-         Array.isArray(idea.source_posts) ? idea.source_posts.join(',') : (idea.source_post_ids || ''), idea.stale_warning || null]
+        `INSERT INTO idea_cards (model_id, batch_id, concept, format, why_working, hook_line, source_niche, stale_warning, status)
+         VALUES ($1, $2, $3, '', '', '', $4, $5, 'pending')`,
+        [modelId, batchId, warning, model.primary_niche, warning]
       );
+    } else {
+      // Deduplicate against previous ideas
+      freshIdeas = await this._deduplicateIdeas(modelId, ideas);
+
+      // Store idea cards
+      for (const idea of freshIdeas) {
+        await pool.query(
+          `INSERT INTO idea_cards (model_id, batch_id, concept, format, why_working, hook_line, source_niche, source_post_ids, stale_warning)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
+          [modelId, batchId, idea.concept, idea.format || '', idea.why_working || '',
+           idea.hook_line || '', idea.source_niche || model.primary_niche,
+           Array.isArray(idea.source_posts) ? idea.source_posts.join(',') : (idea.source_post_ids || ''), idea.stale_warning || null]
+        );
+      }
     }
 
     // Add stale niche warnings
@@ -89,7 +99,7 @@ class ContentIdeaAgent {
     }
 
     console.log(`[AI Agent] Generated ${freshIdeas.length} ideas for ${model.name} (batch ${batchId})`);
-    return { batchId, ideaCount: freshIdeas.length, staleNiches };
+    return { batchId, ideaCount: freshIdeas.length, staleNiches, warning: warning || undefined };
   }
 
   async _queryTopContent(primaryNiche, secondaryNiches) {
