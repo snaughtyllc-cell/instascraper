@@ -1,4 +1,4 @@
-const { test } = require('node:test');
+const { test, beforeEach } = require('node:test');
 const assert = require('node:assert');
 const Database = require('better-sqlite3');
 const scraper = require('./scraper');
@@ -29,6 +29,11 @@ function makeDb() {
     },
   };
 }
+
+beforeEach(() => {
+  delete process.env.APIFY_BUDGET_USD_30D;
+  delete process.env.APIFY_EST_USD_PER_RUN;
+});
 
 const HOUR = 3600 * 1000;
 const NOW = Date.parse('2026-06-30T12:00:00Z');
@@ -109,7 +114,7 @@ test('budgetStatus: in-flight runs add estimated cost via projectedUsd', async (
   const db = makeDb();
   process.env.APIFY_BUDGET_USD_30D = '1.00';
   process.env.APIFY_EST_USD_PER_RUN = '0.30';
-  // spent 0.80 succeeded, no finished-average yet beyond these; plus 1 running
+  // spent 0.80 from 1 succeeded run (so estPerRun = that run's avg = 0.80); plus 1 still-running run
   await recordRunLaunch(db, { runId: 's1', actorId: 'x', purpose: 'scrape', query: '@a', nowMs: NOW - HOUR });
   await recordRunCompletion(db, { runId: 's1', runObject: { usageTotalUsd: 0.80, stats: { itemCount: 1 } }, status: 'succeeded', nowMs: NOW - HOUR });
   await recordRunLaunch(db, { runId: 'run1', actorId: 'x', purpose: 'scrape', query: '@b', nowMs: NOW }); // still running
@@ -144,4 +149,24 @@ test('hasActiveJob detects a recent running job for the same query', async () =>
   db.sqlite.prepare(`INSERT INTO scrape_jobs (query, query_type, status, created_at) VALUES (?,?,?,?)`)
     .run('@stale', 'username', 'running', isoNoMillis(NOW - 30 * 60 * 1000));
   assert.strictEqual(await hasActiveJob(db, '@stale', NOW), false);
+});
+
+test('budgetStatus: estPerRun falls back to APIFY_EST_USD_PER_RUN when no finished runs', async () => {
+  const db = makeDb();
+  process.env.APIFY_BUDGET_USD_30D = '1.00';
+  process.env.APIFY_EST_USD_PER_RUN = '0.40';
+  await recordRunLaunch(db, { runId: 'only-running', actorId: 'x', purpose: 'scrape', query: '@a', nowMs: NOW });
+  const s = await budgetStatus(db, NOW);
+  assert.strictEqual(s.estPerRun, 0.40);
+  assert.ok(Math.abs(s.projectedUsd - 0.40) < 1e-9); // 0 spent + 1 running * 0.40
+  assert.strictEqual(s.over, false); // 0.40 < 1.00
+});
+
+test('BudgetExceededError carries the budget status and a descriptive message', () => {
+  const status = { projectedUsd: 1.5, ceilingUsd: 1.0, spentUsd: 1.5, enforced: true, over: true, runningCount: 0, estPerRun: 0.05 };
+  const err = new BudgetExceededError(status);
+  assert.ok(err instanceof Error);
+  assert.strictEqual(err.name, 'BudgetExceededError');
+  assert.strictEqual(err.budget, status);
+  assert.match(err.message, /1\.50.*1\.00/);
 });

@@ -37,6 +37,9 @@ async function budgetStatus(db, nowMs = Date.now()) {
   const ceilingUsd = parseFloat(process.env.APIFY_BUDGET_USD_30D) || 0;
   const enforced = ceilingUsd > 0;
   const since = isoNoMillis(nowMs - 30 * 24 * 60 * 60 * 1000);
+  // `spent` sums usage_usd over every finished run in the window — failed runs
+  // included, since a failed Apify run still incurs cost. running rows are $0
+  // until finalized, so they don't inflate `spent` (they're estimated via projectedUsd).
   const res = await db.query(
     `SELECT
        COALESCE(SUM(usage_usd), 0) AS spent,
