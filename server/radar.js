@@ -140,4 +140,45 @@ async function enrichAuthors(scraper, handles, cfg) {
   return out;
 }
 
-module.exports = { radarConfig, selectWatchTerms, passesFloors, dedupeReels, excludeAuthors, scoreReel, normalizeHashtagItem, harvestHashtag, authorMedianFromReels, enrichAuthors };
+function selectRolloupAuthors(scoredReels, cfg) {
+  const byAuthor = new Map();
+  for (const r of scoredReels || []) {
+    const h = (r.account_handle || '').toLowerCase();
+    if (!h) continue;
+    const cur = byAuthor.get(h) || { username: h, count: 0, bestBreakout: 0, term: r.discovered_via };
+    cur.count += 1;
+    if (r.breakout_score > cur.bestBreakout) { cur.bestBreakout = r.breakout_score; cur.term = r.discovered_via; }
+    byAuthor.set(h, cur);
+  }
+  return [...byAuthor.values()].filter(a =>
+    a.count >= cfg.rollupMinBreakouts || a.bestBreakout >= cfg.rollupSoloBreakout
+  ).map(a => ({
+    username: a.username, bestBreakout: a.bestBreakout, count: a.count,
+    source: `radar:${a.term}`,
+    reason: `${a.count} breakout reel${a.count > 1 ? 's' : ''} via #${a.term} (best ${a.bestBreakout}× median)`,
+  }));
+}
+
+async function rollupAuthors(pool, authors) {
+  let added = 0, bumped = 0;
+  for (const a of authors || []) {
+    try {
+      const ins = await pool.query(
+        `INSERT INTO suggested_accounts (username, source, relevance_reason, suggestion_score, gender)
+         VALUES ($1,$2,$3,$4,$5) ON CONFLICT (username) DO NOTHING`,
+        [a.username, a.source, a.reason, a.bestBreakout, 'unknown']);
+      if (ins.rowCount > 0) { added++; continue; }
+      const upd = await pool.query(
+        `UPDATE suggested_accounts
+           SET suggestion_score = CASE WHEN $1 > suggestion_score THEN $2 ELSE suggestion_score END,
+               source = CASE WHEN (',' || source || ',') LIKE ('%,' || $3 || ',%') THEN source ELSE source || ',' || $4 END,
+               relevance_reason = $5
+         WHERE username = $6 AND status = 'pending'`,
+        [a.bestBreakout, a.bestBreakout, a.source, a.source, a.reason, a.username]);
+      if (upd.rowCount > 0) bumped++;
+    } catch (e) { console.error(`[Radar] rollup failed for @${a.username}:`, e.message); }
+  }
+  return { added, bumped };
+}
+
+module.exports = { radarConfig, selectWatchTerms, passesFloors, dedupeReels, excludeAuthors, scoreReel, normalizeHashtagItem, harvestHashtag, authorMedianFromReels, enrichAuthors, selectRolloupAuthors, rollupAuthors };

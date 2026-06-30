@@ -118,3 +118,35 @@ test('authorMedianFromReels: median of positive view counts', () => {
   assert.strictEqual(radar.authorMedianFromReels([]), null);
   assert.strictEqual(radar.authorMedianFromReels([0, -5, null]), null);
 });
+
+test('selectRolloupAuthors: threshold + solo-breakout', () => {
+  const cfg = radar.radarConfig({});
+  const scored = [
+    { account_handle: 'a', breakout_score: 3, discovered_via: 'x' },
+    { account_handle: 'a', breakout_score: 4, discovered_via: 'x' }, // count 2 → in
+    { account_handle: 'b', breakout_score: 12, discovered_via: 'y' }, // solo ≥10 → in
+    { account_handle: 'c', breakout_score: 3, discovered_via: 'z' },  // count 1, <10 → out
+  ];
+  const out = radar.selectRolloupAuthors(scored, cfg).map(a => a.username).sort();
+  assert.deepStrictEqual(out, ['a', 'b']);
+});
+
+test('accumulation upsert: bump pending, never demote reviewed (sqlite)', () => {
+  const db = new Database(':memory:');
+  db.exec(`CREATE TABLE suggested_accounts (username TEXT UNIQUE, source TEXT, suggestion_score REAL DEFAULT 0,
+           relevance_reason TEXT DEFAULT '', status TEXT DEFAULT 'pending')`);
+  db.prepare("INSERT INTO suggested_accounts (username,source,suggestion_score,status) VALUES ('a','radar:x',5,'pending')").run();
+  db.prepare("INSERT INTO suggested_accounts (username,source,suggestion_score,status) VALUES ('b','radar:x',5,'dismissed')").run();
+  const bump = db.prepare(`UPDATE suggested_accounts
+     SET suggestion_score = CASE WHEN ? > suggestion_score THEN ? ELSE suggestion_score END,
+         source = CASE WHEN (','||source||',') LIKE ('%,'||?||',%') THEN source ELSE source||','||? END,
+         relevance_reason = ?
+     WHERE username = ? AND status = 'pending'`);
+  bump.run(9, 9, 'radar:y', 'radar:y', 'reason', 'a');
+  bump.run(9, 9, 'radar:y', 'radar:y', 'reason', 'b');
+  const a = db.prepare("SELECT * FROM suggested_accounts WHERE username='a'").get();
+  const b = db.prepare("SELECT * FROM suggested_accounts WHERE username='b'").get();
+  assert.strictEqual(a.suggestion_score, 9);
+  assert.strictEqual(a.source, 'radar:x,radar:y');
+  assert.strictEqual(b.suggestion_score, 5); // reviewed row untouched
+});
