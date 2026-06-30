@@ -938,11 +938,10 @@ app.patch('/radar/terms/:id', async (req, res) => {
   res.json({ ok: true });
 });
 
-app.post('/radar/run', async (req, res) => {
-  const result = await radar.runRadar(scraper);
-  if (result && result.started === false) {
-    return res.json({ ok: true, started: false, reason: result.reason });
-  }
+app.post('/radar/run', (req, res) => {
+  if (radar.getRadarStatus().running) return res.json({ ok: true, started: false, reason: 'already_running' });
+  if (!scraper || !scraper.apiKey) return res.json({ ok: true, started: false, reason: 'no_api_key' });
+  radar.runRadar(scraper).catch(e => console.error('[Radar] run failed:', e.message));
   res.json({ ok: true, started: true });
 });
 
