@@ -14,6 +14,7 @@ const { asyncHandler, dbErrorMiddleware, initWithRetry, wrapAsyncRoutes } = requ
 const health = require('./health');
 const { downloadThumbnail, DEFAULT_THUMB_DIR } = require('./thumbnails');
 const { buildBulkUpdate } = require('./content-bulk');
+const { calcViewER, engagementLabel, enrichViewsVsMedian, medianViewsByAccount } = require('./engagement-metrics');
 
 const app = express();
 wrapAsyncRoutes(app);
@@ -189,11 +190,22 @@ app.get('/content', async (req, res) => {
 
   const countResult = await pool.query(`SELECT COUNT(*) as count FROM posts ${joinClause} ${whereClause}`, params);
   const total = parseInt(countResult.rows[0].count);
-  const postsResult = await pool.query(`SELECT posts.* FROM posts ${joinClause} ${whereClause} ORDER BY ${orderBy} LIMIT $${paramIdx++} OFFSET $${paramIdx++}`, [...params, Number(limit), offset]);
+  let posts;
+  if (sort === 'views_vs_median') {
+    const allResult = await pool.query(`SELECT posts.* FROM posts ${joinClause} ${whereClause}`, params);
+    const allMedians = await medianViewsByAccount(pool, allResult.rows.map((post) => post.account_handle));
+    posts = enrichViewsVsMedian(allResult.rows, allMedians)
+      .sort((a, b) => (b.views_vs_median || 0) - (a.views_vs_median || 0))
+      .slice(offset, offset + Number(limit));
+  } else {
+    const postsResult = await pool.query(`SELECT posts.* FROM posts ${joinClause} ${whereClause} ORDER BY ${orderBy} LIMIT $${paramIdx++} OFFSET $${paramIdx++}`, [...params, Number(limit), offset]);
+    const medians = await medianViewsByAccount(pool, postsResult.rows.map((post) => post.account_handle));
+    posts = enrichViewsVsMedian(postsResult.rows, medians);
+  }
   const accountsResult = await pool.query(`SELECT DISTINCT account_handle FROM posts WHERE account_handle != ''`);
 
   res.json({
-    posts: postsResult.rows, total, page: Number(page),
+    posts, total, page: Number(page),
     totalPages: Math.ceil(total / Number(limit)),
     accounts: accountsResult.rows.map(r => r.account_handle),
   });
@@ -450,21 +462,12 @@ app.post('/engagement/backfill', async (req, res) => {
     if (handle && followers) {
       await pool.query('UPDATE posts SET followers_at_scrape = $1 WHERE account_handle = $2', [Number(followers), handle]);
     }
-    // Recalc ER for all posts with followers
-    const postsResult = await pool.query('SELECT id, like_count, comment_count, followers_at_scrape FROM posts WHERE followers_at_scrape > 0');
+    // Recalc view-based ER for all posts with view counts.
+    const postsResult = await pool.query('SELECT id, like_count, comment_count, view_count FROM posts WHERE view_count > 0');
     let count = 0;
     for (const post of postsResult.rows) {
-      const likes = post.like_count || 0;
-      const comments = post.comment_count || 0;
-      const f = post.followers_at_scrape;
-      if (f <= 0) continue;
-      const er = ((likes + comments) / f) * 100;
-      const erPercent = Math.round(er * 100) / 100;
-      let erLabel = 'Low';
-      if (er >= 6) erLabel = 'Viral';
-      else if (er >= 3) erLabel = 'Good';
-      else if (er >= 1) erLabel = 'Average';
-      await pool.query('UPDATE posts SET er_percent = $1, er_label = $2 WHERE id = $3', [erPercent, erLabel, post.id]);
+      const { er_percent, er_label } = calcViewER(post.like_count || 0, post.comment_count || 0, post.view_count);
+      await pool.query('UPDATE posts SET er_percent = $1, er_label = $2 WHERE id = $3', [er_percent, er_label, post.id]);
       count++;
     }
     res.json({ success: true, updated: count });
@@ -483,19 +486,12 @@ app.post('/engagement/backfill-bulk', async (req, res) => {
         await pool.query('UPDATE posts SET followers_at_scrape = $1 WHERE account_handle = $2', [Number(followers), handle]);
       }
     }
-    // Recalc ER for all posts with followers
-    const postsResult = await pool.query('SELECT id, like_count, comment_count, followers_at_scrape FROM posts WHERE followers_at_scrape > 0');
+    // Recalc view-based ER for all posts with view counts.
+    const postsResult = await pool.query('SELECT id, like_count, comment_count, view_count FROM posts WHERE view_count > 0');
     let count = 0;
     for (const post of postsResult.rows) {
-      const f = post.followers_at_scrape;
-      if (f <= 0) continue;
-      const er = (((post.like_count || 0) + (post.comment_count || 0)) / f) * 100;
-      const erPercent = Math.round(er * 100) / 100;
-      let erLabel = 'Low';
-      if (er >= 6) erLabel = 'Viral';
-      else if (er >= 3) erLabel = 'Good';
-      else if (er >= 1) erLabel = 'Average';
-      await pool.query('UPDATE posts SET er_percent = $1, er_label = $2 WHERE id = $3', [erPercent, erLabel, post.id]);
+      const { er_percent, er_label } = calcViewER(post.like_count || 0, post.comment_count || 0, post.view_count);
+      await pool.query('UPDATE posts SET er_percent = $1, er_label = $2 WHERE id = $3', [er_percent, er_label, post.id]);
       count++;
     }
     res.json({ success: true, updated: count });
@@ -513,10 +509,7 @@ app.get('/engagement/summary/:handle', async (req, res) => {
 
   const totalER = posts.reduce((sum, p) => sum + (p.er_percent || 0), 0);
   const avgER = Math.round((totalER / posts.length) * 100) / 100;
-  let avgLabel = 'Low';
-  if (avgER >= 6) avgLabel = 'Viral';
-  else if (avgER >= 3) avgLabel = 'Good';
-  else if (avgER >= 1) avgLabel = 'Average';
+  const avgLabel = engagementLabel(avgER);
 
   const sorted = [...posts].sort((a, b) => (b.er_percent || 0) - (a.er_percent || 0));
   const best = sorted[0];
@@ -546,11 +539,7 @@ app.get('/engagement/leaderboard', async (req, res) => {
   const result = await pool.query(`SELECT account_handle, COUNT(*) as post_count, ROUND(AVG(er_percent)::numeric, 2) as avg_er, MAX(er_percent) as best_er, MIN(er_percent) as worst_er, MAX(followers_at_scrape) as followers FROM posts WHERE account_handle != '' AND (archived = 0 OR archived IS NULL) AND (soft_deleted = 0 OR soft_deleted IS NULL) AND posted_at >= $1 GROUP BY account_handle ORDER BY avg_er DESC`, [thirtyDaysAgo]);
   const labeled = result.rows.map(a => {
     const avgEr = parseFloat(a.avg_er) || 0;
-    let label = 'Low';
-    if (avgEr >= 6) label = 'Viral';
-    else if (avgEr >= 3) label = 'Good';
-    else if (avgEr >= 1) label = 'Average';
-    return { ...a, avg_er: avgEr, er_label: label };
+    return { ...a, avg_er: avgEr, er_label: engagementLabel(avgEr) };
   });
   res.json(labeled);
   } catch (err) {

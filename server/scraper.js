@@ -1,6 +1,7 @@
 const fetch = require('node-fetch');
 const pool = require('./db');
 const { sweepThumbnails } = require('./thumbnails');
+const { calcViewER } = require('./engagement-metrics');
 
 const APIFY_BASE = 'https://api.apify.com/v2';
 const REEL_ACTOR_ID = 'apify~instagram-reel-scraper';
@@ -8,16 +9,7 @@ const GENERIC_ACTOR_ID = 'apify~instagram-scraper';
 
 // Engagement rate is view-based: of everyone who watched, what % liked or commented.
 // (Followers are unreliable from the reel actor and not the signal we care about.)
-// Bands are tuned for view-based ER (much higher than follower-based) and env-tunable.
-function calcER(likes, comments, views) {
-  if (!views || views <= 0) return { er_percent: 0, er_label: null };
-  const er = ((likes + comments) / views) * 100;
-  let label = 'Low';
-  if (er >= 10) label = 'Viral';
-  else if (er >= 5) label = 'Good';
-  else if (er >= 2) label = 'Average';
-  return { er_percent: Math.round(er * 100) / 100, er_label: label };
-}
+const calcER = calcViewER;
 
 // Views: Apify's reel actor returns a real videoPlayCount; the generic actor
 // (URL imports + small-result fallback) returns no view field at all. Return
