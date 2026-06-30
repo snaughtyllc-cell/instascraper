@@ -92,3 +92,22 @@ test('scoreReel: niche overlap raises niche_fit', () => {
   const b = radar.scoreReel({ view_count: 50000, _hashtagOverlap: 3 }, null, cfg).niche_fit_score;
   assert.ok(b > a);
 });
+
+const { extractViews } = require('./scraper');
+
+test('normalizeHashtagItem: maps video item, drops non-video', () => {
+  const item = {
+    shortCode: 'XYZ', ownerUsername: 'Creator1', caption: 'leg day #fitness #gym',
+    likesCount: 5000, commentsCount: 120, videoPlayCount: 300000,
+    type: 'Video', displayUrl: 'https://cdn/x.jpg', url: 'https://instagram.com/reel/XYZ/',
+    timestamp: '2026-06-20T12:00:00Z',
+  };
+  const r = radar.normalizeHashtagItem(item, 'fitness');
+  assert.strictEqual(r.shortcode, 'XYZ');
+  assert.strictEqual(r.account_handle, 'creator1');  // lowercased
+  assert.strictEqual(r.view_count, 300000);
+  assert.strictEqual(r.like_count, 5000);
+  assert.strictEqual(r.discovered_via, 'fitness');
+  assert.ok(Array.isArray(r._hashtags) && r._hashtags.includes('#fitness'));
+  assert.strictEqual(radar.normalizeHashtagItem({ ...item, type: 'Image', productType: undefined }, 'fitness'), null);
+});

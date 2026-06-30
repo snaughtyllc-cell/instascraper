@@ -1,5 +1,8 @@
 const pool = require('./db');
 const { median } = require('./engagement-metrics');
+const { extractViews } = require('./scraper');
+
+const GENERIC_ACTOR_ID = 'apify~instagram-scraper';
 
 function radarConfig(env = process.env) {
   const num = (v, d) => { const n = Number(v); return Number.isFinite(n) && n >= 0 ? n : d; };
@@ -71,4 +74,40 @@ function scoreReel(reel, author, cfg) {
   return { breakout_score: round2(breakout), niche_fit_score: round2(nicheFit), total_score: round2(total) };
 }
 
-module.exports = { radarConfig, selectWatchTerms, passesFloors, dedupeReels, excludeAuthors, scoreReel };
+function normalizeHashtagItem(item, term) {
+  if (!item) return null;
+  const isVideo = item.type === 'Video' || item.productType === 'clips';
+  if (!isVideo) return null;
+  const shortcode = item.shortCode || item.shortcode;
+  if (!shortcode) return null;
+  const caption = item.caption || '';
+  const hashtags = (caption.match(/#([a-zA-Z0-9_]+)/g) || []).map(h => h.toLowerCase());
+  return {
+    shortcode,
+    account_handle: String(item.ownerUsername || '').toLowerCase(),
+    video_url: item.videoUrl || item.url || null,
+    thumbnail_url: item.displayUrl || item.thumbnailUrl || null,
+    caption,
+    like_count: Number(item.likesCount) || 0,
+    comment_count: Number(item.commentsCount) || 0,
+    view_count: extractViews(item),
+    posted_at: item.timestamp || null,
+    post_url: item.url || (shortcode ? `https://www.instagram.com/reel/${shortcode}/` : null),
+    discovered_via: term,
+    _hashtags: hashtags,
+  };
+}
+
+// Apify hashtag input shape NOT yet live-verified — run the Task A5 spike (needs APIFY_API_KEY) before trusting harvest; falls back to search+searchType:'hashtag' if directUrls returns nothing.
+async function harvestHashtag(scraper, term, cfg) {
+  const run = await scraper._startApifyRun(GENERIC_ACTOR_ID, {
+    directUrls: [`https://www.instagram.com/explore/tags/${term}/`],
+    resultsType: 'posts',
+    resultsLimit: cfg.resultsPerTerm,
+  }, { purpose: 'radar', query: `#${term}` });
+  const items = await scraper._waitForRun(run.id, 30);
+  if (!items) return [];
+  return items.map(it => normalizeHashtagItem(it, term)).filter(Boolean);
+}
+
+module.exports = { radarConfig, selectWatchTerms, passesFloors, dedupeReels, excludeAuthors, scoreReel, normalizeHashtagItem, harvestHashtag };
