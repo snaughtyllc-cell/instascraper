@@ -45,6 +45,16 @@ export const snoozeSuggested = (username) => api.post(`/suggested/${username}/sn
 export const approveSuggestedBulk = (usernames) => api.post('/suggested/approve-bulk', { usernames });
 export const scrapeTrackedBulk = (usernames) => api.post('/tracked/scrape-bulk', { usernames });
 
+// Radar
+export const getRadarReels = (params) => api.get('/radar/reels', { params });
+export const saveRadarReel = (sc) => api.post(`/radar/reels/${sc}/save`);
+export const dismissRadarReel = (sc) => api.post(`/radar/reels/${sc}/dismiss`);
+export const bulkRadarReels = (shortcodes, action) => api.post('/radar/reels/bulk', { shortcodes, action });
+export const getWatchTerms = () => api.get('/radar/terms');
+export const addWatchTerm = (term, kind = 'hashtag') => api.post('/radar/terms', { term, kind });
+export const setWatchTermStatus = (id, status) => api.patch(`/radar/terms/${id}`, { status });
+export const runRadar = () => api.post('/radar/run');
+
 // Delete log
 export const getDeleteLog = (params) => api.get('/delete-log', { params });
 export const restorePost = (id) => api.post(`/delete-log/${id}/restore`);

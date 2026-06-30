@@ -20,6 +20,10 @@ function erStyle(er) {
   return ER_COLORS.low;
 }
 
+function isRadarSource(suggestion) {
+  return String(suggestion.source || '').includes('radar:');
+}
+
 export default function SuggestedAccountsTab() {
   const [suggestions, setSuggestions] = useState([]);
   const [sort, setSort] = useState('score');
@@ -27,6 +31,7 @@ export default function SuggestedAccountsTab() {
   const [discovering, setDiscovering] = useState(false);
   const [selected, setSelected] = useState(new Set());
   const [showUnclassified, setShowUnclassified] = useState(false);
+  const [radarOnly, setRadarOnly] = useState(false);
 
   const load = useCallback(async () => {
     try {
@@ -102,8 +107,9 @@ export default function SuggestedAccountsTab() {
     });
   };
 
-  const female = suggestions.filter((s) => s.gender === 'female');
-  const unclassified = suggestions.filter((s) => s.gender !== 'female');
+  const visibleSuggestions = radarOnly ? suggestions.filter(isRadarSource) : suggestions;
+  const female = visibleSuggestions.filter((s) => s.gender === 'female');
+  const unclassified = visibleSuggestions.filter((s) => s.gender !== 'female');
 
   const allFemaleSelected = female.length > 0 && female.every((s) => selected.has(s.username));
   const toggleSelectAllFemale = () => {
@@ -118,95 +124,104 @@ export default function SuggestedAccountsTab() {
     });
   };
 
-  const renderCard = (s) => (
-    <div key={s.username} className="bg-gray-900 rounded-xl border border-gray-800 p-4 space-y-3 hover:border-gray-700 transition-colors">
-      {/* Header */}
-      <div className="flex items-start justify-between">
-        <div className="flex items-start gap-2">
-          <input
-            type="checkbox"
-            checked={selected.has(s.username)}
-            onChange={() => toggleSelected(s.username)}
-            className="mt-1 accent-gold cursor-pointer"
-          />
-          <div>
-            <a
-              href={`https://instagram.com/${s.username}`}
-              target="_blank"
-              rel="noopener noreferrer"
-              className="text-sm font-bold text-gold hover:text-gold-light transition-colors"
-            >
-              @{s.username}
-            </a>
-            <div className="flex items-center gap-1.5 mt-0.5">
-              <span className={`px-2 py-0.5 rounded-full text-[10px] font-medium border ${
-                s.gender === 'female'
-                  ? 'bg-green-500/10 text-green-400 border-green-500/30'
-                  : 'bg-gray-700/40 text-gray-400 border-gray-600/40'
-              }`}>
-                {s.gender === 'female' ? '♀ Female' : 'Unclassified'}
-              </span>
+  const renderCard = (s) => {
+    const radarSourced = isRadarSource(s);
+
+    return (
+      <div key={s.username} className="bg-gray-900 rounded-xl border border-gray-800 p-4 space-y-3 hover:border-gray-700 transition-colors">
+        {/* Header */}
+        <div className="flex items-start justify-between">
+          <div className="flex items-start gap-2">
+            <input
+              type="checkbox"
+              checked={selected.has(s.username)}
+              onChange={() => toggleSelected(s.username)}
+              className="mt-1 accent-gold cursor-pointer"
+            />
+            <div>
+              <a
+                href={`https://instagram.com/${s.username}`}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="text-sm font-bold text-gold hover:text-gold-light transition-colors"
+              >
+                @{s.username}
+              </a>
+              <div className="flex items-center gap-1.5 mt-0.5">
+                <span className={`px-2 py-0.5 rounded-full text-[10px] font-medium border ${
+                  s.gender === 'female'
+                    ? 'bg-green-500/10 text-green-400 border-green-500/30'
+                    : 'bg-gray-700/40 text-gray-400 border-gray-600/40'
+                }`}>
+                  {s.gender === 'female' ? '♀ Female' : 'Unclassified'}
+                </span>
+                {radarSourced && (
+                  <span className="px-2 py-0.5 rounded-full text-[10px] font-medium border bg-gold/10 text-gold border-gold/30">
+                    Radar
+                  </span>
+                )}
+              </div>
+              {s.bio && (
+                <p className="text-xs text-gray-500 mt-0.5 line-clamp-2">{s.bio}</p>
+              )}
             </div>
-            {s.bio && (
-              <p className="text-xs text-gray-500 mt-0.5 line-clamp-2">{s.bio}</p>
-            )}
+          </div>
+          <div className="text-right">
+            <div className="text-lg font-bold text-white">{Math.round(s.suggestion_score)}%</div>
+            <div className="text-[10px] text-gray-500 uppercase">Score</div>
           </div>
         </div>
-        <div className="text-right">
-          <div className="text-lg font-bold text-white">{Math.round(s.suggestion_score)}%</div>
-          <div className="text-[10px] text-gray-500 uppercase">Score</div>
+
+        {/* Stats */}
+        <div className="grid grid-cols-3 gap-2">
+          <div className="bg-gray-800/50 rounded-lg p-2 text-center border border-gray-700/50">
+            <div className="text-sm font-bold text-white">{formatCount(s.followers)}</div>
+            <div className="text-[10px] text-gray-500">Followers</div>
+          </div>
+          <div className={`rounded-lg p-2 text-center border ${erStyle(s.avg_er)}`}>
+            <div className="text-sm font-bold">{s.avg_er}%</div>
+            <div className="text-[10px] opacity-75">Avg ER</div>
+          </div>
+          <div className="bg-gray-800/50 rounded-lg p-2 text-center border border-gray-700/50">
+            <div className="text-sm font-bold text-white">{s.posts_per_week}</div>
+            <div className="text-[10px] text-gray-500">Posts/wk</div>
+          </div>
+        </div>
+
+        {/* Content breakdown */}
+        {s.content_breakdown && (
+          <div className="text-xs text-gray-500">{s.content_breakdown}</div>
+        )}
+
+        {/* Relevance reason */}
+        {s.relevance_reason && (
+          <div className="text-xs text-gray-400 italic">{s.relevance_reason}</div>
+        )}
+
+        {/* Actions */}
+        <div className="flex gap-1.5 pt-1">
+          <button
+            onClick={() => handleApprove(s.username)}
+            className="flex-1 px-3 py-2 rounded-lg text-xs font-medium bg-green-600 hover:bg-green-500 text-white transition-colors"
+          >
+            Add to System
+          </button>
+          <button
+            onClick={() => handleSnooze(s.username)}
+            className="px-3 py-2 rounded-lg text-xs font-medium bg-gray-800 border border-gray-700 text-yellow-400 hover:border-yellow-600 transition-colors"
+          >
+            Snooze 7d
+          </button>
+          <button
+            onClick={() => handleDismiss(s.username)}
+            className="px-3 py-2 rounded-lg text-xs font-medium bg-gray-800 border border-gray-700 text-red-400 hover:border-red-600 transition-colors"
+          >
+            Dismiss
+          </button>
         </div>
       </div>
-
-      {/* Stats */}
-      <div className="grid grid-cols-3 gap-2">
-        <div className="bg-gray-800/50 rounded-lg p-2 text-center border border-gray-700/50">
-          <div className="text-sm font-bold text-white">{formatCount(s.followers)}</div>
-          <div className="text-[10px] text-gray-500">Followers</div>
-        </div>
-        <div className={`rounded-lg p-2 text-center border ${erStyle(s.avg_er)}`}>
-          <div className="text-sm font-bold">{s.avg_er}%</div>
-          <div className="text-[10px] opacity-75">Avg ER</div>
-        </div>
-        <div className="bg-gray-800/50 rounded-lg p-2 text-center border border-gray-700/50">
-          <div className="text-sm font-bold text-white">{s.posts_per_week}</div>
-          <div className="text-[10px] text-gray-500">Posts/wk</div>
-        </div>
-      </div>
-
-      {/* Content breakdown */}
-      {s.content_breakdown && (
-        <div className="text-xs text-gray-500">{s.content_breakdown}</div>
-      )}
-
-      {/* Relevance reason */}
-      {s.relevance_reason && (
-        <div className="text-xs text-gray-400 italic">{s.relevance_reason}</div>
-      )}
-
-      {/* Actions */}
-      <div className="flex gap-1.5 pt-1">
-        <button
-          onClick={() => handleApprove(s.username)}
-          className="flex-1 px-3 py-2 rounded-lg text-xs font-medium bg-green-600 hover:bg-green-500 text-white transition-colors"
-        >
-          Add to System
-        </button>
-        <button
-          onClick={() => handleSnooze(s.username)}
-          className="px-3 py-2 rounded-lg text-xs font-medium bg-gray-800 border border-gray-700 text-yellow-400 hover:border-yellow-600 transition-colors"
-        >
-          Snooze 7d
-        </button>
-        <button
-          onClick={() => handleDismiss(s.username)}
-          className="px-3 py-2 rounded-lg text-xs font-medium bg-gray-800 border border-gray-700 text-red-400 hover:border-red-600 transition-colors"
-        >
-          Dismiss
-        </button>
-      </div>
-    </div>
-  );
+    );
+  };
 
   if (loading) {
     return (
@@ -238,6 +253,15 @@ export default function SuggestedAccountsTab() {
               <option value="followers">Most Followers</option>
               <option value="newest">Most Recent</option>
             </select>
+            <label className="flex items-center gap-2 px-3 py-2 rounded-lg bg-gray-800 border border-gray-700 text-sm text-gray-300">
+              <input
+                type="checkbox"
+                checked={radarOnly}
+                onChange={(e) => { setRadarOnly(e.target.checked); setSelected(new Set()); }}
+                className="accent-gold"
+              />
+              Radar-sourced
+            </label>
             <button
               onClick={handleRunDiscovery}
               disabled={discovering}
@@ -268,9 +292,9 @@ export default function SuggestedAccountsTab() {
       )}
 
       {/* Suggestions List */}
-      {suggestions.length === 0 ? (
+      {visibleSuggestions.length === 0 ? (
         <div className="bg-gray-900 rounded-xl border border-gray-800 p-12 text-center">
-          <p className="text-gray-500 text-lg">No suggestions yet.</p>
+          <p className="text-gray-500 text-lg">{radarOnly ? 'No radar-sourced suggestions yet.' : 'No suggestions yet.'}</p>
           <p className="text-gray-600 text-sm mt-1">Click "Run Discovery" to find new accounts based on your tracked accounts' networks.</p>
         </div>
       ) : (

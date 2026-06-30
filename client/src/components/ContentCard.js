@@ -47,11 +47,34 @@ const ER_COLORS = {
   Low: 'bg-gray-600/80 text-gray-300',
 };
 
-export default function ContentCard({ post, creatorTypes = {}, onUpdate, selected = false, onToggleSelect }) {
+const BADGE_POSITIONS = {
+  topLeft: 'top-2 left-2',
+  topRight: 'top-2 right-2',
+  bottomLeft: 'bottom-2 left-2',
+  bottomRight: 'bottom-2 right-2',
+};
+
+export default function ContentCard({
+  post,
+  creatorTypes = {},
+  onUpdate,
+  selected = false,
+  onToggleSelect,
+  variant = 'library',
+  thumbnailBadges = [],
+  actionSlot = null,
+}) {
   const [expanded, setExpanded] = useState(false);
   const [notes, setNotes] = useState(post.notes || '');
   const [showVideo, setShowVideo] = useState(false);
   const saveTimer = useRef(null);
+  const cardId = post.id ?? post.shortcode;
+  const isLibrary = variant === 'library';
+  const thumbnailSrc = !isLibrary && post.thumbnail_url
+    ? post.thumbnail_url
+    : cardId
+      ? `${API_URL}/thumb/${cardId}`
+      : post.thumbnail_url;
 
   const handleTag = async (tag) => {
     const newTag = post.tag === tag ? null : tag;
@@ -96,7 +119,7 @@ export default function ContentCard({ post, creatorTypes = {}, onUpdate, selecte
             <input
               type="checkbox"
               checked={selected}
-              onChange={() => onToggleSelect(post.id)}
+              onChange={() => onToggleSelect(cardId)}
               className="w-5 h-5 rounded accent-gold"
             />
           </label>
@@ -111,7 +134,7 @@ export default function ContentCard({ post, creatorTypes = {}, onUpdate, selecte
         ) : (
           <>
             <img
-              src={`${API_URL}/thumb/${post.id}`}
+              src={thumbnailSrc}
               alt=""
               className="w-full h-full object-cover"
               loading="lazy"
@@ -158,6 +181,16 @@ export default function ContentCard({ post, creatorTypes = {}, onUpdate, selecte
             {formatViewsVsMedian(post.views_vs_median)}
           </div>
         )}
+
+        {thumbnailBadges.map((badge) => (
+          <div
+            key={`${badge.position || 'topRight'}-${badge.label}`}
+            title={badge.title}
+            className={`absolute z-10 ${BADGE_POSITIONS[badge.position] || badge.position || BADGE_POSITIONS.topRight} ${badge.className}`}
+          >
+            {badge.label}
+          </div>
+        ))}
       </div>
 
       <div className="p-3 space-y-2.5">
@@ -222,77 +255,83 @@ export default function ContentCard({ post, creatorTypes = {}, onUpdate, selecte
           </div>
         )}
 
-        {/* Tags */}
-        <div className="flex gap-1.5">
-          {TAG_OPTIONS.map((opt) => (
+        {isLibrary && (
+          <>
+            {/* Tags */}
+            <div className="flex gap-1.5">
+              {TAG_OPTIONS.map((opt) => (
+                <button
+                  key={opt.value}
+                  onClick={() => handleTag(opt.value)}
+                  className={`flex-1 px-2 py-1.5 rounded-lg text-xs font-medium transition-all border ${
+                    post.tag === opt.value
+                      ? `${opt.color} border-transparent text-white`
+                      : 'bg-gray-800 border-gray-700 text-gray-400 hover:text-white hover:border-gray-600'
+                  }`}
+                >
+                  {opt.icon} {opt.label}
+                </button>
+              ))}
+            </div>
+
+            {/* Content Type Selectors */}
+            <div className="flex gap-1.5">
+              <select
+                value={creatorTypes[post.account_handle] || ''}
+                onChange={handleCreatorType}
+                title="Creator default type"
+                className={`flex-1 px-2 py-1.5 rounded-lg text-xs border transition-all ${
+                  creatorTypes[post.account_handle]
+                    ? 'bg-purple-600/20 border-purple-600/40 text-purple-300'
+                    : 'bg-gray-800 border-gray-700 text-gray-500'
+                }`}
+              >
+                <option value="">Creator...</option>
+                {CONTENT_TYPES.map((ct) => (
+                  <option key={ct.value} value={ct.value}>{ct.label}</option>
+                ))}
+              </select>
+              <select
+                value={post.content_type || ''}
+                onChange={handlePostType}
+                title="Override type for this video only"
+                className={`flex-1 px-2 py-1.5 rounded-lg text-xs border transition-all ${
+                  post.content_type
+                    ? 'bg-orange-600/20 border-orange-600/40 text-orange-300'
+                    : 'bg-gray-800 border-gray-700 text-gray-500'
+                }`}
+              >
+                <option value="">Video...</option>
+                {CONTENT_TYPES.map((ct) => (
+                  <option key={ct.value} value={ct.value}>{ct.label}</option>
+                ))}
+              </select>
+            </div>
+
+            {/* Notes */}
+            <textarea
+              value={notes}
+              onChange={handleNotesChange}
+              placeholder="Add notes..."
+              rows={2}
+              className="w-full bg-gray-800 border border-gray-700 rounded-lg px-2.5 py-1.5 text-xs text-gray-300 placeholder-gray-600 resize-none"
+            />
+
+            {/* Archive */}
             <button
-              key={opt.value}
-              onClick={() => handleTag(opt.value)}
-              className={`flex-1 px-2 py-1.5 rounded-lg text-xs font-medium transition-all border ${
-                post.tag === opt.value
-                  ? `${opt.color} border-transparent text-white`
-                  : 'bg-gray-800 border-gray-700 text-gray-400 hover:text-white hover:border-gray-600'
+              onClick={handleArchive}
+              className={`w-full px-2 py-1.5 rounded-lg text-xs font-medium transition-all border ${
+                post.archived
+                  ? 'bg-yellow-600/20 border-yellow-600/40 text-yellow-400 hover:bg-yellow-600/30'
+                  : 'bg-gray-800 border-gray-700 text-gray-500 hover:text-gray-300 hover:border-gray-600'
               }`}
             >
-              {opt.icon} {opt.label}
+              {post.archived ? '📦 Unarchive' : '📦 Archive'}
             </button>
-          ))}
-        </div>
+          </>
+        )}
 
-        {/* Content Type Selectors */}
-        <div className="flex gap-1.5">
-          <select
-            value={creatorTypes[post.account_handle] || ''}
-            onChange={handleCreatorType}
-            title="Creator default type"
-            className={`flex-1 px-2 py-1.5 rounded-lg text-xs border transition-all ${
-              creatorTypes[post.account_handle]
-                ? 'bg-purple-600/20 border-purple-600/40 text-purple-300'
-                : 'bg-gray-800 border-gray-700 text-gray-500'
-            }`}
-          >
-            <option value="">Creator...</option>
-            {CONTENT_TYPES.map((ct) => (
-              <option key={ct.value} value={ct.value}>{ct.label}</option>
-            ))}
-          </select>
-          <select
-            value={post.content_type || ''}
-            onChange={handlePostType}
-            title="Override type for this video only"
-            className={`flex-1 px-2 py-1.5 rounded-lg text-xs border transition-all ${
-              post.content_type
-                ? 'bg-orange-600/20 border-orange-600/40 text-orange-300'
-                : 'bg-gray-800 border-gray-700 text-gray-500'
-            }`}
-          >
-            <option value="">Video...</option>
-            {CONTENT_TYPES.map((ct) => (
-              <option key={ct.value} value={ct.value}>{ct.label}</option>
-            ))}
-          </select>
-        </div>
-
-        {/* Notes */}
-        <textarea
-          value={notes}
-          onChange={handleNotesChange}
-          placeholder="Add notes..."
-          rows={2}
-          className="w-full bg-gray-800 border border-gray-700 rounded-lg px-2.5 py-1.5 text-xs text-gray-300 placeholder-gray-600 resize-none"
-        />
-
-        {/* Archive */}
-        <button
-          onClick={handleArchive}
-          className={`w-full px-2 py-1.5 rounded-lg text-xs font-medium transition-all border ${
-            post.archived
-              ? 'bg-yellow-600/20 border-yellow-600/40 text-yellow-400 hover:bg-yellow-600/30'
-              : 'bg-gray-800 border-gray-700 text-gray-500 hover:text-gray-300 hover:border-gray-600'
-          }`}
-        >
-          {post.archived ? '📦 Unarchive' : '📦 Archive'}
-        </button>
+        {actionSlot}
       </div>
     </div>
   );
