@@ -132,9 +132,9 @@ async function runDiscovery() {
            item.bio || '', item.contentBreakdown || '', item.topHashtags || '', item.relevanceReason || '', totalScore, item.gender || 'unknown']
         );
         added++;
-      } catch (e) { /* skip */ }
+      } catch (e) { console.error(`[Discovery] insert failed for @${item.username}:`, e.message); }
     }
-    jobStatus.discovery.message = `Found ${candidates.length} candidates, added ${added}`;
+    jobStatus.discovery.message = `Found ${aggregated.length} candidates, added ${added}`;
     jobStatus.discovery.status = 'idle';
     console.log(`[Scheduler] Discovery done: ${added} new suggestions`);
   } catch (err) { jobStatus.discovery.status = 'error'; jobStatus.discovery.message = err.message; }
