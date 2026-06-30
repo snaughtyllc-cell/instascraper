@@ -111,3 +111,10 @@ test('normalizeHashtagItem: maps video item, drops non-video', () => {
   assert.ok(Array.isArray(r._hashtags) && r._hashtags.includes('#fitness'));
   assert.strictEqual(radar.normalizeHashtagItem({ ...item, type: 'Image', productType: undefined }, 'fitness'), null);
 });
+
+test('authorMedianFromReels: median of positive view counts', () => {
+  assert.strictEqual(radar.authorMedianFromReels([100, 300, 200]), 200);
+  assert.strictEqual(radar.authorMedianFromReels([100, 300]), 200);
+  assert.strictEqual(radar.authorMedianFromReels([]), null);
+  assert.strictEqual(radar.authorMedianFromReels([0, -5, null]), null);
+});

@@ -110,4 +110,34 @@ async function harvestHashtag(scraper, term, cfg) {
   return items.map(it => normalizeHashtagItem(it, term)).filter(Boolean);
 }
 
-module.exports = { radarConfig, selectWatchTerms, passesFloors, dedupeReels, excludeAuthors, scoreReel, normalizeHashtagItem, harvestHashtag };
+function authorMedianFromReels(views) {
+  return median(views || []);
+}
+
+// One Apify "details" run per author (capped) → median of recent reel views.
+async function enrichAuthors(scraper, handles, cfg) {
+  const out = new Map();
+  const unique = [...new Set((handles || []).filter(Boolean))].slice(0, cfg.authorsEnrichMax);
+  for (const handle of unique) {
+    try {
+      const run = await scraper._startApifyRun(GENERIC_ACTOR_ID, {
+        directUrls: [`https://www.instagram.com/${handle}/`],
+        resultsType: 'details', resultsLimit: 1,
+      }, { purpose: 'radar-enrich', query: handle });
+      const items = await scraper._waitForRun(run.id, 12);
+      const profile = items && items[0];
+      if (!profile) { out.set(handle, { median_views: null, followers: 0 }); continue; }
+      const followers = profile.followersCount || profile.followedByCount || 0;
+      const views = (profile.latestPosts || [])
+        .filter(p => p.type === 'Video' || p.productType === 'clips')
+        .map(p => extractViews(p)).filter(v => Number.isFinite(v));
+      out.set(handle, { median_views: authorMedianFromReels(views), followers });
+    } catch (e) {
+      if (e && e.name === 'BudgetExceededError') throw e;
+      out.set(handle, { median_views: null, followers: 0 });
+    }
+  }
+  return out;
+}
+
+module.exports = { radarConfig, selectWatchTerms, passesFloors, dedupeReels, excludeAuthors, scoreReel, normalizeHashtagItem, harvestHashtag, authorMedianFromReels, enrichAuthors };
