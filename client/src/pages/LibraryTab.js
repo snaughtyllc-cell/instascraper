@@ -17,6 +17,7 @@ export default function LibraryTab() {
   const [importResult, setImportResult] = useState(null);
   const [filters, setFilters] = useState({
     sort: 'newest',
+    search: '',
     tag: '',
     account: '',
     contentType: '',
@@ -41,7 +42,9 @@ export default function LibraryTab() {
     try {
       const params = { page, limit: 24 };
       if (filters.sort) params.sort = filters.sort;
-      if (filters.tag) params.tag = filters.tag;
+      if (filters.tag === '__untagged__') params.untagged = 'true';
+      else if (filters.tag) params.tag = filters.tag;
+      if (filters.search) params.search = filters.search;
       if (filters.account) params.account = filters.account;
       if (filters.contentType) params.contentType = filters.contentType;
       if (filters.minViews) params.minViews = filters.minViews;

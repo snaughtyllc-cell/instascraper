@@ -4,6 +4,15 @@ import { daysAgoISO, DATE_PRESETS, presetForStartDate } from '../utils/date';
 export default function FilterBar({ filters, accounts, total, onChange, onExport }) {
   const activePreset = presetForStartDate(filters.startDate);
 
+  const [searchText, setSearchText] = React.useState(filters.search || '');
+  React.useEffect(() => { setSearchText(filters.search || ''); }, [filters.search]);
+  React.useEffect(() => {
+    const t = setTimeout(() => {
+      if (searchText !== (filters.search || '')) onChange('search', searchText);
+    }, 300);
+    return () => clearTimeout(t);
+  }, [searchText]); // eslint-disable-line
+
   const handlePreset = (value) => {
     const preset = DATE_PRESETS.find((p) => p.value === value);
     if (!preset) return;
@@ -13,6 +22,15 @@ export default function FilterBar({ filters, accounts, total, onChange, onExport
   return (
     <div className="bg-gray-900 rounded-xl border border-gray-800 p-4">
       <div className="flex flex-wrap items-center gap-3">
+        {/* Caption Search */}
+        <input
+          type="text"
+          value={searchText}
+          onChange={(e) => setSearchText(e.target.value)}
+          placeholder="Search captions…"
+          className="bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm text-white placeholder-gray-500 w-44"
+        />
+
         {/* Sort */}
         <select
           value={filters.sort}
@@ -37,6 +55,7 @@ export default function FilterBar({ filters, accounts, total, onChange, onExport
           <option value="recreate">Recreate</option>
           <option value="reference">Reference</option>
           <option value="skip">Skip</option>
+          <option value="__untagged__">Untagged</option>
         </select>
 
         {/* Account Filter */}

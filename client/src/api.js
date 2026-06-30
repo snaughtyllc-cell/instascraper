@@ -16,6 +16,7 @@ export const saveNotes = (id, notes) => api.post(`/content/${id}/notes`, { notes
 export const archivePost = (id, archived) => api.post(`/content/${id}/archive`, { archived });
 export const setCreatorType = (handle, contentType) => api.post(`/creators/${handle}/type`, { contentType });
 export const setPostContentType = (id, contentType) => api.post(`/content/${id}/content-type`, { contentType });
+export const bulkUpdateContent = (ids, action, value) => api.post('/content/bulk', { ids, action, value });
 export const getCreators = () => api.get('/creators');
 
 export const exportContent = (format = 'json') => {
