@@ -85,7 +85,7 @@ function passesFloors(reel, cfg, nowMs = Date.now()) {
   const t = reel.posted_at ? Date.parse(reel.posted_at) : NaN;
   if (!Number.isFinite(t)) return false;
   const ageDays = (nowMs - t) / (24 * 60 * 60 * 1000);
-  return ageDays <= cfg.maxAgeDays;
+  return ageDays >= 0 && ageDays <= cfg.maxAgeDays;
 }
 
 function dedupeReels(reels, { knownShortcodes = new Set() } = {}) {
