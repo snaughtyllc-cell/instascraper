@@ -55,6 +55,30 @@ function selectDueAccounts(accounts, nowMs, cfg = cadenceConfig()) {
     .slice(0, cfg.maxPerCycle);
 }
 
+function discoveryConfig(env = process.env) {
+  const num = (v, d) => { const n = Number(v); return Number.isFinite(n) && n >= 0 ? n : d; };
+  return {
+    maxSources: Math.floor(num(env.DISCOVERY_MAX_SOURCES, 5)),
+    enrichMax: Math.floor(num(env.DISCOVERY_ENRICH_MAX, 8)),
+  };
+}
+
+// Rotation: least-recently-discovered first (never-discovered = highest priority),
+// deterministic tie-break by username, capped at `max`. Pure — unit-tested.
+function selectDiscoverySources(accounts, max) {
+  // never-discovered / malformed → -1 sentinel (sorts before any real epoch-ms timestamp,
+  // and -1 - -1 = 0 so the username tie-break still fires; -Infinity would yield NaN here).
+  const ms = (iso) => { const t = iso ? new Date(iso).getTime() : NaN; return Number.isFinite(t) ? t : -1; };
+  return (accounts || [])
+    .slice()
+    .sort((a, b) => {
+      const d = ms(a.last_discovery_at) - ms(b.last_discovery_at);
+      if (d !== 0) return d;
+      return String(a.username).localeCompare(String(b.username));
+    })
+    .slice(0, Math.max(0, max | 0));
+}
+
 function buildCadenceAccounts(accountRows, freqRows, cfg = cadenceConfig()) {
   const weeks = (cfg.freqWindowDays || 28) / 7;
   const freq = new Map((freqRows || []).map(r => [r.username, Number(r.recent_post_count) || 0]));
@@ -85,11 +109,13 @@ async function runAutoScrape() {
     const accountsRes = await pool.query("SELECT username, last_scraped_at, last_attempt_at, consecutive_failures FROM tracked_accounts WHERE status = 'active'");
     if (accountsRes.rows.length === 0) { jobStatus.autoScrape.message = 'No active accounts'; jobStatus.autoScrape.status = 'idle'; return; }
 
+    // posts.account_handle is raw-case (from the scraped owner username); tracked_accounts.username
+    // is canonically lowercased — fold to lowercase so the frequency join matches.
     const freqRes = await pool.query(
-      `SELECT account_handle AS username, COUNT(*) AS recent_post_count FROM posts
+      `SELECT LOWER(account_handle) AS username, COUNT(*) AS recent_post_count FROM posts
        WHERE posted_at >= TO_CHAR(NOW() - INTERVAL '${cfg.freqWindowDays} days', 'YYYY-MM-DD"T"HH24:MI:SS"Z"')
          AND (soft_deleted = 0 OR soft_deleted IS NULL)
-       GROUP BY account_handle`
+       GROUP BY LOWER(account_handle)`
     );
 
     const now = Date.now();
@@ -180,43 +206,95 @@ async function runDiscovery() {
   console.log('[Scheduler] Discovery starting...');
   try {
     if (!scraperInstance || !scraperInstance.apiKey) { jobStatus.discovery.message = 'No Apify API key'; jobStatus.discovery.status = 'idle'; return; }
-    const trackedResult = await pool.query("SELECT username FROM tracked_accounts WHERE status = 'active'");
+    const dcfg = discoveryConfig();
+    const trackedResult = await pool.query("SELECT username, last_discovery_at FROM tracked_accounts WHERE status = 'active'");
     const suggestedResult = await pool.query("SELECT username FROM suggested_accounts");
-    const existing = new Set([...trackedResult.rows.map(a => a.username), ...suggestedResult.rows.map(a => a.username)]);
+    const trackedSet = new Set(trackedResult.rows.map(a => a.username));
+    const suggestedSet = new Set(suggestedResult.rows.map(a => a.username));
+
+    // Reach: rotate through all active accounts (least-recently-discovered first), capped per cycle.
+    const sources = selectDiscoverySources(trackedResult.rows, dcfg.maxSources);
     let raw = [];
-    for (const account of trackedResult.rows.slice(0, 5)) {
+    for (const account of sources) {
       try {
-        const related = await scraperInstance.discoverRelated(account.username);
+        // Harvest only — enrich once, globally, after dedup (cheaper than per-source).
+        const related = await scraperInstance.discoverRelated(account.username, { enrich: false });
         for (const profile of related) {
-          if (!existing.has(profile.username)) raw.push({ ...profile, sourceAccount: profile.sourceAccount || account.username });
+          // Skip already-tracked; let already-suggested through for cross-cycle accumulation.
+          if (!trackedSet.has(profile.username)) {
+            raw.push({ ...profile, sourceAccount: profile.sourceAccount || account.username });
+          }
         }
       } catch (err) { console.error(`[Discovery] Failed for @${account.username}:`, err.message); }
+      // Advance the rotation cursor best-effort even on failure, so a bad source can't wedge the queue.
+      try { await pool.query(`UPDATE tracked_accounts SET last_discovery_at = TO_CHAR(NOW(), 'YYYY-MM-DD"T"HH24:MI:SS"Z"') WHERE username = $1`, [account.username]); } catch (e) {}
       await new Promise(r => setTimeout(r, 10000));
     }
 
+    // Cross-source dedup (collabStrength = distinct sources this cycle).
     const aggregated = aggregateCandidates(raw);
-    const female = aggregated.filter(c => c.gender === 'female').length;
-    const unknown = aggregated.filter(c => c.gender !== 'female').length;
-    console.log(`[Metric] discovery candidates=${aggregated.length} female=${female} unknown=${unknown}`);
+    aggregated.sort((a, b) => (b.collabStrength || 0) - (a.collabStrength || 0));
 
-    let added = 0;
-    for (const item of aggregated.slice(0, 50)) {
-      if (existing.has(item.username)) continue;
-      existing.add(item.username);
+    // Cheaper enrichment: enrich only NEW candidates once (already-suggested keep stored data),
+    // globally capped — replaces the old per-source 4-each enrichment.
+    const freshCandidates = aggregated.filter(c => !suggestedSet.has(c.username));
+    await scraperInstance.enrichCandidates(freshCandidates, { apifyMax: dcfg.enrichMax, dbMax: freshCandidates.length });
+
+    // Gender-classify the new candidates once; drop males (already-suggested keep stored gender).
+    const fresh = freshCandidates.filter(c => (c.followers || 0) <= 500000);
+    const verdicts = await scraperInstance._classifyGenderBatch(
+      fresh.map(c => ({ username: c.username, bio: c.bio || '', captionSnippet: c.captionSnippet, taggedBy: c.sourceAccount }))
+    );
+    let female = 0;
+    const freshKept = [];
+    for (const c of fresh) {
+      const gender = verdicts[c.username.toLowerCase()] || 'unknown';
+      if (gender === 'male') { console.log(`[Discovery] Filtered out @${c.username} (male)`); continue; }
+      c.gender = gender;
+      if (gender === 'female') female++;
+      freshKept.push(c);
+    }
+
+    const repeats = aggregated.filter(c => suggestedSet.has(c.username) && !trackedSet.has(c.username));
+
+    let added = 0, bumped = 0;
+    for (const item of freshKept.slice(0, 50)) {
       const totalScore = scoreCandidate({ collabStrength: item.collabStrength, avgEr: item.avgEr, postsPerWeek: item.postsPerWeek });
       try {
-        await pool.query(
+        const ins = await pool.query(
           `INSERT INTO suggested_accounts (username, source, followers, avg_er, posts_per_week, bio, content_breakdown, top_hashtags, relevance_reason, suggestion_score, gender)
            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11) ON CONFLICT (username) DO NOTHING`,
           [item.username, item.source || 'discovery', item.followers || 0, item.avgEr || 0, item.postsPerWeek || 0,
            item.bio || '', item.contentBreakdown || '', item.topHashtags || '', item.relevanceReason || '', totalScore, item.gender || 'unknown']
         );
-        added++;
+        if (ins.rowCount > 0) added++;
       } catch (e) { console.error(`[Discovery] insert failed for @${item.username}:`, e.message); }
     }
-    jobStatus.discovery.message = `Found ${aggregated.length} candidates, added ${added}`;
+
+    // Accumulate onto still-pending suggestions re-surfaced by a new source this cycle:
+    // merge the source token, bump score (monotonic — never demotes), refresh the reason.
+    for (const item of repeats) {
+      const totalScore = scoreCandidate({ collabStrength: item.collabStrength, avgEr: item.avgEr, postsPerWeek: item.postsPerWeek });
+      const token = item.sourceAccount || item.source || 'discovery';
+      try {
+        // Placeholders must appear once, in ascending textual order: the dual-mode
+        // shim strips $n → ? positionally, so duplicated/out-of-order $n break sqlite.
+        const upd = await pool.query(
+          `UPDATE suggested_accounts
+             SET suggestion_score = CASE WHEN $1 > suggestion_score THEN $2 ELSE suggestion_score END,
+                 source = CASE WHEN (',' || source || ',') LIKE ('%,' || $3 || ',%') THEN source ELSE source || ',' || $4 END,
+                 relevance_reason = $5
+           WHERE username = $6 AND status = 'pending'`,
+          [totalScore, totalScore, token, token, item.relevanceReason || '', item.username]
+        );
+        if (upd.rowCount > 0) bumped++;
+      } catch (e) { console.error(`[Discovery] accumulate failed for @${item.username}:`, e.message); }
+    }
+
+    console.log(`[Metric] discovery sources=${sources.length} candidates=${aggregated.length} enriched=${freshCandidates.length} female=${female} added=${added} bumped=${bumped}`);
+    jobStatus.discovery.message = `Sources ${sources.length}, ${aggregated.length} candidates — added ${added}, bumped ${bumped}`;
     jobStatus.discovery.status = 'idle';
-    console.log(`[Scheduler] Discovery done: ${added} new suggestions`);
+    console.log(`[Scheduler] Discovery done: ${added} new, ${bumped} bumped`);
   } catch (err) { jobStatus.discovery.status = 'error'; jobStatus.discovery.message = err.message; }
 }
 
@@ -277,4 +355,4 @@ function startScheduler(scraper) {
 
 function getSchedulerStatus() { return jobStatus; }
 
-module.exports = { startScheduler, getSchedulerStatus, runAutoScrape, runEngagementRollup, runAutoCleanup, runDiscovery, runIdeaGeneration, runThumbnailSweep, cadenceConfig, computeInterval, backoffDays, daysSince, isDue, selectDueAccounts, buildCadenceAccounts };
+module.exports = { startScheduler, getSchedulerStatus, runAutoScrape, runEngagementRollup, runAutoCleanup, runDiscovery, runIdeaGeneration, runThumbnailSweep, cadenceConfig, computeInterval, backoffDays, daysSince, isDue, selectDueAccounts, buildCadenceAccounts, discoveryConfig, selectDiscoverySources };

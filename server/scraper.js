@@ -428,7 +428,7 @@ class InstagramScraper {
             ['failed', `Apify run ${status}`, progress, statusMessage, jobId]
           );
           if (isTrackedUsernameQuery(filters.query)) {
-            try { await pool.query(`UPDATE tracked_accounts SET consecutive_failures = COALESCE(consecutive_failures, 0) + 1 WHERE username = $1`, [filters.query.replace('@', '')]); } catch (e) {}
+            try { await pool.query(`UPDATE tracked_accounts SET consecutive_failures = COALESCE(consecutive_failures, 0) + 1 WHERE username = $1`, [filters.query.replace('@', '').toLowerCase()]); } catch (e) {}
           }
           try { await recordRunCompletion(pool, { runId, runObject: run, status: 'failed' }); } catch (e) { console.error('[Apify] ledger finalize failed:', e.message); }
           return;
@@ -447,7 +447,7 @@ class InstagramScraper {
             ['failed', 'Polling timeout', progress, jobId]
           );
           if (isTrackedUsernameQuery(filters.query)) {
-            try { await pool.query(`UPDATE tracked_accounts SET consecutive_failures = COALESCE(consecutive_failures, 0) + 1 WHERE username = $1`, [filters.query.replace('@', '')]); } catch (e) {}
+            try { await pool.query(`UPDATE tracked_accounts SET consecutive_failures = COALESCE(consecutive_failures, 0) + 1 WHERE username = $1`, [filters.query.replace('@', '').toLowerCase()]); } catch (e) {}
           }
           try { await recordRunCompletion(pool, { runId, runObject: run, status: 'failed' }); } catch (e) { console.error('[Apify] ledger finalize failed:', e.message); }
         }
@@ -492,6 +492,24 @@ class InstagramScraper {
     for (const item of items) {
       const fc = item.ownerFollowerCount || item.followersCount || item.owner?.followerCount || 0;
       if (fc > 0) { followersCount = fc; break; }
+    }
+
+    // The reel actor returns no follower count, so calcER has no denominator → every
+    // post lands with er_percent = 0 and engagement sorting is meaningless. Resolve
+    // followers from the tracked row (free), else one cheap profile lookup, so ER works.
+    if (followersCount === 0 && isTrackedUsernameQuery(filters.query)) {
+      const handle = filters.query.replace('@', '').toLowerCase();
+      try {
+        const tr = await pool.query('SELECT followers FROM tracked_accounts WHERE username = $1', [handle]);
+        if (tr.rows[0] && Number(tr.rows[0].followers) > 0) followersCount = Number(tr.rows[0].followers);
+      } catch (e) { /* ignore */ }
+      if (followersCount === 0) {
+        try {
+          const profile = await this._fetchProfileQuick(handle);
+          if (profile && profile.followers > 0) followersCount = profile.followers;
+        } catch (e) { console.log(`[ER] follower lookup failed for @${handle}: ${e.message}`); }
+      }
+      if (followersCount > 0) console.log(`[ER] resolved ${followersCount} followers for @${handle} (reel actor omitted it)`);
     }
 
     let count = 0;
@@ -570,15 +588,19 @@ class InstagramScraper {
     // Update tracked account if it exists
     if (accountHandle) {
       await pool.query(
-        `UPDATE tracked_accounts SET last_scraped_at = TO_CHAR(NOW(), 'YYYY-MM-DD"T"HH24:MI:SS"Z"'), last_post_count = $1, followers = $2, consecutive_failures = 0, updated_at = TO_CHAR(NOW(), 'YYYY-MM-DD"T"HH24:MI:SS"Z"') WHERE username = $3`,
-        [count, followersCount, accountHandle]
+        // COALESCE(NULLIF(...)) keeps the prior follower count when this scrape couldn't
+        // resolve one (0), instead of wiping it — which would zero ER on the next scrape.
+        `UPDATE tracked_accounts SET last_scraped_at = TO_CHAR(NOW(), 'YYYY-MM-DD"T"HH24:MI:SS"Z"'), last_post_count = $1, followers = COALESCE(NULLIF($2, 0), followers), consecutive_failures = 0, updated_at = TO_CHAR(NOW(), 'YYYY-MM-DD"T"HH24:MI:SS"Z"') WHERE username = $3`,
+        // accountHandle is the raw-case scraped owner username; tracked_accounts.username is
+        // lowercased — fold so the success reset matches (keeps failure/reset symmetric).
+        [count, followersCount, (accountHandle || '').toLowerCase()]
       );
     } else if (count === 0 && isTrackedUsernameQuery(filters.query) && !filters.minLikes && !filters.minViews && !filters.startDate && !filters.endDate) {
       // Scrape completed but found nothing for a tracked account (no filters) → count as a failure for cadence backoff.
       try {
         await pool.query(
           `UPDATE tracked_accounts SET consecutive_failures = COALESCE(consecutive_failures, 0) + 1 WHERE username = $1`,
-          [filters.query.replace('@', '')]
+          [filters.query.replace('@', '').toLowerCase()]
         );
       } catch (e) { console.error('[Cadence] 0-post failure record failed:', e.message); }
     }
@@ -609,7 +631,12 @@ class InstagramScraper {
   }
 
   // ─── Discovery: find related accounts ──────────────────────────
-  async discoverRelated(username) {
+  // opts.enrich (default true): when false, return raw harvested candidates
+  // (DB caption/tagged mining + generic-actor mentions/tagged) and skip the
+  // per-candidate Apify enrichment + gender filter. The caller (runDiscovery)
+  // then enriches/classifies the deduped batch once, globally.
+  async discoverRelated(username, opts = {}) {
+    const { enrich = true } = opts;
     const candidates = [];
     const seen = new Set();
 
@@ -703,11 +730,45 @@ class InstagramScraper {
       console.error(`[Discovery] Apify error for @${username}:`, err.message);
     }
 
-    // Enrich candidates
+    // Harvest-only mode: hand the raw candidates back so the caller can enrich +
+    // gender-classify the deduped batch once, instead of per-source.
+    if (!enrich) {
+      console.log(`[Discovery] Harvest-only for @${username}: ${candidates.length} raw candidates`);
+      return candidates;
+    }
+
+    const enriched = await this.enrichCandidates(candidates, { apifyMax: 4, dbMax: 20 });
+
+    let filtered = enriched.filter(c => c.followers <= 500000);
+
+    // Gender: classify the whole batch once; drop male, keep female + unknown (unknown parks at read time).
+    console.log(`[Discovery] Classifying gender for ${filtered.length} candidates...`);
+    const verdicts = await this._classifyGenderBatch(
+      filtered.map(c => ({ username: c.username, bio: c.bio || '', captionSnippet: c.captionSnippet, taggedBy: c.sourceAccount }))
+    );
+    const genderResults = [];
+    for (const c of filtered) {
+      const gender = verdicts[c.username.toLowerCase()] || 'unknown';
+      if (gender === 'male') { console.log(`[Discovery] Filtered out @${c.username} (male)`); continue; }
+      c.gender = gender;
+      genderResults.push(c);
+    }
+    filtered = genderResults;
+
+    console.log(`[Discovery] Found ${filtered.length} female/unknown candidates for @${username}`);
+    return filtered;
+  }
+
+  // Enrich candidates: DB-first (free — reuse already-scraped posts), then a
+  // single Apify profile fetch for up to `apifyMax` that lack DB data. Mutates
+  // and returns the candidate objects. Shared by per-source discovery and the
+  // global post-aggregation pass so each unique candidate is enriched ≤ once.
+  async enrichCandidates(candidates, opts = {}) {
+    const { apifyMax = 4, dbMax = 20 } = opts;
     const enriched = [];
     const needsApify = [];
 
-    for (const candidate of candidates.slice(0, 20)) {
+    for (const candidate of candidates.slice(0, dbMax)) {
       if (!candidate.followers) candidate.followers = 0;
       if (!candidate.avgEr) candidate.avgEr = 0;
       if (!candidate.postsPerWeek) candidate.postsPerWeek = 0;
@@ -743,8 +804,8 @@ class InstagramScraper {
       }
     }
 
-    console.log(`[Discovery] Enriching ${Math.min(needsApify.length, 4)} candidates via Apify...`);
-    for (const candidate of needsApify.slice(0, 4)) {
+    console.log(`[Discovery] Enriching ${Math.min(needsApify.length, apifyMax)} candidates via Apify...`);
+    for (const candidate of needsApify.slice(0, apifyMax)) {
       try {
         const profile = await this._fetchProfileQuick(candidate.username);
         if (profile) {
@@ -762,28 +823,11 @@ class InstagramScraper {
       await new Promise(r => setTimeout(r, 2000));
     }
 
-    for (const candidate of needsApify.slice(4)) {
+    for (const candidate of needsApify.slice(apifyMax)) {
       enriched.push(candidate);
     }
 
-    let filtered = enriched.filter(c => c.followers <= 500000);
-
-    // Gender: classify the whole batch once; drop male, keep female + unknown (unknown parks at read time).
-    console.log(`[Discovery] Classifying gender for ${filtered.length} candidates...`);
-    const verdicts = await this._classifyGenderBatch(
-      filtered.map(c => ({ username: c.username, bio: c.bio || '', captionSnippet: c.captionSnippet, taggedBy: c.sourceAccount }))
-    );
-    const genderResults = [];
-    for (const c of filtered) {
-      const gender = verdicts[c.username.toLowerCase()] || 'unknown';
-      if (gender === 'male') { console.log(`[Discovery] Filtered out @${c.username} (male)`); continue; }
-      c.gender = gender;
-      genderResults.push(c);
-    }
-    filtered = genderResults;
-
-    console.log(`[Discovery] Found ${filtered.length} female/unknown candidates for @${username}`);
-    return filtered;
+    return enriched;
   }
 
   // Helper: wait for an Apify run to finish
@@ -950,6 +994,7 @@ module.exports.recordRunCompletion = recordRunCompletion;
 module.exports.usageSummary = usageSummary;
 module.exports.hasActiveJob = hasActiveJob;
 module.exports.extractViews = extractViews;
+module.exports.calcER = calcER;
 module.exports.normalizeTaggedUsers = normalizeTaggedUsers;
 module.exports.parseTaggedUsers = parseTaggedUsers;
 module.exports.isTrackedUsernameQuery = isTrackedUsernameQuery;
