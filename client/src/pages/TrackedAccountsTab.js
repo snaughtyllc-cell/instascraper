@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useCallback } from 'react';
-import { getTrackedAccounts, addTrackedAccount, updateTrackedAccount, removeTrackedAccount, scrapeNow, getSchedulerStatus, triggerJob } from '../api';
+import { getTrackedAccounts, addTrackedAccount, updateTrackedAccount, removeTrackedAccount, scrapeNow, getSchedulerStatus, triggerJob, scrapeTrackedBulk } from '../api';
 
 function formatCount(n) {
   if (!n) return '0';
@@ -26,6 +26,7 @@ export default function TrackedAccountsTab() {
   const [loading, setLoading] = useState(true);
   const [scheduler, setScheduler] = useState(null);
   const [scraping, setScraping] = useState({});
+  const [bulkScraping, setBulkScraping] = useState(false);
 
   const load = useCallback(async () => {
     try {
@@ -87,6 +88,27 @@ export default function TrackedAccountsTab() {
     loadScheduler();
   };
 
+  // Force-scrape every active account now, bypassing the cadence (still skips any
+  // account whose previous job is still running). Costs one Apify run per account.
+  const handleForceScrapeAll = async () => {
+    const usernames = accounts.filter(a => a.status === 'active').map(a => a.username);
+    if (usernames.length === 0) return;
+    if (!window.confirm(`Force-scrape all ${usernames.length} active account(s) now? This ignores the scrape cadence and uses Apify for each.`)) return;
+    setBulkScraping(true);
+    try {
+      const { data } = await scrapeTrackedBulk(usernames);
+      const started = data.started || 0;
+      const skipped = (data.results || []).filter(r => r.skipped).length;
+      let msg = `Started ${started} scrape(s)` + (skipped ? `, ${skipped} already running` : '');
+      if (data.stopped) msg += ` — stopped at budget cap: ${data.stopped.message}`;
+      window.alert(msg);
+    } catch (err) {
+      window.alert('Force scrape failed: ' + (err.response?.data?.error || err.message));
+    }
+    setBulkScraping(false);
+    setTimeout(() => { load(); loadScheduler(); }, 4000);
+  };
+
   if (loading) {
     return (
       <div className="flex items-center justify-center py-20">
@@ -133,8 +155,11 @@ export default function TrackedAccountsTab() {
           <div className="flex items-center justify-between mb-3">
             <h2 className="text-lg font-bold text-white">Scheduler</h2>
             <div className="flex gap-2">
-              <button onClick={() => handleTriggerJob('auto-scrape')} className="px-3 py-1.5 rounded-lg text-xs font-medium bg-gray-800 border border-gray-700 text-gray-300 hover:text-white hover:border-gray-600 transition-colors">
+              <button onClick={() => handleTriggerJob('auto-scrape')} className="px-3 py-1.5 rounded-lg text-xs font-medium bg-gray-800 border border-gray-700 text-gray-300 hover:text-white hover:border-gray-600 transition-colors" title="Runs the cadence job — scrapes only accounts that are due">
                 Run Scrape Now
+              </button>
+              <button onClick={handleForceScrapeAll} disabled={bulkScraping} className="px-3 py-1.5 rounded-lg text-xs font-medium bg-gray-800 border border-gold text-gold hover:bg-gray-700 transition-colors disabled:opacity-50" title="Scrapes every active account now, ignoring the cadence">
+                {bulkScraping ? 'Scraping…' : 'Force Scrape All'}
               </button>
               <button onClick={() => handleTriggerJob('rollup')} className="px-3 py-1.5 rounded-lg text-xs font-medium bg-gray-800 border border-gray-700 text-gray-300 hover:text-white hover:border-gray-600 transition-colors">
                 Run Rollup
