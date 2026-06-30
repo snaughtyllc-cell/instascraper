@@ -208,7 +208,7 @@ async function rollupAuthors(pool, authors) {
       const ins = await pool.query(
         `INSERT INTO suggested_accounts (username, source, relevance_reason, suggestion_score, gender)
          VALUES ($1,$2,$3,$4,$5) ON CONFLICT (username) DO NOTHING`,
-        [a.username, a.source, a.reason, a.bestBreakout, 'unknown']);
+        [a.username, a.source, a.reason, a.bestBreakout, a.gender || 'unknown']);
       if (ins.rowCount > 0) { added++; continue; }
       const upd = await pool.query(
         `UPDATE suggested_accounts
@@ -299,7 +299,21 @@ async function runRadar(scraper, { env = process.env } = {}) {
       }
     }
     const rollup = selectRolloupAuthors(allScored, cfg);
-    const { added, bumped } = await rollupAuthors(pool, rollup);
+    // Gender-classify and drop males (mirror discovery). On failure: treat all as unknown.
+    let verdicts = {};
+    try {
+      verdicts = await scraper._classifyGenderBatch(
+        rollup.map(a => ({ username: a.username, bio: '', captionSnippet: '', taggedBy: a.source }))
+      ) || {};
+    } catch (e) { console.error('[Radar] gender classify failed:', e.message); verdicts = {}; }
+    const rollupKept = [];
+    for (const a of rollup) {
+      const gender = verdicts[a.username.toLowerCase()] || 'unknown';
+      if (gender === 'male') { console.log(`[Radar] Filtered out @${a.username} (male)`); continue; }
+      a.gender = gender;
+      rollupKept.push(a);
+    }
+    const { added, bumped } = await rollupAuthors(pool, rollupKept);
     stats.authors = added + bumped;
     console.log(`[Metric] radar terms=${stats.terms} harvested=${stats.harvested} survivors=${stats.survivors} reels=${stats.reels} authors=${stats.authors}`);
     radarState.message = `Reels ${stats.reels}, authors +${added}/~${bumped}`;
