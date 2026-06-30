@@ -16,6 +16,17 @@ function calcER(likes, comments, followers) {
   return { er_percent: Math.round(er * 100) / 100, er_label: label };
 }
 
+// Views: Apify's reel actor returns a real videoPlayCount; the generic actor
+// (URL imports + small-result fallback) returns no view field at all. Return
+// null ("unknown") in that case so we never store a fake 0.
+function extractViews(item) {
+  const play = item && item.videoPlayCount;
+  if (typeof play === 'number' && Number.isFinite(play)) return play;
+  const view = item && item.videoViewCount;
+  if (typeof view === 'number' && Number.isFinite(view)) return view;
+  return null;
+}
+
 function isoNoMillis(ms) {
   return new Date(ms).toISOString().replace(/\.\d{3}Z$/, 'Z');
 }
@@ -450,7 +461,7 @@ class InstagramScraper {
     for (const item of items) {
       const likes = (item.likesCount != null && item.likesCount >= 0) ? item.likesCount : (item.likes || 0);
       const comments = (item.commentsCount != null && item.commentsCount >= 0) ? item.commentsCount : (item.comments || 0);
-      const views = item.videoPlayCount || item.videoViewCount || 0;
+      const views = extractViews(item);
 
       let postedAt = null;
       if (item.timestamp) {
@@ -811,7 +822,7 @@ class InstagramScraper {
     for (const item of items) {
       const likes = (item.likesCount != null && item.likesCount >= 0) ? item.likesCount : (item.likes || 0);
       const comments = (item.commentsCount != null && item.commentsCount >= 0) ? item.commentsCount : (item.comments || 0);
-      const views = item.videoPlayCount || item.videoViewCount || 0;
+      const views = extractViews(item);
 
       let postedAt = null;
       if (item.timestamp) {
@@ -869,6 +880,7 @@ module.exports.recordRunLaunch = recordRunLaunch;
 module.exports.recordRunCompletion = recordRunCompletion;
 module.exports.usageSummary = usageSummary;
 module.exports.hasActiveJob = hasActiveJob;
+module.exports.extractViews = extractViews;
 module.exports.classifyGenderKeyword = classifyGenderKeyword;
 module.exports.parseGenderBatch = parseGenderBatch;
 module.exports.scoreCandidate = scoreCandidate;

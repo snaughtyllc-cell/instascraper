@@ -13,6 +13,11 @@ function formatCount(n) {
   return n.toString();
 }
 
+function formatViews(n) {
+  if (n === null || n === undefined) return '—';
+  return formatCount(n);
+}
+
 export default function DeleteLogTab() {
   const [entries, setEntries] = useState([]);
   const [stats, setStats] = useState({});
@@ -120,7 +125,7 @@ export default function DeleteLogTab() {
                       {entry.reason === 'auto:unreferenced_30d' ? 'Auto: 30d unused' : entry.reason}
                     </span>
                   </div>
-                  <div className="col-span-1 text-xs text-gray-400">{formatCount(entry.view_count)}</div>
+                  <div className="col-span-1 text-xs text-gray-400">{formatViews(entry.view_count)}</div>
                   <div className="col-span-1 text-xs text-gray-400">{formatCount(entry.like_count)}</div>
                   <div className="col-span-2 text-xs text-gray-500">{formatDate(entry.deleted_at)}</div>
                   <div className="col-span-2">
