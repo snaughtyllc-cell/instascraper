@@ -270,6 +270,24 @@ app.delete('/tracked/:username', async (req, res) => {
   res.json({ success: true });
 });
 
+app.post('/tracked/scrape-bulk', async (req, res) => {
+  const usernames = Array.isArray(req.body?.usernames) ? req.body.usernames : [];
+  const results = [];
+  let stopped = null;
+  for (const username of usernames) {
+    try {
+      const r = await scraper.startScrapeJob({ query: username, queryType: 'username', minLikes: null, minViews: null, startDate: null, endDate: null, source: 'manual' });
+      // also un-pause so the account stays in the active rotation once a manual scrape ran
+      await pool.query("UPDATE tracked_accounts SET status = 'active' WHERE username = $1", [username]);
+      results.push({ username, ...(r && r.skipped ? { skipped: true } : { status: 'running' }) });
+    } catch (err) {
+      if (err instanceof BudgetExceededError) { stopped = { username, message: err.message }; break; }
+      results.push({ username, error: err.message });
+    }
+  }
+  res.json({ started: results.filter(r => r.status === 'running').length, results, stopped });
+});
+
 // ─── Suggested Accounts Routes ──────────────────────────────────
 
 app.get('/suggested', async (req, res) => {
