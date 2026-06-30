@@ -1,0 +1,183 @@
+const { test } = require('node:test');
+const assert = require('node:assert');
+const Database = require('better-sqlite3');
+const radar = require('./radar');
+
+// Mirror of the SQLite DDL initDB will create (asserts the shape is creatable & insertable).
+function makeSchema(db) {
+  db.exec(`CREATE TABLE watch_terms (
+    id INTEGER PRIMARY KEY AUTOINCREMENT, term TEXT, kind TEXT, source TEXT,
+    status TEXT DEFAULT 'active', model_id INTEGER DEFAULT NULL,
+    added_at TEXT, last_run_at TEXT DEFAULT NULL, notes TEXT DEFAULT '',
+    UNIQUE(term, kind))`);
+  db.exec(`CREATE TABLE radar_reels (
+    id INTEGER PRIMARY KEY AUTOINCREMENT, shortcode TEXT UNIQUE NOT NULL, account_handle TEXT,
+    video_url TEXT, thumbnail_url TEXT, caption TEXT,
+    like_count INTEGER, comment_count INTEGER, view_count INTEGER,
+    posted_at TEXT, post_url TEXT, discovered_via TEXT,
+    author_followers INTEGER DEFAULT NULL, author_median_views INTEGER DEFAULT NULL,
+    breakout_score REAL DEFAULT 0, niche_fit_score REAL DEFAULT 0, total_score REAL DEFAULT 0,
+    status TEXT DEFAULT 'new', discovered_at TEXT)`);
+}
+
+test('schema: watch_terms enforces UNIQUE(term,kind) and radar_reels UNIQUE(shortcode)', () => {
+  const db = new Database(':memory:');
+  makeSchema(db);
+  db.prepare("INSERT INTO watch_terms (term,kind,source) VALUES ('fitgirl','hashtag','auto')").run();
+  assert.throws(() => db.prepare("INSERT INTO watch_terms (term,kind,source) VALUES ('fitgirl','hashtag','admin')").run());
+  db.prepare("INSERT INTO radar_reels (shortcode,account_handle) VALUES ('ABC','x')").run();
+  assert.throws(() => db.prepare("INSERT INTO radar_reels (shortcode,account_handle) VALUES ('ABC','y')").run());
+});
+
+test('radarConfig: defaults and env override', () => {
+  const d = radar.radarConfig({});
+  assert.strictEqual(d.termsPerCycle, 10);
+  assert.strictEqual(d.minViews, 50000);
+  assert.strictEqual(d.wBreakout, 0.7);
+  const o = radar.radarConfig({ RADAR_TERMS_PER_CYCLE: '3', RADAR_MIN_VIEWS: '1000' });
+  assert.strictEqual(o.termsPerCycle, 3);
+  assert.strictEqual(o.minViews, 1000);
+});
+
+test('selectWatchTerms: active only, excluded suppresses twin, NULL-first ordering, cap', () => {
+  const terms = [
+    { id: 1, term: 'a', kind: 'hashtag', status: 'active',  last_run_at: '2026-06-01T00:00:00Z' },
+    { id: 2, term: 'b', kind: 'hashtag', status: 'active',  last_run_at: null },
+    { id: 3, term: 'c', kind: 'hashtag', status: 'paused',  last_run_at: null },
+    { id: 4, term: 'd', kind: 'hashtag', status: 'active',  last_run_at: '2026-05-01T00:00:00Z' },
+    { id: 5, term: 'd', kind: 'hashtag', status: 'excluded',last_run_at: null }, // excludes term 'd'
+  ];
+  const out = radar.selectWatchTerms(terms, 10).map(t => t.term);
+  assert.deepStrictEqual(out, ['b', 'a']);
+});
+
+test('passesFloors: views/likes/age boundaries', () => {
+  const cfg = radar.radarConfig({});
+  const now = Date.parse('2026-06-30T00:00:00Z');
+  const ok = { view_count: 60000, like_count: 2000, posted_at: '2026-06-25T00:00:00Z' };
+  assert.strictEqual(radar.passesFloors(ok, cfg, now), true);
+  assert.strictEqual(radar.passesFloors({ ...ok, view_count: 40000 }, cfg, now), false);
+  assert.strictEqual(radar.passesFloors({ ...ok, like_count: 10 }, cfg, now), false);
+  assert.strictEqual(radar.passesFloors({ ...ok, posted_at: '2026-01-01T00:00:00Z' }, cfg, now), false);
+  assert.strictEqual(radar.passesFloors({ ...ok, view_count: null }, cfg, now), false);
+  // future-dated post (posted after now) is rejected
+  assert.strictEqual(radar.passesFloors({ ...ok, posted_at: '2026-07-05T00:00:00Z' }, cfg, now), false);
+});
+
+test('topHashtagsFromCaptions: extraction, lowercase, top-N, tie-break, empty', () => {
+  const captions = [
+    'leg day #Fitness #Gym',
+    'more #fitness vibes #gym #booty',
+    '#FITNESS again #abs',
+    null,
+    'no tags here',
+  ];
+  // fitness=3, gym=2, abs=1, booty=1 → top 2 = fitness, gym
+  const top2 = radar.topHashtagsFromCaptions(captions, 2);
+  assert.deepStrictEqual(top2.map(t => t.tag), ['fitness', 'gym']);
+  assert.strictEqual(top2[0].count, 3);
+  assert.strictEqual(top2[1].count, 2);
+  // tie-break by tag asc: abs before booty (both count 1)
+  const top4 = radar.topHashtagsFromCaptions(captions, 4).map(t => t.tag);
+  assert.deepStrictEqual(top4, ['fitness', 'gym', 'abs', 'booty']);
+  // empty input
+  assert.deepStrictEqual(radar.topHashtagsFromCaptions([], 5), []);
+  assert.deepStrictEqual(radar.topHashtagsFromCaptions(['no hashtags'], 5), []);
+});
+
+test('dedupeReels / excludeAuthors', () => {
+  const reels = [
+    { shortcode: 'A', account_handle: 'x' },
+    { shortcode: 'A', account_handle: 'x' },
+    { shortcode: 'B', account_handle: 'y' },
+    { shortcode: 'C', account_handle: 'z' },
+  ];
+  const d = radar.dedupeReels(reels, { knownShortcodes: new Set(['C']) });
+  assert.deepStrictEqual(d.map(r => r.shortcode), ['A', 'B']);
+  const e = radar.excludeAuthors(d, { blockedHandles: new Set(['x']) });
+  assert.deepStrictEqual(e.map(r => r.shortcode), ['B']);
+});
+
+test('scoreReel: breakout vs known median, cap, unknown-median fallback', () => {
+  const cfg = radar.radarConfig({});
+  const known = radar.scoreReel({ view_count: 500000, _hashtagOverlap: 0 }, { median_views: 50000 }, cfg);
+  assert.strictEqual(known.breakout_score, 10);      // 500k / 50k
+  const capped = radar.scoreReel({ view_count: 999000000 }, { median_views: 1000 }, cfg);
+  assert.strictEqual(capped.breakout_score, 50);     // breakoutCap
+  const unknown = radar.scoreReel({ view_count: 50000 }, null, cfg);
+  assert.strictEqual(unknown.breakout_score, 1);     // 50k / minViews(50k)
+  assert.ok(known.total_score > unknown.total_score);
+});
+
+test('scoreReel: niche overlap raises niche_fit', () => {
+  const cfg = radar.radarConfig({});
+  const a = radar.scoreReel({ view_count: 50000, _hashtagOverlap: 0 }, null, cfg).niche_fit_score;
+  const b = radar.scoreReel({ view_count: 50000, _hashtagOverlap: 3 }, null, cfg).niche_fit_score;
+  assert.ok(b > a);
+});
+
+const { extractViews } = require('./scraper');
+
+test('normalizeHashtagItem: maps video item, drops non-video', () => {
+  const item = {
+    shortCode: 'XYZ', ownerUsername: 'Creator1', caption: 'leg day #fitness #gym',
+    likesCount: 5000, commentsCount: 120, videoPlayCount: 300000,
+    type: 'Video', displayUrl: 'https://cdn/x.jpg', url: 'https://instagram.com/reel/XYZ/',
+    timestamp: '2026-06-20T12:00:00Z',
+  };
+  const r = radar.normalizeHashtagItem(item, 'fitness');
+  assert.strictEqual(r.shortcode, 'XYZ');
+  assert.strictEqual(r.account_handle, 'creator1');  // lowercased
+  assert.strictEqual(r.view_count, 300000);
+  assert.strictEqual(r.like_count, 5000);
+  assert.strictEqual(r.discovered_via, 'fitness');
+  assert.ok(Array.isArray(r._hashtags) && r._hashtags.includes('#fitness'));
+  assert.strictEqual(radar.normalizeHashtagItem({ ...item, type: 'Image', productType: undefined }, 'fitness'), null);
+});
+
+test('authorMedianFromReels: median of positive view counts', () => {
+  assert.strictEqual(radar.authorMedianFromReels([100, 300, 200]), 200);
+  assert.strictEqual(radar.authorMedianFromReels([100, 300]), 200);
+  assert.strictEqual(radar.authorMedianFromReels([]), null);
+  assert.strictEqual(radar.authorMedianFromReels([0, -5, null]), null);
+});
+
+test('selectRolloupAuthors: threshold + solo-breakout', () => {
+  const cfg = radar.radarConfig({});
+  const scored = [
+    { account_handle: 'a', breakout_score: 3, discovered_via: 'x' },
+    { account_handle: 'a', breakout_score: 4, discovered_via: 'x' }, // count 2 → in
+    { account_handle: 'b', breakout_score: 12, discovered_via: 'y' }, // solo ≥10 → in
+    { account_handle: 'c', breakout_score: 3, discovered_via: 'z' },  // count 1, <10 → out
+  ];
+  const out = radar.selectRolloupAuthors(scored, cfg).map(a => a.username).sort();
+  assert.deepStrictEqual(out, ['a', 'b']);
+});
+
+test('accumulation upsert: bump pending, never demote reviewed (sqlite)', () => {
+  const db = new Database(':memory:');
+  db.exec(`CREATE TABLE suggested_accounts (username TEXT UNIQUE, source TEXT, suggestion_score REAL DEFAULT 0,
+           relevance_reason TEXT DEFAULT '', status TEXT DEFAULT 'pending')`);
+  db.prepare("INSERT INTO suggested_accounts (username,source,suggestion_score,status) VALUES ('a','radar:x',5,'pending')").run();
+  db.prepare("INSERT INTO suggested_accounts (username,source,suggestion_score,status) VALUES ('b','radar:x',5,'dismissed')").run();
+  const bump = db.prepare(`UPDATE suggested_accounts
+     SET suggestion_score = CASE WHEN ? > suggestion_score THEN ? ELSE suggestion_score END,
+         source = CASE WHEN (','||source||',') LIKE ('%,'||?||',%') THEN source ELSE source||','||? END,
+         relevance_reason = ?
+     WHERE username = ? AND status = 'pending'`);
+  bump.run(9, 9, 'radar:y', 'radar:y', 'reason', 'a');
+  bump.run(9, 9, 'radar:y', 'radar:y', 'reason', 'b');
+  const a = db.prepare("SELECT * FROM suggested_accounts WHERE username='a'").get();
+  const b = db.prepare("SELECT * FROM suggested_accounts WHERE username='b'").get();
+  assert.strictEqual(a.suggestion_score, 9);
+  assert.strictEqual(a.source, 'radar:x,radar:y');
+  assert.strictEqual(b.suggestion_score, 5); // reviewed row untouched
+});
+
+test('runRadar: re-entrancy guard returns started:false when already running', async () => {
+  radar.__setRunning(true);
+  const res = await radar.runRadar({ /* scraper unused when guarded */ });
+  assert.strictEqual(res.started, false);
+  assert.strictEqual(res.reason, 'already_running');
+  radar.__setRunning(false);
+});

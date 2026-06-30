@@ -110,8 +110,10 @@ app.use('/scheduler', requireAuth);
 app.use('/models', requireAuth);
 app.use('/ideas', requireAuth);
 app.use('/admin', requireAuth);
+app.use('/radar', requireAuth);
 
 const ContentIdeaAgent = require('./ai-agent');
+const radar = require('./radar');
 const { deliverBatch } = require('./delivery');
 
 const scraper = new InstagramScraper(process.env.APIFY_API_KEY || '');
@@ -814,6 +816,134 @@ app.get('/export', async (req, res) => {
   }
   res.setHeader('Content-Disposition', 'attachment; filename=recreate-content.json');
   res.json(result.rows);
+});
+
+// ─── Radar Routes ───────────────────────────────────────────────
+
+// Shared save logic (DRY): used by both POST /radar/reels/:shortcode/save and
+// bulk action:'save'. Promotes a radar reel into the Library `posts` table.
+// Dual-mode-safe: the SQLite shim strips `RETURNING id` and `lastInsertRowid`
+// is unreliable on ON CONFLICT, so we resolve post_id with a follow-up SELECT.
+async function saveRadarReel(shortcode) {
+  const r = (await pool.query('SELECT * FROM radar_reels WHERE shortcode = $1', [shortcode])).rows[0];
+  if (!r) return { ok: false, status: 404, error: 'not_found' };
+  await pool.query(
+    `INSERT INTO posts (shortcode, video_url, thumbnail_url, caption, like_count, comment_count,
+       view_count, posted_at, account_handle, post_url, source_query)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
+     ON CONFLICT (shortcode) DO UPDATE SET
+       video_url = EXCLUDED.video_url,
+       thumbnail_url = EXCLUDED.thumbnail_url,
+       caption = EXCLUDED.caption,
+       like_count = EXCLUDED.like_count,
+       comment_count = EXCLUDED.comment_count,
+       view_count = EXCLUDED.view_count,
+       thumbnail_cache_status = 'pending'`,
+    [r.shortcode, r.video_url, r.thumbnail_url, r.caption, r.like_count, r.comment_count,
+     r.view_count, r.posted_at, r.account_handle, r.post_url, `radar:${r.discovered_via}`]
+  );
+  const idRow = (await pool.query('SELECT id FROM posts WHERE shortcode = $1', [r.shortcode])).rows[0];
+  await pool.query("UPDATE radar_reels SET status = 'saved' WHERE shortcode = $1", [r.shortcode]);
+  // Best-effort thumbnail cache (mirrors the /scrape path; never block the save).
+  try { await downloadThumbnail({ shortcode: r.shortcode, thumbnail_url: r.thumbnail_url }); } catch (e) { /* best-effort */ }
+  return { ok: true, post_id: idRow && idRow.id };
+}
+
+async function dismissRadarReel(shortcode) {
+  const upd = await pool.query("UPDATE radar_reels SET status = 'dismissed' WHERE shortcode = $1", [shortcode]);
+  return upd.rowCount > 0;
+}
+
+app.get('/radar/reels', async (req, res) => {
+  const { term, min_breakout, since } = req.query;
+  const status = req.query.status || 'new';
+  const limit = Number.isFinite(Number(req.query.limit)) ? Math.max(0, Math.floor(Number(req.query.limit))) : 60;
+  const offset = Number.isFinite(Number(req.query.offset)) ? Math.max(0, Math.floor(Number(req.query.offset))) : 0;
+
+  const where = ['status = $1'];
+  const params = [status];
+  if (term) { params.push(term); where.push(`discovered_via = $${params.length}`); }
+  if (min_breakout) { params.push(Number(min_breakout)); where.push(`breakout_score >= $${params.length}`); }
+  if (since) { params.push(since); where.push(`posted_at >= $${params.length}`); }
+  const whereSql = where.join(' AND ');
+
+  // Count uses only the filter params (before LIMIT/OFFSET are appended).
+  const countRes = await pool.query(`SELECT COUNT(*) AS n FROM radar_reels WHERE ${whereSql}`, params.slice());
+  params.push(limit); const limIdx = params.length;
+  params.push(offset); const offIdx = params.length;
+  const rows = await pool.query(
+    `SELECT shortcode, account_handle, video_url, thumbnail_url, caption,
+       like_count, comment_count, view_count, posted_at, post_url, discovered_via,
+       author_followers, author_median_views, breakout_score, niche_fit_score,
+       total_score, status, discovered_at
+     FROM radar_reels WHERE ${whereSql}
+     ORDER BY total_score DESC LIMIT $${limIdx} OFFSET $${offIdx}`,
+    params
+  );
+  res.json({ reels: rows.rows, total: Number(countRes.rows[0].n) });
+});
+
+app.post('/radar/reels/:shortcode/save', async (req, res) => {
+  const result = await saveRadarReel(req.params.shortcode);
+  if (!result.ok) return res.status(result.status || 400).json({ ok: false, error: result.error });
+  res.json({ ok: true, post_id: result.post_id });
+});
+
+app.post('/radar/reels/:shortcode/dismiss', async (req, res) => {
+  await dismissRadarReel(req.params.shortcode);
+  res.json({ ok: true });
+});
+
+app.post('/radar/reels/bulk', async (req, res) => {
+  const { shortcodes = [], action } = req.body || {};
+  if (!['save', 'dismiss'].includes(action)) return res.status(400).json({ ok: false, error: 'bad_action' });
+  const list = (Array.isArray(shortcodes) ? shortcodes : []).filter(s => typeof s === 'string' && s.trim()).slice(0, 200);
+  let updated = 0;
+  for (const sc of list) {
+    try {
+      if (action === 'dismiss') { if (await dismissRadarReel(sc)) updated++; }
+      else { const r = await saveRadarReel(sc); if (r.ok) updated++; }
+    } catch (e) { /* skip individual failures, keep the batch going */ }
+  }
+  res.json({ ok: true, updated });
+});
+
+app.get('/radar/terms', async (req, res) => {
+  const rows = await pool.query(
+    `SELECT wt.id, wt.term, wt.kind, wt.source, wt.status, wt.last_run_at,
+       (SELECT COUNT(*) FROM radar_reels rr WHERE rr.discovered_via = wt.term) AS reels_surfaced
+     FROM watch_terms wt ORDER BY wt.status, wt.term`
+  );
+  res.json({ terms: rows.rows });
+});
+
+app.post('/radar/terms', async (req, res) => {
+  const { term, kind = 'hashtag' } = req.body || {};
+  if (!term || !String(term).trim()) return res.status(400).json({ ok: false, error: 'term_required' });
+  // Lowercase + strip leading '#': the orchestrator's hashtag-overlap
+  // self-exclusion depends on lowercase, #-stripped terms.
+  const norm = String(term).replace(/^#/, '').toLowerCase();
+  await pool.query(
+    `INSERT INTO watch_terms (term, kind, source, status) VALUES ($1,$2,'admin','active')
+     ON CONFLICT (term, kind) DO UPDATE SET status = 'active', source = 'admin'`,
+    [norm, kind]
+  );
+  const idRow = (await pool.query('SELECT id FROM watch_terms WHERE term = $1 AND kind = $2', [norm, kind])).rows[0];
+  res.json({ ok: true, id: idRow && idRow.id });
+});
+
+app.patch('/radar/terms/:id', async (req, res) => {
+  const { status } = req.body || {};
+  if (!['active', 'excluded', 'paused'].includes(status)) return res.status(400).json({ ok: false, error: 'bad_status' });
+  await pool.query('UPDATE watch_terms SET status = $1 WHERE id = $2', [status, Number(req.params.id)]);
+  res.json({ ok: true });
+});
+
+app.post('/radar/run', (req, res) => {
+  if (radar.getRadarStatus().running) return res.json({ ok: true, started: false, reason: 'already_running' });
+  if (!scraper || !scraper.apiKey) return res.json({ ok: true, started: false, reason: 'no_api_key' });
+  radar.runRadar(scraper).catch(e => console.error('[Radar] run failed:', e.message));
+  res.json({ ok: true, started: true });
 });
 
 // ─── Thumbnail Proxy ────────────────────────────────────────────
