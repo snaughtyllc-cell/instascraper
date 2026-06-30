@@ -89,7 +89,8 @@ export default function DeleteLogTab() {
             No posts have been auto-deleted yet. The cleanup job runs nightly at 2 AM.
           </div>
         ) : (
-          <>
+          <div className="overflow-x-auto">
+           <div className="min-w-[680px]">
             {/* Table header */}
             <div className="grid grid-cols-12 gap-2 px-5 py-2.5 text-xs text-gray-500 uppercase tracking-wider border-b border-gray-800 bg-gray-900/50">
               <div className="col-span-2">Post</div>
@@ -143,7 +144,8 @@ export default function DeleteLogTab() {
                 </div>
               ))}
             </div>
-          </>
+           </div>
+          </div>
         )}
       </div>
 
