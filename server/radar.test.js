@@ -50,3 +50,27 @@ test('selectWatchTerms: active only, excluded suppresses twin, NULL-first orderi
   const out = radar.selectWatchTerms(terms, 10).map(t => t.term);
   assert.deepStrictEqual(out, ['b', 'a']);
 });
+
+test('passesFloors: views/likes/age boundaries', () => {
+  const cfg = radar.radarConfig({});
+  const now = Date.parse('2026-06-30T00:00:00Z');
+  const ok = { view_count: 60000, like_count: 2000, posted_at: '2026-06-25T00:00:00Z' };
+  assert.strictEqual(radar.passesFloors(ok, cfg, now), true);
+  assert.strictEqual(radar.passesFloors({ ...ok, view_count: 40000 }, cfg, now), false);
+  assert.strictEqual(radar.passesFloors({ ...ok, like_count: 10 }, cfg, now), false);
+  assert.strictEqual(radar.passesFloors({ ...ok, posted_at: '2026-01-01T00:00:00Z' }, cfg, now), false);
+  assert.strictEqual(radar.passesFloors({ ...ok, view_count: null }, cfg, now), false);
+});
+
+test('dedupeReels / excludeAuthors', () => {
+  const reels = [
+    { shortcode: 'A', account_handle: 'x' },
+    { shortcode: 'A', account_handle: 'x' },
+    { shortcode: 'B', account_handle: 'y' },
+    { shortcode: 'C', account_handle: 'z' },
+  ];
+  const d = radar.dedupeReels(reels, { knownShortcodes: new Set(['C']) });
+  assert.deepStrictEqual(d.map(r => r.shortcode), ['A', 'B']);
+  const e = radar.excludeAuthors(d, { blockedHandles: new Set(['x']) });
+  assert.deepStrictEqual(e.map(r => r.shortcode), ['B']);
+});

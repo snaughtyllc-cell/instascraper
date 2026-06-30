@@ -32,4 +32,30 @@ function selectWatchTerms(terms, max) {
     .slice(0, Math.max(0, max | 0));
 }
 
-module.exports = { radarConfig, selectWatchTerms };
+function passesFloors(reel, cfg, nowMs = Date.now()) {
+  const v = Number(reel.view_count);
+  const l = Number(reel.like_count) || 0;
+  if (!Number.isFinite(v) || v < cfg.minViews) return false;
+  if (l < cfg.minLikes) return false;
+  const t = reel.posted_at ? Date.parse(reel.posted_at) : NaN;
+  if (!Number.isFinite(t)) return false;
+  const ageDays = (nowMs - t) / (24 * 60 * 60 * 1000);
+  return ageDays <= cfg.maxAgeDays;
+}
+
+function dedupeReels(reels, { knownShortcodes = new Set() } = {}) {
+  const seen = new Set();
+  const out = [];
+  for (const r of reels || []) {
+    if (!r.shortcode || knownShortcodes.has(r.shortcode) || seen.has(r.shortcode)) continue;
+    seen.add(r.shortcode);
+    out.push(r);
+  }
+  return out;
+}
+
+function excludeAuthors(reels, { blockedHandles = new Set() } = {}) {
+  return (reels || []).filter(r => !blockedHandles.has((r.account_handle || '').toLowerCase()));
+}
+
+module.exports = { radarConfig, selectWatchTerms, passesFloors, dedupeReels, excludeAuthors };
