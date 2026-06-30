@@ -609,7 +609,12 @@ class InstagramScraper {
   }
 
   // ─── Discovery: find related accounts ──────────────────────────
-  async discoverRelated(username) {
+  // opts.enrich (default true): when false, return raw harvested candidates
+  // (DB caption/tagged mining + generic-actor mentions/tagged) and skip the
+  // per-candidate Apify enrichment + gender filter. The caller (runDiscovery)
+  // then enriches/classifies the deduped batch once, globally.
+  async discoverRelated(username, opts = {}) {
+    const { enrich = true } = opts;
     const candidates = [];
     const seen = new Set();
 
@@ -703,11 +708,45 @@ class InstagramScraper {
       console.error(`[Discovery] Apify error for @${username}:`, err.message);
     }
 
-    // Enrich candidates
+    // Harvest-only mode: hand the raw candidates back so the caller can enrich +
+    // gender-classify the deduped batch once, instead of per-source.
+    if (!enrich) {
+      console.log(`[Discovery] Harvest-only for @${username}: ${candidates.length} raw candidates`);
+      return candidates;
+    }
+
+    const enriched = await this.enrichCandidates(candidates, { apifyMax: 4, dbMax: 20 });
+
+    let filtered = enriched.filter(c => c.followers <= 500000);
+
+    // Gender: classify the whole batch once; drop male, keep female + unknown (unknown parks at read time).
+    console.log(`[Discovery] Classifying gender for ${filtered.length} candidates...`);
+    const verdicts = await this._classifyGenderBatch(
+      filtered.map(c => ({ username: c.username, bio: c.bio || '', captionSnippet: c.captionSnippet, taggedBy: c.sourceAccount }))
+    );
+    const genderResults = [];
+    for (const c of filtered) {
+      const gender = verdicts[c.username.toLowerCase()] || 'unknown';
+      if (gender === 'male') { console.log(`[Discovery] Filtered out @${c.username} (male)`); continue; }
+      c.gender = gender;
+      genderResults.push(c);
+    }
+    filtered = genderResults;
+
+    console.log(`[Discovery] Found ${filtered.length} female/unknown candidates for @${username}`);
+    return filtered;
+  }
+
+  // Enrich candidates: DB-first (free — reuse already-scraped posts), then a
+  // single Apify profile fetch for up to `apifyMax` that lack DB data. Mutates
+  // and returns the candidate objects. Shared by per-source discovery and the
+  // global post-aggregation pass so each unique candidate is enriched ≤ once.
+  async enrichCandidates(candidates, opts = {}) {
+    const { apifyMax = 4, dbMax = 20 } = opts;
     const enriched = [];
     const needsApify = [];
 
-    for (const candidate of candidates.slice(0, 20)) {
+    for (const candidate of candidates.slice(0, dbMax)) {
       if (!candidate.followers) candidate.followers = 0;
       if (!candidate.avgEr) candidate.avgEr = 0;
       if (!candidate.postsPerWeek) candidate.postsPerWeek = 0;
@@ -743,8 +782,8 @@ class InstagramScraper {
       }
     }
 
-    console.log(`[Discovery] Enriching ${Math.min(needsApify.length, 4)} candidates via Apify...`);
-    for (const candidate of needsApify.slice(0, 4)) {
+    console.log(`[Discovery] Enriching ${Math.min(needsApify.length, apifyMax)} candidates via Apify...`);
+    for (const candidate of needsApify.slice(0, apifyMax)) {
       try {
         const profile = await this._fetchProfileQuick(candidate.username);
         if (profile) {
@@ -762,28 +801,11 @@ class InstagramScraper {
       await new Promise(r => setTimeout(r, 2000));
     }
 
-    for (const candidate of needsApify.slice(4)) {
+    for (const candidate of needsApify.slice(apifyMax)) {
       enriched.push(candidate);
     }
 
-    let filtered = enriched.filter(c => c.followers <= 500000);
-
-    // Gender: classify the whole batch once; drop male, keep female + unknown (unknown parks at read time).
-    console.log(`[Discovery] Classifying gender for ${filtered.length} candidates...`);
-    const verdicts = await this._classifyGenderBatch(
-      filtered.map(c => ({ username: c.username, bio: c.bio || '', captionSnippet: c.captionSnippet, taggedBy: c.sourceAccount }))
-    );
-    const genderResults = [];
-    for (const c of filtered) {
-      const gender = verdicts[c.username.toLowerCase()] || 'unknown';
-      if (gender === 'male') { console.log(`[Discovery] Filtered out @${c.username} (male)`); continue; }
-      c.gender = gender;
-      genderResults.push(c);
-    }
-    filtered = genderResults;
-
-    console.log(`[Discovery] Found ${filtered.length} female/unknown candidates for @${username}`);
-    return filtered;
+    return enriched;
   }
 
   // Helper: wait for an Apify run to finish
