@@ -33,6 +33,84 @@ function extractUsageUsd(runObject) {
   return (typeof u === 'number' && isFinite(u)) ? u : 0;
 }
 
+// ── Targeted Suggestions: discovery precision helpers (pure) ──
+const FEMALE_WORDS = /\b(woman|women|girl|girls|female|wife|mom|mama|mother|daughter|sister|gal|lady|ladies|miss|mrs|ms\.|queen|princess)\b/;
+const MALE_WORDS = /\b(man|men|guy|guys|male|husband|dad|daddy|father|son|brother|king|prince|mr\.|sir|bro)\b/;
+
+function classifyGenderKeyword(username, bio) {
+  const text = `${username} ${bio || ''}`.toLowerCase();
+  const femalePronouns = /\b(she\/her|she\s*\/\s*her|her\/she|she-her)\b/.test(text);
+  const malePronouns = /\b(he\/him|he\s*\/\s*him|him\/he|he-him)\b/.test(text);
+  if (femalePronouns && !malePronouns) return 'female';
+  if (malePronouns && !femalePronouns) return 'male';
+  const f = FEMALE_WORDS.test(text);
+  const m = MALE_WORDS.test(text);
+  if (f && !m) return 'female';
+  if (m && !f) return 'male';
+  return 'unknown';
+}
+
+function parseGenderBatch(text, usernames) {
+  const out = {};
+  for (const u of usernames) out[String(u).toLowerCase()] = 'unknown';
+  if (!text) return out;
+  let data;
+  try {
+    const block = (String(text).match(/\{[\s\S]*\}/) || [String(text)])[0];
+    data = JSON.parse(block);
+  } catch { return out; }
+  const list = Array.isArray(data) ? data : (Array.isArray(data.verdicts) ? data.verdicts : []);
+  for (const v of list) {
+    const u = String((v && (v.username || v.user)) || '').toLowerCase();
+    const g = String((v && v.gender) || '').toLowerCase();
+    if (u in out && (g === 'female' || g === 'male')) out[u] = g;
+  }
+  return out;
+}
+
+function scoreCandidate({ collabStrength = 1, avgEr = 0, postsPerWeek = 0 } = {}) {
+  const relevancePts = Math.min(collabStrength / 3, 1) * 50;
+  const erPts = Math.min((avgEr || 0) / 6, 1) * 30;
+  const freqPts = Math.min((postsPerWeek || 0) / 5, 1) * 20;
+  return Math.round(relevancePts + erPts + freqPts);
+}
+
+function genderRank(gender) {
+  return gender === 'female' ? 0 : 1;
+}
+
+function aggregateCandidates(rawList) {
+  const map = new Map();
+  for (const c of rawList || []) {
+    const key = String(c.username).toLowerCase();
+    if (!map.has(key)) {
+      map.set(key, { ...c, sources: new Set([c.sourceAccount].filter(Boolean)) });
+    } else {
+      const ex = map.get(key);
+      if (c.sourceAccount) ex.sources.add(c.sourceAccount);
+      ex.followers = Math.max(ex.followers || 0, c.followers || 0);
+      ex.avgEr = Math.max(ex.avgEr || 0, c.avgEr || 0);
+      ex.postsPerWeek = Math.max(ex.postsPerWeek || 0, c.postsPerWeek || 0);
+      if (!ex.bio && c.bio) ex.bio = c.bio;
+      if (ex.gender === 'unknown' && c.gender && c.gender !== 'unknown') ex.gender = c.gender;
+      if (!ex.captionSnippet && c.captionSnippet) ex.captionSnippet = c.captionSnippet;
+    }
+  }
+  return [...map.values()].map((c) => {
+    const collabStrength = c.sources.size || 1;
+    const relevanceReason = collabStrength > 1
+      ? `Collab'd with ${collabStrength} of your creators`
+      : (c.relevanceReason || 'Tagged by a tracked creator');
+    return { ...c, collabStrength, relevanceReason };
+  });
+}
+
+function suggestionsOrderClause(sort) {
+  const sortMap = { score: 'suggestion_score DESC', er: 'avg_er DESC', followers: 'followers DESC', newest: 'discovered_at DESC' };
+  const tail = sortMap[sort] || 'suggestion_score DESC';
+  return `CASE WHEN gender = 'female' THEN 0 ELSE 1 END, ${tail}`;
+}
+
 async function budgetStatus(db, nowMs = Date.now()) {
   const ceilingUsd = parseFloat(process.env.APIFY_BUDGET_USD_30D) || 0;
   const enforced = ceilingUsd > 0;
@@ -824,3 +902,9 @@ module.exports.recordRunLaunch = recordRunLaunch;
 module.exports.recordRunCompletion = recordRunCompletion;
 module.exports.usageSummary = usageSummary;
 module.exports.hasActiveJob = hasActiveJob;
+module.exports.classifyGenderKeyword = classifyGenderKeyword;
+module.exports.parseGenderBatch = parseGenderBatch;
+module.exports.scoreCandidate = scoreCandidate;
+module.exports.genderRank = genderRank;
+module.exports.aggregateCandidates = aggregateCandidates;
+module.exports.suggestionsOrderClause = suggestionsOrderClause;
