@@ -7,17 +7,7 @@
 
 require('dotenv').config({ path: require('path').join(__dirname, '..', '.env') });
 const pool = require('./db');
-
-// View-based ER (matches scraper.js calcER): of everyone who watched, what % engaged.
-function calcER(likes, comments, views) {
-    if (!views || views <= 0) return { er_percent: 0, er_label: null };
-    const er = ((likes + comments) / views) * 100;
-    let label = 'Low';
-    if (er >= 10) label = 'Viral';
-    else if (er >= 5) label = 'Good';
-    else if (er >= 2) label = 'Average';
-    return { er_percent: Math.round(er * 100) / 100, er_label: label };
-}
+const { calcViewER } = require('./engagement-metrics');
 
 async function main() {
   const postsResult = await pool.query(
@@ -27,7 +17,7 @@ async function main() {
 
   let count = 0;
     for (const post of posts) {
-          const { er_percent, er_label } = calcER(post.like_count || 0, post.comment_count || 0, post.view_count);
+          const { er_percent, er_label } = calcViewER(post.like_count || 0, post.comment_count || 0, post.view_count);
           await pool.query(
                   'UPDATE posts SET er_percent = $1, er_label = $2 WHERE id = $3',
                   [er_percent, er_label, post.id]

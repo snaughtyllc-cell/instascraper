@@ -30,6 +30,11 @@ function formatViews(n) {
   return formatCount(n);
 }
 
+function formatViewsVsMedian(value) {
+  if (!value) return null;
+  return `${Number(value).toFixed(1)}x median`;
+}
+
 function formatDate(d) {
   if (!d) return '';
   return new Date(d).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
@@ -143,6 +148,14 @@ export default function ContentCard({ post, creatorTypes = {}, onUpdate, selecte
         {post.er_label && (
           <div className={`absolute bottom-2 left-2 z-10 ${ER_COLORS[post.er_label] || ER_COLORS.Low} px-2 py-0.5 rounded-full text-xs font-bold`}>
             {post.er_percent}% ER
+          </div>
+        )}
+        {post.views_vs_median && (
+          <div
+            title={`Median for @${post.account_handle}: ${formatViews(post.account_median_views)} views`}
+            className="absolute bottom-2 right-2 bg-gold/90 text-gray-950 px-2 py-0.5 rounded-full text-xs font-bold"
+          >
+            {formatViewsVsMedian(post.views_vs_median)}
           </div>
         )}
       </div>
