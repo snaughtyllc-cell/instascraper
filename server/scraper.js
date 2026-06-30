@@ -27,6 +27,26 @@ function extractViews(item) {
   return null;
 }
 
+// Collaborators: the reel actor returns taggedUsers/usertags per post. Extract
+// a clean, de-duped list of handles so discovery can mine collab partners later.
+function normalizeTaggedUsers(item, ownerHandle = '') {
+  const raw = (item && (item.taggedUsers || item.usertags)) || [];
+  if (!Array.isArray(raw)) return null;
+  const owner = (ownerHandle || '').toLowerCase();
+  const out = [];
+  const seen = new Set();
+  for (const entry of raw) {
+    let handle = '';
+    if (typeof entry === 'string') handle = entry;
+    else if (entry && typeof entry === 'object') handle = entry.username || (entry.user && entry.user.username) || '';
+    handle = String(handle || '').trim().replace(/^@/, '').toLowerCase();
+    if (!handle || handle === owner || seen.has(handle)) continue;
+    seen.add(handle);
+    out.push(handle);
+  }
+  return out.length ? out : null;
+}
+
 function isoNoMillis(ms) {
   return new Date(ms).toISOString().replace(/\.\d{3}Z$/, 'Z');
 }
@@ -473,6 +493,9 @@ class InstagramScraper {
       const itemFollowers = item.ownerFollowerCount || item.followersCount || item.owner?.followerCount || followersCount;
       const { er_percent, er_label } = calcER(likes, comments, itemFollowers);
 
+      const taggedHandles = normalizeTaggedUsers(item, item.ownerUsername || item.owner?.username || '');
+      const taggedJson = taggedHandles ? JSON.stringify(taggedHandles) : null;
+
       const post = {
         _type: item.type || 'Unknown',
         _productType: item.productType || '',
@@ -499,8 +522,8 @@ class InstagramScraper {
       try {
         const insertResult = await pool.query(`
           INSERT INTO posts (shortcode, video_url, thumbnail_url, caption, like_count, comment_count,
-            view_count, posted_at, account_handle, post_url, source_query, followers_at_scrape, er_percent, er_label)
-          VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
+            view_count, posted_at, account_handle, post_url, source_query, followers_at_scrape, er_percent, er_label, tagged_users)
+          VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)
           ON CONFLICT (shortcode) DO UPDATE SET
             thumbnail_url = EXCLUDED.thumbnail_url,
             video_url = EXCLUDED.video_url,
@@ -510,12 +533,13 @@ class InstagramScraper {
             followers_at_scrape = EXCLUDED.followers_at_scrape,
             er_percent = EXCLUDED.er_percent,
             er_label = EXCLUDED.er_label,
+            tagged_users = EXCLUDED.tagged_users,
             thumbnail_cache_status = 'pending'
         `, [
           post.shortcode, post.videoUrl, post.thumbnailUrl, post.caption,
           post.likeCount, post.commentCount, post.viewCount, post.postedAt,
           post.accountHandle, post.postUrl, post.sourceQuery,
-          post.followersAtScrape, post.erPercent, post.erLabel,
+          post.followersAtScrape, post.erPercent, post.erLabel, taggedJson,
         ]);
         if (insertResult.rowCount > 0) count++; // counts both new inserts and refreshed rows
       } catch (e) {
@@ -834,13 +858,16 @@ class InstagramScraper {
       const itemFollowers = item.ownerFollowerCount || item.followersCount || item.owner?.followerCount || followersCount;
       const { er_percent, er_label } = calcER(likes, comments, itemFollowers);
 
+      const taggedHandles = normalizeTaggedUsers(item, item.ownerUsername || item.owner?.username || '');
+      const taggedJson = taggedHandles ? JSON.stringify(taggedHandles) : null;
+
       const shortcode = item.shortCode || item.id || `import_${Date.now()}_${Math.random().toString(36).slice(2)}`;
 
       try {
         const insertResult = await pool.query(`
           INSERT INTO posts (shortcode, video_url, thumbnail_url, caption, like_count, comment_count,
-            view_count, posted_at, account_handle, post_url, source_query, followers_at_scrape, er_percent, er_label)
-          VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
+            view_count, posted_at, account_handle, post_url, source_query, followers_at_scrape, er_percent, er_label, tagged_users)
+          VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)
           ON CONFLICT (shortcode) DO NOTHING
         `, [
           shortcode,
@@ -851,7 +878,7 @@ class InstagramScraper {
           item.ownerUsername || item.owner?.username || '',
           item.url || (item.shortCode ? `https://www.instagram.com/p/${item.shortCode}/` : ''),
           'manual_import',
-          itemFollowers, er_percent, er_label,
+          itemFollowers, er_percent, er_label, taggedJson,
         ]);
         if (insertResult.rowCount > 0) count++;
       } catch (e) { /* skip duplicates */ }
@@ -881,6 +908,7 @@ module.exports.recordRunCompletion = recordRunCompletion;
 module.exports.usageSummary = usageSummary;
 module.exports.hasActiveJob = hasActiveJob;
 module.exports.extractViews = extractViews;
+module.exports.normalizeTaggedUsers = normalizeTaggedUsers;
 module.exports.classifyGenderKeyword = classifyGenderKeyword;
 module.exports.parseGenderBatch = parseGenderBatch;
 module.exports.scoreCandidate = scoreCandidate;
