@@ -3,19 +3,20 @@ const assert = require('node:assert');
 const Database = require('better-sqlite3');
 const { calcER } = require('./scraper');
 
-test('calcER: no/zero/negative followers → 0% and null label (cannot compute)', () => {
+test('calcER: no/zero/negative views → 0% and null label (cannot compute)', () => {
   assert.deepStrictEqual(calcER(100, 10, 0), { er_percent: 0, er_label: null });
   assert.deepStrictEqual(calcER(100, 10, undefined), { er_percent: 0, er_label: null });
+  assert.deepStrictEqual(calcER(100, 10, null), { er_percent: 0, er_label: null });
   assert.deepStrictEqual(calcER(100, 10, -5), { er_percent: 0, er_label: null });
 });
 
-test('calcER: computes percent + label bands when followers known', () => {
-  assert.deepStrictEqual(calcER(600, 0, 10000), { er_percent: 6, er_label: 'Viral' });   // 6.0% → Viral
-  assert.deepStrictEqual(calcER(300, 0, 10000), { er_percent: 3, er_label: 'Good' });     // 3.0% → Good
-  assert.deepStrictEqual(calcER(100, 0, 10000), { er_percent: 1, er_label: 'Average' });  // 1.0% → Average
-  assert.deepStrictEqual(calcER(50, 0, 10000), { er_percent: 0.5, er_label: 'Low' });     // 0.5% → Low
-  // likes + comments both count
-  assert.strictEqual(calcER(80, 20, 10000).er_percent, 1);
+test('calcER: view-based percent + label bands', () => {
+  assert.deepStrictEqual(calcER(1000, 0, 10000), { er_percent: 10, er_label: 'Viral' });  // 10% → Viral
+  assert.deepStrictEqual(calcER(500, 0, 10000), { er_percent: 5, er_label: 'Good' });     // 5% → Good
+  assert.deepStrictEqual(calcER(200, 0, 10000), { er_percent: 2, er_label: 'Average' });  // 2% → Average
+  assert.deepStrictEqual(calcER(100, 0, 10000), { er_percent: 1, er_label: 'Low' });      // 1% → Low
+  // likes + comments both count against views
+  assert.strictEqual(calcER(80, 20, 2000).er_percent, 5);   // (80+20)/2000 = 5%
 });
 
 // The success update preserves a known follower count when this scrape resolved none:
