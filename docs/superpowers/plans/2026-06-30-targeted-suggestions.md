@@ -10,7 +10,7 @@
 
 ## Global Constraints
 
-- Base branch: `targeted-suggestions` (off `scraping-cost-control`). Do **not** rebase to `main` — bulk "Scrape now" depends on the budget gate in `_startApifyRun`/`startScrapeJob`.
+- Base branch: `targeted-suggestions`, off current `main` (which already includes the merged cost-control budget gate from PR #3, plus PR #2). Bulk "Scrape now" reuses `startScrapeJob`'s budget gate — already present in `main`.
 - Only ADD the `suggested_accounts.gender` column. No other schema change; no existing column repurposed.
 - No new npm dependencies.
 - "Unknown" gender is **never** treated as female: male is dropped, female ranks first, unknown ranks below all female (read-time tier).

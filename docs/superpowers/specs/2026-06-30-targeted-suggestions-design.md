@@ -3,7 +3,7 @@
 **Date:** 2026-06-30
 **Status:** Approved design (brainstorm complete) → awaiting spec sign-off
 **Scope:** `server/scraper.js` (`discoverRelated`, `_classifyGender`, new batched classify), `server/scheduler.js` (`runDiscovery` aggregation + scoring), `server/index.js` (approve → paused, bulk approve, bulk scrape-now), `server/db.js` (one new column on `suggested_accounts`), `client/src/pages/SuggestedAccountsTab.js` + `client/src/api.js`. No new dependencies.
-**Base branch:** built on `scraping-cost-control` (PR #3). The budget-gated "Scrape now" depends on that branch's `_startApifyRun` budget gate + `BudgetExceededError`. **PRs stack: cost-control merges first, then this.**
+**Base branch:** `targeted-suggestions`, off current `main` — which now includes the merged cost-control work (PR #3) and smarter-ai-ideas (PR #2). The budget-gated "Scrape now" reuses the (now in-`main`) `startScrapeJob` budget gate + `BudgetExceededError`; no stacking dependency remains.
 **Sub-project:** "Targeted Suggestions" — discovery precision + fast approve (an offshoot of Sub-C reach/discovery, pulled forward for staffing throughput).
 
 ---
