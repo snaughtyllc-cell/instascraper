@@ -223,7 +223,10 @@ async function runRadar(scraper, { env = process.env } = {}) {
       stats.survivors += survivors.length;
       if (survivors.length === 0) continue;
 
-      const authorsMap = await enrichAuthors(scraper, survivors.map(r => r.account_handle), cfg);
+      let authorsMap;
+      try { authorsMap = await enrichAuthors(scraper, survivors.map(r => r.account_handle), cfg); }
+      catch (e) { if (e && e.name === 'BudgetExceededError') { console.log(`[Metric] radar_budget_stop term=${term.term}`); break; }
+                  throw e; }
       stats.enriched += authorsMap.size;
       for (const r of survivors) {
         const author = authorsMap.get(r.account_handle) || null;
