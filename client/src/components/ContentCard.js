@@ -138,9 +138,10 @@ export default function ContentCard({ post, creatorTypes = {}, onUpdate, selecte
           </div>
         )}
 
-        {/* ER badge */}
+        {/* ER badge — bottom-left so it never collides with the select checkbox
+            (top-left) or the tag badge (top-right) */}
         {post.er_label && (
-          <div className={`absolute top-2 left-2 ${ER_COLORS[post.er_label] || ER_COLORS.Low} px-2 py-0.5 rounded-full text-xs font-bold`}>
+          <div className={`absolute bottom-2 left-2 z-10 ${ER_COLORS[post.er_label] || ER_COLORS.Low} px-2 py-0.5 rounded-full text-xs font-bold`}>
             {post.er_percent}% ER
           </div>
         )}
