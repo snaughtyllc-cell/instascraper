@@ -125,7 +125,7 @@ export default function TrackedAccountsTab() {
       {/* Add Account Form */}
       <div className="bg-gray-900 rounded-xl border border-gray-800 p-5">
         <h2 className="text-lg font-bold text-white mb-4">Add Account to Track</h2>
-        <form onSubmit={handleAdd} className="flex gap-3">
+        <form onSubmit={handleAdd} className="flex flex-col sm:flex-row gap-3">
           <input
             type="text"
             value={newUsername}
@@ -152,9 +152,9 @@ export default function TrackedAccountsTab() {
       {/* Scheduler Status */}
       {scheduler && (
         <div className="bg-gray-900 rounded-xl border border-gray-800 p-5">
-          <div className="flex items-center justify-between mb-3">
+          <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between mb-3">
             <h2 className="text-lg font-bold text-white">Scheduler</h2>
-            <div className="flex gap-2">
+            <div className="flex flex-wrap gap-2">
               <button onClick={() => handleTriggerJob('auto-scrape')} className="px-3 py-1.5 rounded-lg text-xs font-medium bg-gray-800 border border-gray-700 text-gray-300 hover:text-white hover:border-gray-600 transition-colors" title="Runs the cadence job — scrapes only accounts that are due">
                 Run Scrape Now
               </button>
