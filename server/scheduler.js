@@ -5,6 +5,68 @@ const { BudgetExceededError, aggregateCandidates, scoreCandidate } = require('./
 const ContentIdeaAgent = require('./ai-agent');
 const { deliverBatch } = require('./delivery');
 
+function cadenceConfig(env = process.env) {
+  const num = (v, d) => { const n = Number(v); return Number.isFinite(n) && n >= 0 ? n : d; };
+  return {
+    maxPerCycle: num(env.SCRAPE_MAX_PER_CYCLE, 10),
+    activePpw: num(env.CADENCE_ACTIVE_PPW, 4),
+    moderatePpw: num(env.CADENCE_MODERATE_PPW, 1),
+    intervalActive: num(env.CADENCE_INTERVAL_ACTIVE, 2),
+    intervalModerate: num(env.CADENCE_INTERVAL_MODERATE, 4),
+    intervalQuiet: num(env.CADENCE_INTERVAL_QUIET, 8),
+    freqWindowDays: Math.floor(num(env.CADENCE_FREQ_WINDOW_DAYS, 28)),
+    backoffBase: num(env.CADENCE_BACKOFF_BASE, 1),
+    backoffMax: num(env.CADENCE_BACKOFF_MAX, 14),
+  };
+}
+
+function computeInterval(postsPerWeek, cfg = cadenceConfig()) {
+  const ppw = Number(postsPerWeek) || 0;
+  if (ppw >= cfg.activePpw) return cfg.intervalActive;
+  if (ppw >= cfg.moderatePpw) return cfg.intervalModerate;
+  return cfg.intervalQuiet;
+}
+
+function backoffDays(consecutiveFailures, cfg = cadenceConfig()) {
+  const f = Number(consecutiveFailures) || 0;
+  if (f <= 0) return 0;
+  return Math.min(cfg.backoffBase * Math.pow(2, f - 1), cfg.backoffMax);
+}
+
+function daysSince(iso, nowMs) {
+  if (!iso) return Infinity;
+  const t = new Date(iso).getTime();
+  if (!Number.isFinite(t)) return Infinity; // malformed → very old → fail-open to due
+  return (nowMs - t) / (24 * 60 * 60 * 1000);
+}
+
+function isDue(acct, nowMs, cfg = cadenceConfig()) {
+  const interval = computeInterval(acct.postsPerWeek || 0, cfg);
+  if (daysSince(acct.last_scraped_at, nowMs) < interval) return false;
+  const cooldown = backoffDays(acct.consecutive_failures, cfg);
+  if (cooldown > 0 && daysSince(acct.last_attempt_at, nowMs) < cooldown) return false;
+  return true;
+}
+
+function selectDueAccounts(accounts, nowMs, cfg = cadenceConfig()) {
+  return accounts
+    .filter(a => isDue(a, nowMs, cfg))
+    .sort((a, b) => daysSince(b.last_scraped_at, nowMs) - daysSince(a.last_scraped_at, nowMs))
+    .slice(0, cfg.maxPerCycle);
+}
+
+function buildCadenceAccounts(accountRows, freqRows, cfg = cadenceConfig()) {
+  const weeks = (cfg.freqWindowDays || 28) / 7;
+  const freq = new Map((freqRows || []).map(r => [r.username, Number(r.recent_post_count) || 0]));
+  return (accountRows || []).map(a => ({
+    username: a.username,
+    last_scraped_at: a.last_scraped_at || null,
+    last_attempt_at: a.last_attempt_at || null,
+    consecutive_failures: Number(a.consecutive_failures) || 0,
+    postsPerWeek: weeks > 0 ? (freq.get(a.username) || 0) / weeks : 0,
+  }));
+}
+
 let scraperInstance = null;
 const jobStatus = {
   autoScrape: { lastRun: null, nextRun: null, status: 'idle', message: '' },
@@ -19,25 +81,43 @@ async function runAutoScrape() {
   jobStatus.autoScrape.lastRun = new Date().toISOString();
   console.log('[Scheduler] Auto-scrape starting...');
   try {
-    const result = await pool.query("SELECT username FROM tracked_accounts WHERE status = 'active'");
-    if (result.rows.length === 0) { jobStatus.autoScrape.message = 'No active accounts'; jobStatus.autoScrape.status = 'idle'; return; }
+    const cfg = cadenceConfig();
+    const accountsRes = await pool.query("SELECT username, last_scraped_at, last_attempt_at, consecutive_failures FROM tracked_accounts WHERE status = 'active'");
+    if (accountsRes.rows.length === 0) { jobStatus.autoScrape.message = 'No active accounts'; jobStatus.autoScrape.status = 'idle'; return; }
+
+    const freqRes = await pool.query(
+      `SELECT account_handle AS username, COUNT(*) AS recent_post_count FROM posts
+       WHERE posted_at >= TO_CHAR(NOW() - INTERVAL '${cfg.freqWindowDays} days', 'YYYY-MM-DD"T"HH24:MI:SS"Z"')
+         AND (soft_deleted = 0 OR soft_deleted IS NULL)
+       GROUP BY account_handle`
+    );
+
+    const now = Date.now();
+    const accounts = buildCadenceAccounts(accountsRes.rows, freqRes.rows, cfg);
+    const due = selectDueAccounts(accounts, now, cfg);
+    const totalDue = accounts.filter(a => isDue(a, now, cfg)).length;
+    const capped = Math.max(0, totalDue - due.length);
+    const backedOff = accounts.filter(a => !isDue(a, now, cfg) && daysSince(a.last_scraped_at, now) >= computeInterval(a.postsPerWeek, cfg)).length;
+
     let scraped = 0;
-    for (const account of result.rows) {
+    for (const account of due) {
       try {
+        await pool.query(`UPDATE tracked_accounts SET last_attempt_at = TO_CHAR(NOW(), 'YYYY-MM-DD"T"HH24:MI:SS"Z"') WHERE username = $1`, [account.username]);
         await scraperInstance.startScrapeJob({ query: account.username, queryType: 'username', minLikes: null, minViews: null, startDate: null, endDate: null, source: 'auto' });
         scraped++;
-        if (scraped < result.rows.length) await new Promise(r => setTimeout(r, 30000));
+        if (scraped < due.length) await new Promise(r => setTimeout(r, 30000));
       } catch (err) {
         if (err instanceof BudgetExceededError) {
-          console.log(`[Metric] auto_scrape_budget_stop scraped=${scraped} total=${result.rows.length} msg="${err.message}"`);
-          jobStatus.autoScrape.message = `Stopped at ${scraped}/${result.rows.length} — ${err.message}`;
+          console.log(`[Metric] auto_scrape_budget_stop scraped=${scraped} due=${due.length} msg="${err.message}"`);
+          jobStatus.autoScrape.message = `Stopped at ${scraped}/${due.length} due — ${err.message}`;
           jobStatus.autoScrape.status = 'idle';
           return;
         }
         console.error(`[Scheduler] Failed to scrape @${account.username}:`, err.message);
       }
     }
-    jobStatus.autoScrape.message = `Scraped ${scraped}/${result.rows.length} accounts`;
+    console.log(`[Metric] cadence due=${due.length} scraped=${scraped} capped=${capped} backed_off=${backedOff}`);
+    jobStatus.autoScrape.message = `Scraped ${scraped} of ${due.length} due (cap ${cfg.maxPerCycle}), ${capped} capped, ${backedOff} backed off`;
     jobStatus.autoScrape.status = 'idle';
   } catch (err) { jobStatus.autoScrape.status = 'error'; jobStatus.autoScrape.message = err.message; }
 }
@@ -186,7 +266,7 @@ async function runThumbnailSweep() {
 
 function startScheduler(scraper) {
   scraperInstance = scraper;
-  cron.schedule('0 3 */3 * *', () => runAutoScrape());
+  cron.schedule('0 3 * * *', () => runAutoScrape()); // daily; cadence interval + per-cycle cap control actual spend
   cron.schedule('0 0 * * 0', () => runEngagementRollup());
   cron.schedule('0 2 * * *', () => runAutoCleanup());
   cron.schedule('0 4 * * 1', () => runDiscovery());
@@ -197,4 +277,4 @@ function startScheduler(scraper) {
 
 function getSchedulerStatus() { return jobStatus; }
 
-module.exports = { startScheduler, getSchedulerStatus, runAutoScrape, runEngagementRollup, runAutoCleanup, runDiscovery, runIdeaGeneration, runThumbnailSweep };
+module.exports = { startScheduler, getSchedulerStatus, runAutoScrape, runEngagementRollup, runAutoCleanup, runDiscovery, runIdeaGeneration, runThumbnailSweep, cadenceConfig, computeInterval, backoffDays, daysSince, isDue, selectDueAccounts, buildCadenceAccounts };
