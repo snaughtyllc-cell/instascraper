@@ -5,6 +5,7 @@ import LibraryTab from './pages/LibraryTab';
 import EngagementTab from './pages/EngagementTab';
 import TrackedAccountsTab from './pages/TrackedAccountsTab';
 import SuggestedAccountsTab from './pages/SuggestedAccountsTab';
+import RadarTab from './pages/RadarTab';
 import DeleteLogTab from './pages/DeleteLogTab';
 import ModelsTab from './pages/ModelsTab';
 import LoginPage from './components/LoginPage';
@@ -16,6 +17,7 @@ const TABS = [
   { id: 'engagement', label: 'Engagement' },
   { id: 'models', label: 'Models' },
   { id: 'suggested', label: 'Suggested' },
+  { id: 'radar', label: 'Radar' },
   { id: 'deletelog', label: 'Delete Log' },
 ];
 
@@ -113,6 +115,7 @@ export default function App() {
         {activeTab === 'engagement' && <EngagementTab />}
         {activeTab === 'models' && <ModelsTab />}
         {activeTab === 'suggested' && <SuggestedAccountsTab />}
+        {activeTab === 'radar' && <RadarTab />}
         {activeTab === 'deletelog' && <DeleteLogTab />}
       </main>
     </div>
