@@ -266,23 +266,11 @@ Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"
 
 **Verification note:** these are live Apify/Anthropic paths (no unit harness in this repo, per the existing convention). Verification is code review against this task + `cd server && npm test` staying green; the pure logic they call is already unit-tested in Task 1.
 
-- [ ] **Step 1: Make `_classifyGender` delegate to the keyword helper**
+- [ ] **Step 1: Remove the now-redundant `_classifyGender`**
 
-Replace the keyword block at the top of `_classifyGender` (the pronoun + `femaleWords`/`maleWords` logic, [scraper.js:136-149](../../../server/scraper.js)) with a single call, keeping the AI fallback below it:
+`classifyGenderKeyword` (Task 1, pure) + `_classifyGenderBatch` (Step 2, which does keyword-first internally) fully replace the old per-candidate `_classifyGender`. Its **only** caller is the gender-filter loop replaced in Step 5, so leaving it behind is dead code. Delete the entire `_classifyGender` method ([scraper.js:135-173](../../../server/scraper.js)) — the `async _classifyGender(username, bio) { ... }` block including its keyword pass and AI fallback.
 
-```js
-  async _classifyGender(username, bio) {
-    const keyword = classifyGenderKeyword(username, bio);
-    if (keyword !== 'unknown') return keyword;
-
-    // Fall back to AI classifier
-    const client = this._getAnthropic();
-    if (!client) return 'unknown';
-    // ... existing single-call AI block stays as-is ...
-  }
-```
-
-(The single-call `_classifyGender` is retained for any other caller; `discoverRelated` will use the batch path below.)
+Before deleting, confirm there is no other caller: `grep -n "_classifyGender\b" server/*.js` should show only the definition (line 135) and the Step-5 call site (line 653). After Steps 1 + 5, `grep -n "_classifyGender\b" server/*.js` returns nothing — only `_classifyGenderBatch` remains.
 
 - [ ] **Step 2: Add `_classifyGenderBatch`**
 
@@ -689,6 +677,6 @@ Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"
 - Observability `[Metric] discovery` / `classify_batch` → Task 3 / Task 2. ✓
 - Frontend badges + multi-select → Task 6. ✓
 
-**2. Placeholder scan:** No TBD/TODO; every code step shows complete code. The "retain `_classifyGender` single-call" note in Task 2 is intentional (keeps the existing method working) — not a placeholder.
+**2. Placeholder scan:** No TBD/TODO; every code step shows complete code. Task 2 Step 1 deletes the now-unused `_classifyGender` (its only caller is replaced in Step 5) — no dead code left behind.
 
 **3. Type consistency:** `aggregateCandidates` output (`collabStrength`, `avgEr`, `postsPerWeek`, `gender`, `relevanceReason`) is consumed by `scoreCandidate({collabStrength, avgEr, postsPerWeek})` and the Task 3 insert. `parseGenderBatch` returns `{usernameLower: verdict}`, consumed by `_classifyGenderBatch` via `verdicts[c.username.toLowerCase()]`. `suggestionsOrderClause(sort)` returns the `ORDER BY` body used in Task 4 Step 2. Consistent.
