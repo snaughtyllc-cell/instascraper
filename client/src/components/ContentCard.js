@@ -62,6 +62,7 @@ export default function ContentCard({
   onToggleSelect,
   variant = 'library',
   thumbnailBadges = [],
+  actionSlot = null,
 }) {
   const [expanded, setExpanded] = useState(false);
   const [notes, setNotes] = useState(post.notes || '');
@@ -329,6 +330,8 @@ export default function ContentCard({
             </button>
           </>
         )}
+
+        {actionSlot}
       </div>
     </div>
   );
