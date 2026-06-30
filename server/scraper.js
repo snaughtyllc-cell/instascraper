@@ -47,6 +47,16 @@ function normalizeTaggedUsers(item, ownerHandle = '') {
   return out.length ? out : null;
 }
 
+// Read side: parse a stored tagged_users JSON value into clean handles.
+// Tolerates null/empty/malformed/non-array input — never throws.
+function parseTaggedUsers(json) {
+  if (!json) return [];
+  let arr;
+  try { arr = JSON.parse(json); } catch { return []; }
+  if (!Array.isArray(arr)) return [];
+  return arr.filter(h => typeof h === 'string' && h.trim()).map(h => h.trim().toLowerCase());
+}
+
 function isoNoMillis(ms) {
   return new Date(ms).toISOString().replace(/\.\d{3}Z$/, 'Z');
 }
@@ -585,9 +595,9 @@ class InstagramScraper {
     const candidates = [];
     const seen = new Set();
 
-    // Phase 1: Mine existing posts in DB for @mentions
+    // Phase 1: Mine existing posts in DB for @mentions and tagged collaborators
     const postsResult = await pool.query(
-      "SELECT caption FROM posts WHERE account_handle = $1 AND caption IS NOT NULL",
+      "SELECT caption, tagged_users FROM posts WHERE account_handle = $1",
       [username]
     );
 
@@ -607,7 +617,21 @@ class InstagramScraper {
           });
         }
       }
+      for (const handle of parseTaggedUsers(post.tagged_users)) {
+        if (!seen.has(handle) && handle !== username.toLowerCase()) {
+          seen.add(handle);
+          candidates.push({
+            username: handle,
+            source: `tagged_by:${username}`,
+            sourceAccount: username,
+            captionSnippet: (post.caption || '').slice(0, 160),
+            relevanceReason: `Photo-tagged by @${username}`,
+            relevanceScore: 40,
+          });
+        }
+      }
     }
+    console.log(`[Discovery] Phase-1 DB mining for @${username}: ${candidates.length} candidates (caption + tagged)`);
 
     // Phase 2: Use Apify to scrape posts for mentions and tagged users
     try {
@@ -909,6 +933,7 @@ module.exports.usageSummary = usageSummary;
 module.exports.hasActiveJob = hasActiveJob;
 module.exports.extractViews = extractViews;
 module.exports.normalizeTaggedUsers = normalizeTaggedUsers;
+module.exports.parseTaggedUsers = parseTaggedUsers;
 module.exports.classifyGenderKeyword = classifyGenderKeyword;
 module.exports.parseGenderBatch = parseGenderBatch;
 module.exports.scoreCandidate = scoreCandidate;

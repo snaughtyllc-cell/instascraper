@@ -46,3 +46,39 @@ test('posts.tagged_users round-trips as JSON, null stays null (sqlite)', () => {
   assert.deepStrictEqual(JSON.parse(r1.tagged_users), ['alice', 'bob']);
   assert.strictEqual(r2.tagged_users, null);
 });
+
+const { parseTaggedUsers } = require('./scraper');
+
+test('parseTaggedUsers: valid JSON array → handles', () => {
+  assert.deepStrictEqual(parseTaggedUsers('["alice","bob"]'), ['alice', 'bob']);
+});
+
+test('parseTaggedUsers: null/empty/malformed/non-array → [] (never throws)', () => {
+  assert.deepStrictEqual(parseTaggedUsers(null), []);
+  assert.deepStrictEqual(parseTaggedUsers(''), []);
+  assert.deepStrictEqual(parseTaggedUsers('not json'), []);
+  assert.deepStrictEqual(parseTaggedUsers('{"a":1}'), []);
+  assert.deepStrictEqual(parseTaggedUsers('[1,2,"  ","ok"]'), ['ok']); // drops non-string/blank
+});
+
+test('mining shape: caption @mention + tagged handle de-dupe via seen Set', () => {
+  // Mirrors the Phase-1 loop logic: a handle present in BOTH caption and
+  // tagged_users is added once; new tagged handles are added with tagged_by source.
+  const username = 'creator';
+  const seen = new Set();
+  const candidates = [];
+  const rows = [{ caption: 'shot with @alice 🔥', tagged_users: '["alice","bob"]' }];
+  for (const post of rows) {
+    const mentions = (post.caption || '').match(/@([a-zA-Z0-9_.]{3,30})/g) || [];
+    for (const m of mentions) {
+      const h = m.replace('@', '').toLowerCase();
+      if (!seen.has(h) && h !== username) { seen.add(h); candidates.push({ username: h, source: `mentioned_by:${username}` }); }
+    }
+    for (const h of parseTaggedUsers(post.tagged_users)) {
+      if (!seen.has(h) && h !== username) { seen.add(h); candidates.push({ username: h, source: `tagged_by:${username}` }); }
+    }
+  }
+  assert.deepStrictEqual(candidates.map(c => c.username), ['alice', 'bob']);
+  assert.strictEqual(candidates.find(c => c.username === 'alice').source, 'mentioned_by:creator');
+  assert.strictEqual(candidates.find(c => c.username === 'bob').source, 'tagged_by:creator');
+});
