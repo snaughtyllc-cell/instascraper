@@ -41,6 +41,8 @@ export const getSuggestedAccounts = (params) => api.get('/suggested', { params }
 export const approveSuggested = (username) => api.post(`/suggested/${username}/approve`);
 export const dismissSuggested = (username) => api.post(`/suggested/${username}/dismiss`);
 export const snoozeSuggested = (username) => api.post(`/suggested/${username}/snooze`);
+export const approveSuggestedBulk = (usernames) => api.post('/suggested/approve-bulk', { usernames });
+export const scrapeTrackedBulk = (usernames) => api.post('/tracked/scrape-bulk', { usernames });
 
 // Delete log
 export const getDeleteLog = (params) => api.get('/delete-log', { params });
