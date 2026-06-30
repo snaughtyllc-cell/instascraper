@@ -897,8 +897,9 @@ app.post('/radar/reels/:shortcode/dismiss', async (req, res) => {
 app.post('/radar/reels/bulk', async (req, res) => {
   const { shortcodes = [], action } = req.body || {};
   if (!['save', 'dismiss'].includes(action)) return res.status(400).json({ ok: false, error: 'bad_action' });
+  const list = (Array.isArray(shortcodes) ? shortcodes : []).filter(s => typeof s === 'string' && s.trim()).slice(0, 200);
   let updated = 0;
-  for (const sc of (Array.isArray(shortcodes) ? shortcodes : [])) {
+  for (const sc of list) {
     try {
       if (action === 'dismiss') { if (await dismissRadarReel(sc)) updated++; }
       else { const r = await saveRadarReel(sc); if (r.ok) updated++; }
