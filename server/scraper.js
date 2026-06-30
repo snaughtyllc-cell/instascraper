@@ -494,6 +494,24 @@ class InstagramScraper {
       if (fc > 0) { followersCount = fc; break; }
     }
 
+    // The reel actor returns no follower count, so calcER has no denominator → every
+    // post lands with er_percent = 0 and engagement sorting is meaningless. Resolve
+    // followers from the tracked row (free), else one cheap profile lookup, so ER works.
+    if (followersCount === 0 && isTrackedUsernameQuery(filters.query)) {
+      const handle = filters.query.replace('@', '').toLowerCase();
+      try {
+        const tr = await pool.query('SELECT followers FROM tracked_accounts WHERE username = $1', [handle]);
+        if (tr.rows[0] && Number(tr.rows[0].followers) > 0) followersCount = Number(tr.rows[0].followers);
+      } catch (e) { /* ignore */ }
+      if (followersCount === 0) {
+        try {
+          const profile = await this._fetchProfileQuick(handle);
+          if (profile && profile.followers > 0) followersCount = profile.followers;
+        } catch (e) { console.log(`[ER] follower lookup failed for @${handle}: ${e.message}`); }
+      }
+      if (followersCount > 0) console.log(`[ER] resolved ${followersCount} followers for @${handle} (reel actor omitted it)`);
+    }
+
     let count = 0;
     let matched = 0;
     let accountHandle = '';
@@ -570,7 +588,9 @@ class InstagramScraper {
     // Update tracked account if it exists
     if (accountHandle) {
       await pool.query(
-        `UPDATE tracked_accounts SET last_scraped_at = TO_CHAR(NOW(), 'YYYY-MM-DD"T"HH24:MI:SS"Z"'), last_post_count = $1, followers = $2, consecutive_failures = 0, updated_at = TO_CHAR(NOW(), 'YYYY-MM-DD"T"HH24:MI:SS"Z"') WHERE username = $3`,
+        // COALESCE(NULLIF(...)) keeps the prior follower count when this scrape couldn't
+        // resolve one (0), instead of wiping it — which would zero ER on the next scrape.
+        `UPDATE tracked_accounts SET last_scraped_at = TO_CHAR(NOW(), 'YYYY-MM-DD"T"HH24:MI:SS"Z"'), last_post_count = $1, followers = COALESCE(NULLIF($2, 0), followers), consecutive_failures = 0, updated_at = TO_CHAR(NOW(), 'YYYY-MM-DD"T"HH24:MI:SS"Z"') WHERE username = $3`,
         // accountHandle is the raw-case scraped owner username; tracked_accounts.username is
         // lowercased — fold so the success reset matches (keeps failure/reset symmetric).
         [count, followersCount, (accountHandle || '').toLowerCase()]
@@ -974,6 +994,7 @@ module.exports.recordRunCompletion = recordRunCompletion;
 module.exports.usageSummary = usageSummary;
 module.exports.hasActiveJob = hasActiveJob;
 module.exports.extractViews = extractViews;
+module.exports.calcER = calcER;
 module.exports.normalizeTaggedUsers = normalizeTaggedUsers;
 module.exports.parseTaggedUsers = parseTaggedUsers;
 module.exports.isTrackedUsernameQuery = isTrackedUsernameQuery;
