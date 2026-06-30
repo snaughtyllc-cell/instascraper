@@ -27,11 +27,35 @@ if (AUTH_PASSWORD) {
   passwordHash = bcrypt.hashSync(AUTH_PASSWORD, 10);
 }
 
+const DEV_SESSION_SECRET = 'instascraper-dev-secret-change-me';
+const WEAK_PASSWORDS = new Set(['test123', 'password', 'admin', 'changeme', 'instascraper', '123456', 'letmein']);
+
+// Production fail-fast: refuse to boot with a forgeable session secret or with
+// auth effectively disabled / trivially guessable. Pure (returns problems) so it
+// is unit-testable and importing the app for tests never exits the process.
+function checkProdSecrets(env = process.env) {
+  if (env.NODE_ENV !== 'production') return [];
+  const problems = [];
+  const secret = env.SESSION_SECRET || '';
+  if (!secret || secret === DEV_SESSION_SECRET) {
+    problems.push('SESSION_SECRET is missing or still the dev default — set a long random string.');
+  } else if (secret.length < 16) {
+    problems.push('SESSION_SECRET is too short (<16 chars) — use a long random string.');
+  }
+  const pw = env.AUTH_PASSWORD || '';
+  if (!pw) {
+    problems.push('AUTH_PASSWORD is not set — auth would be disabled in production.');
+  } else if (pw.length < 8 || WEAK_PASSWORDS.has(pw.toLowerCase())) {
+    problems.push('AUTH_PASSWORD is weak (too short or a common value) — choose a strong team password.');
+  }
+  return problems;
+}
+
 app.use(cors({ origin: true, credentials: true }));
 app.use(express.json());
 
 app.use(session({
-  secret: process.env.SESSION_SECRET || 'instascraper-dev-secret-change-me',
+  secret: process.env.SESSION_SECRET || DEV_SESSION_SECRET,
   resave: false,
   saveUninitialized: false,
   cookie: {
@@ -848,6 +872,11 @@ async function boot() {
 }
 
 if (require.main === module) {
+  const secProblems = checkProdSecrets();
+  if (secProblems.length) {
+    console.error('[Security] Refusing to start in production:\n - ' + secProblems.join('\n - '));
+    process.exit(1); // fail the deploy rather than run with insecure auth/session config
+  }
   app.listen(PORT, '0.0.0.0', () => {
     console.log(`Server running on http://0.0.0.0:${PORT}`);
     if (passwordHash) console.log('Auth enabled — password required'); else console.log('Auth disabled — no AUTH_PASSWORD set');
@@ -856,3 +885,4 @@ if (require.main === module) {
 }
 
 module.exports = app;
+module.exports.checkProdSecrets = checkProdSecrets;

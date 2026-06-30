@@ -75,9 +75,14 @@ pm2 save && pm2 startup
 | Variable | Required | Description |
 |----------|----------|-------------|
 | `APIFY_API_KEY` | Yes | Your Apify API key for Instagram scraping |
-| `AUTH_PASSWORD` | Yes | Shared team password for login |
-| `SESSION_SECRET` | Yes | Random string for session encryption |
+| `AUTH_PASSWORD` | Yes | Shared team password for login (≥8 chars, not a common value) |
+| `SESSION_SECRET` | Yes | Random string for session encryption (≥16 chars) |
 | `PORT` | No | Server port (default: 4000) |
+
+> **Production security:** when `NODE_ENV=production`, the server refuses to boot
+> if `SESSION_SECRET` is missing/short/the dev default, or if `AUTH_PASSWORD` is
+> missing/weak. Set strong values before deploying, and rotate any key that has
+> ever been shared or committed.
 
 ## Features
 
