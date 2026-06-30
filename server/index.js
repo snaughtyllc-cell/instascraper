@@ -157,7 +157,7 @@ app.get('/content', async (req, res) => {
 
   const whereClause = where.length ? `WHERE ${where.join(' AND ')}` : '';
   const joinClause = 'LEFT JOIN creator_types ct ON posts.account_handle = ct.account_handle';
-  const sortMap = { newest: 'posted_at DESC', oldest: 'posted_at ASC', most_viewed: 'view_count DESC', most_liked: 'like_count DESC', highest_er: 'er_percent DESC', lowest_er: 'er_percent ASC' };
+  const sortMap = { newest: 'posted_at DESC', oldest: 'posted_at ASC', most_viewed: 'view_count DESC NULLS LAST', most_liked: 'like_count DESC', highest_er: 'er_percent DESC', lowest_er: 'er_percent ASC' };
   const orderBy = sortMap[sort] || 'posted_at DESC';
   const offset = (Number(page) - 1) * Number(limit);
 

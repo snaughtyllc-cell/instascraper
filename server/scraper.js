@@ -16,6 +16,47 @@ function calcER(likes, comments, followers) {
   return { er_percent: Math.round(er * 100) / 100, er_label: label };
 }
 
+// Views: Apify's reel actor returns a real videoPlayCount; the generic actor
+// (URL imports + small-result fallback) returns no view field at all. Return
+// null ("unknown") in that case so we never store a fake 0.
+function extractViews(item) {
+  const play = item && item.videoPlayCount;
+  if (typeof play === 'number' && Number.isFinite(play)) return play;
+  const view = item && item.videoViewCount;
+  if (typeof view === 'number' && Number.isFinite(view)) return view;
+  return null;
+}
+
+// Collaborators: the reel actor returns taggedUsers/usertags per post. Extract
+// a clean, de-duped list of handles so discovery can mine collab partners later.
+function normalizeTaggedUsers(item, ownerHandle = '') {
+  const raw = (item && (item.taggedUsers || item.usertags)) || [];
+  if (!Array.isArray(raw)) return null;
+  const owner = (ownerHandle || '').toLowerCase();
+  const out = [];
+  const seen = new Set();
+  for (const entry of raw) {
+    let handle = '';
+    if (typeof entry === 'string') handle = entry;
+    else if (entry && typeof entry === 'object') handle = entry.username || (entry.user && entry.user.username) || '';
+    handle = String(handle || '').trim().replace(/^@/, '').toLowerCase();
+    if (!handle || handle === owner || seen.has(handle)) continue;
+    seen.add(handle);
+    out.push(handle);
+  }
+  return out.length ? out : null;
+}
+
+// Read side: parse a stored tagged_users JSON value into clean handles.
+// Tolerates null/empty/malformed/non-array input — never throws.
+function parseTaggedUsers(json) {
+  if (!json) return [];
+  let arr;
+  try { arr = JSON.parse(json); } catch { return []; }
+  if (!Array.isArray(arr)) return [];
+  return arr.filter(h => typeof h === 'string' && h.trim()).map(h => h.trim().toLowerCase());
+}
+
 function isoNoMillis(ms) {
   return new Date(ms).toISOString().replace(/\.\d{3}Z$/, 'Z');
 }
@@ -450,7 +491,7 @@ class InstagramScraper {
     for (const item of items) {
       const likes = (item.likesCount != null && item.likesCount >= 0) ? item.likesCount : (item.likes || 0);
       const comments = (item.commentsCount != null && item.commentsCount >= 0) ? item.commentsCount : (item.comments || 0);
-      const views = item.videoPlayCount || item.videoViewCount || 0;
+      const views = extractViews(item);
 
       let postedAt = null;
       if (item.timestamp) {
@@ -461,6 +502,9 @@ class InstagramScraper {
 
       const itemFollowers = item.ownerFollowerCount || item.followersCount || item.owner?.followerCount || followersCount;
       const { er_percent, er_label } = calcER(likes, comments, itemFollowers);
+
+      const taggedHandles = normalizeTaggedUsers(item, item.ownerUsername || item.owner?.username || '');
+      const taggedJson = taggedHandles ? JSON.stringify(taggedHandles) : null;
 
       const post = {
         _type: item.type || 'Unknown',
@@ -488,8 +532,8 @@ class InstagramScraper {
       try {
         const insertResult = await pool.query(`
           INSERT INTO posts (shortcode, video_url, thumbnail_url, caption, like_count, comment_count,
-            view_count, posted_at, account_handle, post_url, source_query, followers_at_scrape, er_percent, er_label)
-          VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
+            view_count, posted_at, account_handle, post_url, source_query, followers_at_scrape, er_percent, er_label, tagged_users)
+          VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)
           ON CONFLICT (shortcode) DO UPDATE SET
             thumbnail_url = EXCLUDED.thumbnail_url,
             video_url = EXCLUDED.video_url,
@@ -499,12 +543,13 @@ class InstagramScraper {
             followers_at_scrape = EXCLUDED.followers_at_scrape,
             er_percent = EXCLUDED.er_percent,
             er_label = EXCLUDED.er_label,
+            tagged_users = EXCLUDED.tagged_users,
             thumbnail_cache_status = 'pending'
         `, [
           post.shortcode, post.videoUrl, post.thumbnailUrl, post.caption,
           post.likeCount, post.commentCount, post.viewCount, post.postedAt,
           post.accountHandle, post.postUrl, post.sourceQuery,
-          post.followersAtScrape, post.erPercent, post.erLabel,
+          post.followersAtScrape, post.erPercent, post.erLabel, taggedJson,
         ]);
         if (insertResult.rowCount > 0) count++; // counts both new inserts and refreshed rows
       } catch (e) {
@@ -550,9 +595,9 @@ class InstagramScraper {
     const candidates = [];
     const seen = new Set();
 
-    // Phase 1: Mine existing posts in DB for @mentions
+    // Phase 1: Mine existing posts in DB for @mentions and tagged collaborators
     const postsResult = await pool.query(
-      "SELECT caption FROM posts WHERE account_handle = $1 AND caption IS NOT NULL",
+      "SELECT caption, tagged_users FROM posts WHERE account_handle = $1",
       [username]
     );
 
@@ -572,7 +617,21 @@ class InstagramScraper {
           });
         }
       }
+      for (const handle of parseTaggedUsers(post.tagged_users)) {
+        if (!seen.has(handle) && handle !== username.toLowerCase()) {
+          seen.add(handle);
+          candidates.push({
+            username: handle,
+            source: `tagged_by:${username}`,
+            sourceAccount: username,
+            captionSnippet: (post.caption || '').slice(0, 160),
+            relevanceReason: `Photo-tagged by @${username}`,
+            relevanceScore: 40,
+          });
+        }
+      }
     }
+    console.log(`[Discovery] Phase-1 DB mining for @${username}: ${candidates.length} candidates (caption + tagged)`);
 
     // Phase 2: Use Apify to scrape posts for mentions and tagged users
     try {
@@ -811,7 +870,7 @@ class InstagramScraper {
     for (const item of items) {
       const likes = (item.likesCount != null && item.likesCount >= 0) ? item.likesCount : (item.likes || 0);
       const comments = (item.commentsCount != null && item.commentsCount >= 0) ? item.commentsCount : (item.comments || 0);
-      const views = item.videoPlayCount || item.videoViewCount || 0;
+      const views = extractViews(item);
 
       let postedAt = null;
       if (item.timestamp) {
@@ -823,13 +882,16 @@ class InstagramScraper {
       const itemFollowers = item.ownerFollowerCount || item.followersCount || item.owner?.followerCount || followersCount;
       const { er_percent, er_label } = calcER(likes, comments, itemFollowers);
 
+      const taggedHandles = normalizeTaggedUsers(item, item.ownerUsername || item.owner?.username || '');
+      const taggedJson = taggedHandles ? JSON.stringify(taggedHandles) : null;
+
       const shortcode = item.shortCode || item.id || `import_${Date.now()}_${Math.random().toString(36).slice(2)}`;
 
       try {
         const insertResult = await pool.query(`
           INSERT INTO posts (shortcode, video_url, thumbnail_url, caption, like_count, comment_count,
-            view_count, posted_at, account_handle, post_url, source_query, followers_at_scrape, er_percent, er_label)
-          VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
+            view_count, posted_at, account_handle, post_url, source_query, followers_at_scrape, er_percent, er_label, tagged_users)
+          VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)
           ON CONFLICT (shortcode) DO NOTHING
         `, [
           shortcode,
@@ -840,7 +902,7 @@ class InstagramScraper {
           item.ownerUsername || item.owner?.username || '',
           item.url || (item.shortCode ? `https://www.instagram.com/p/${item.shortCode}/` : ''),
           'manual_import',
-          itemFollowers, er_percent, er_label,
+          itemFollowers, er_percent, er_label, taggedJson,
         ]);
         if (insertResult.rowCount > 0) count++;
       } catch (e) { /* skip duplicates */ }
@@ -869,6 +931,9 @@ module.exports.recordRunLaunch = recordRunLaunch;
 module.exports.recordRunCompletion = recordRunCompletion;
 module.exports.usageSummary = usageSummary;
 module.exports.hasActiveJob = hasActiveJob;
+module.exports.extractViews = extractViews;
+module.exports.normalizeTaggedUsers = normalizeTaggedUsers;
+module.exports.parseTaggedUsers = parseTaggedUsers;
 module.exports.classifyGenderKeyword = classifyGenderKeyword;
 module.exports.parseGenderBatch = parseGenderBatch;
 module.exports.scoreCandidate = scoreCandidate;

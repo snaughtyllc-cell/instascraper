@@ -25,6 +25,11 @@ function formatCount(n) {
   return n.toString();
 }
 
+function formatViews(n) {
+  if (n === null || n === undefined) return '—';
+  return formatCount(n);
+}
+
 function formatDate(d) {
   if (!d) return '';
   return new Date(d).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
@@ -139,7 +144,7 @@ export default function ContentCard({ post, creatorTypes = {}, onUpdate }) {
               <path strokeLinecap="round" strokeLinejoin="round" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
               <path strokeLinecap="round" strokeLinejoin="round" d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z" />
             </svg>
-            {formatCount(post.view_count)}
+            {formatViews(post.view_count)}
           </span>
           <span title="Likes" className="flex items-center gap-1">
             <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
