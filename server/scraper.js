@@ -6,13 +6,16 @@ const APIFY_BASE = 'https://api.apify.com/v2';
 const REEL_ACTOR_ID = 'apify~instagram-reel-scraper';
 const GENERIC_ACTOR_ID = 'apify~instagram-scraper';
 
-function calcER(likes, comments, followers) {
-  if (!followers || followers <= 0) return { er_percent: 0, er_label: null };
-  const er = ((likes + comments) / followers) * 100;
+// Engagement rate is view-based: of everyone who watched, what % liked or commented.
+// (Followers are unreliable from the reel actor and not the signal we care about.)
+// Bands are tuned for view-based ER (much higher than follower-based) and env-tunable.
+function calcER(likes, comments, views) {
+  if (!views || views <= 0) return { er_percent: 0, er_label: null };
+  const er = ((likes + comments) / views) * 100;
   let label = 'Low';
-  if (er >= 6) label = 'Viral';
-  else if (er >= 3) label = 'Good';
-  else if (er >= 1) label = 'Average';
+  if (er >= 10) label = 'Viral';
+  else if (er >= 5) label = 'Good';
+  else if (er >= 2) label = 'Average';
   return { er_percent: Math.round(er * 100) / 100, er_label: label };
 }
 
@@ -494,22 +497,15 @@ class InstagramScraper {
       if (fc > 0) { followersCount = fc; break; }
     }
 
-    // The reel actor returns no follower count, so calcER has no denominator → every
-    // post lands with er_percent = 0 and engagement sorting is meaningless. Resolve
-    // followers from the tracked row (free), else one cheap profile lookup, so ER works.
+    // The reel actor omits follower counts. ER is view-based now so it doesn't need them,
+    // but fill the follower display stat from the tracked row when already known (free,
+    // no extra Apify call).
     if (followersCount === 0 && isTrackedUsernameQuery(filters.query)) {
       const handle = filters.query.replace('@', '').toLowerCase();
       try {
         const tr = await pool.query('SELECT followers FROM tracked_accounts WHERE username = $1', [handle]);
         if (tr.rows[0] && Number(tr.rows[0].followers) > 0) followersCount = Number(tr.rows[0].followers);
       } catch (e) { /* ignore */ }
-      if (followersCount === 0) {
-        try {
-          const profile = await this._fetchProfileQuick(handle);
-          if (profile && profile.followers > 0) followersCount = profile.followers;
-        } catch (e) { console.log(`[ER] follower lookup failed for @${handle}: ${e.message}`); }
-      }
-      if (followersCount > 0) console.log(`[ER] resolved ${followersCount} followers for @${handle} (reel actor omitted it)`);
     }
 
     let count = 0;
@@ -529,7 +525,7 @@ class InstagramScraper {
       }
 
       const itemFollowers = item.ownerFollowerCount || item.followersCount || item.owner?.followerCount || followersCount;
-      const { er_percent, er_label } = calcER(likes, comments, itemFollowers);
+      const { er_percent, er_label } = calcER(likes, comments, views);
 
       const taggedHandles = normalizeTaggedUsers(item, item.ownerUsername || item.owner?.username || '');
       const taggedJson = taggedHandles ? JSON.stringify(taggedHandles) : null;
@@ -942,7 +938,7 @@ class InstagramScraper {
       }
 
       const itemFollowers = item.ownerFollowerCount || item.followersCount || item.owner?.followerCount || followersCount;
-      const { er_percent, er_label } = calcER(likes, comments, itemFollowers);
+      const { er_percent, er_label } = calcER(likes, comments, views);
 
       const taggedHandles = normalizeTaggedUsers(item, item.ownerUsername || item.owner?.username || '');
       const taggedJson = taggedHandles ? JSON.stringify(taggedHandles) : null;
