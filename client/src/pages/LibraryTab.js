@@ -2,6 +2,7 @@ import React, { useState, useEffect, useCallback } from 'react';
 import { getContent, getCreators, exportContent, importUrls } from '../api';
 import ContentCard from '../components/ContentCard';
 import FilterBar from '../components/FilterBar';
+import { daysAgoISO } from '../utils/date';
 
 export default function LibraryTab() {
   const [posts, setPosts] = useState([]);
@@ -20,7 +21,7 @@ export default function LibraryTab() {
     account: '',
     contentType: '',
     minViews: '',
-    startDate: '',
+    startDate: daysAgoISO(30), // default to the last 30 days so stale bangers don't dominate
     endDate: '',
     showArchived: false,
   });
