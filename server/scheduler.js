@@ -109,11 +109,13 @@ async function runAutoScrape() {
     const accountsRes = await pool.query("SELECT username, last_scraped_at, last_attempt_at, consecutive_failures FROM tracked_accounts WHERE status = 'active'");
     if (accountsRes.rows.length === 0) { jobStatus.autoScrape.message = 'No active accounts'; jobStatus.autoScrape.status = 'idle'; return; }
 
+    // posts.account_handle is raw-case (from the scraped owner username); tracked_accounts.username
+    // is canonically lowercased — fold to lowercase so the frequency join matches.
     const freqRes = await pool.query(
-      `SELECT account_handle AS username, COUNT(*) AS recent_post_count FROM posts
+      `SELECT LOWER(account_handle) AS username, COUNT(*) AS recent_post_count FROM posts
        WHERE posted_at >= TO_CHAR(NOW() - INTERVAL '${cfg.freqWindowDays} days', 'YYYY-MM-DD"T"HH24:MI:SS"Z"')
          AND (soft_deleted = 0 OR soft_deleted IS NULL)
-       GROUP BY account_handle`
+       GROUP BY LOWER(account_handle)`
     );
 
     const now = Date.now();

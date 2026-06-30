@@ -326,7 +326,7 @@ app.post('/suggested/:username/approve', async (req, res) => {
   try {
     await pool.query(
       `INSERT INTO tracked_accounts (username, status, tags, followers, bio, avg_er) VALUES ($1, 'paused', $2, $3, $4, $5)`,
-      [username, 'discovered', s.followers || 0, s.bio || '', s.avg_er || 0]
+      [username.toLowerCase(), 'discovered', s.followers || 0, s.bio || '', s.avg_er || 0]
     );
   } catch (e) { /* already tracked */ }
   res.json({ success: true });
@@ -346,7 +346,7 @@ app.post('/suggested/approve-bulk', async (req, res) => {
       try {
         await pool.query(
           `INSERT INTO tracked_accounts (username, status, tags, followers, bio, avg_er) VALUES ($1, 'paused', $2, $3, $4, $5)`,
-          [username, 'discovered', s.followers || 0, s.bio || '', s.avg_er || 0]
+          [username.toLowerCase(), 'discovered', s.followers || 0, s.bio || '', s.avg_er || 0]
         );
       } catch (e) { /* already tracked */ }
       approved++;

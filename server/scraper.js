@@ -428,7 +428,7 @@ class InstagramScraper {
             ['failed', `Apify run ${status}`, progress, statusMessage, jobId]
           );
           if (isTrackedUsernameQuery(filters.query)) {
-            try { await pool.query(`UPDATE tracked_accounts SET consecutive_failures = COALESCE(consecutive_failures, 0) + 1 WHERE username = $1`, [filters.query.replace('@', '')]); } catch (e) {}
+            try { await pool.query(`UPDATE tracked_accounts SET consecutive_failures = COALESCE(consecutive_failures, 0) + 1 WHERE username = $1`, [filters.query.replace('@', '').toLowerCase()]); } catch (e) {}
           }
           try { await recordRunCompletion(pool, { runId, runObject: run, status: 'failed' }); } catch (e) { console.error('[Apify] ledger finalize failed:', e.message); }
           return;
@@ -447,7 +447,7 @@ class InstagramScraper {
             ['failed', 'Polling timeout', progress, jobId]
           );
           if (isTrackedUsernameQuery(filters.query)) {
-            try { await pool.query(`UPDATE tracked_accounts SET consecutive_failures = COALESCE(consecutive_failures, 0) + 1 WHERE username = $1`, [filters.query.replace('@', '')]); } catch (e) {}
+            try { await pool.query(`UPDATE tracked_accounts SET consecutive_failures = COALESCE(consecutive_failures, 0) + 1 WHERE username = $1`, [filters.query.replace('@', '').toLowerCase()]); } catch (e) {}
           }
           try { await recordRunCompletion(pool, { runId, runObject: run, status: 'failed' }); } catch (e) { console.error('[Apify] ledger finalize failed:', e.message); }
         }
@@ -571,14 +571,16 @@ class InstagramScraper {
     if (accountHandle) {
       await pool.query(
         `UPDATE tracked_accounts SET last_scraped_at = TO_CHAR(NOW(), 'YYYY-MM-DD"T"HH24:MI:SS"Z"'), last_post_count = $1, followers = $2, consecutive_failures = 0, updated_at = TO_CHAR(NOW(), 'YYYY-MM-DD"T"HH24:MI:SS"Z"') WHERE username = $3`,
-        [count, followersCount, accountHandle]
+        // accountHandle is the raw-case scraped owner username; tracked_accounts.username is
+        // lowercased — fold so the success reset matches (keeps failure/reset symmetric).
+        [count, followersCount, (accountHandle || '').toLowerCase()]
       );
     } else if (count === 0 && isTrackedUsernameQuery(filters.query) && !filters.minLikes && !filters.minViews && !filters.startDate && !filters.endDate) {
       // Scrape completed but found nothing for a tracked account (no filters) → count as a failure for cadence backoff.
       try {
         await pool.query(
           `UPDATE tracked_accounts SET consecutive_failures = COALESCE(consecutive_failures, 0) + 1 WHERE username = $1`,
-          [filters.query.replace('@', '')]
+          [filters.query.replace('@', '').toLowerCase()]
         );
       } catch (e) { console.error('[Cadence] 0-post failure record failed:', e.message); }
     }
