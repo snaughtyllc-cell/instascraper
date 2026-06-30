@@ -1,6 +1,15 @@
 import React from 'react';
+import { daysAgoISO, DATE_PRESETS, presetForStartDate } from '../utils/date';
 
 export default function FilterBar({ filters, accounts, total, onChange, onExport }) {
+  const activePreset = presetForStartDate(filters.startDate);
+
+  const handlePreset = (value) => {
+    const preset = DATE_PRESETS.find((p) => p.value === value);
+    if (!preset) return;
+    onChange('startDate', preset.days == null ? '' : daysAgoISO(preset.days));
+  };
+
   return (
     <div className="bg-gray-900 rounded-xl border border-gray-800 p-4">
       <div className="flex flex-wrap items-center gap-3">
@@ -67,6 +76,21 @@ export default function FilterBar({ filters, accounts, total, onChange, onExport
           placeholder="Min views"
           className="bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm text-white placeholder-gray-500 w-28"
         />
+
+        {/* Date Range preset */}
+        <select
+          value={activePreset}
+          onChange={(e) => handlePreset(e.target.value)}
+          title="Date range"
+          className={`bg-gray-800 border rounded-lg px-3 py-2 text-sm ${
+            activePreset === 'all' ? 'border-gray-700 text-white' : 'border-gold/50 text-gold'
+          }`}
+        >
+          {DATE_PRESETS.map((p) => (
+            <option key={p.value} value={p.value}>{p.label}</option>
+          ))}
+          {activePreset === 'custom' && <option value="custom">Custom</option>}
+        </select>
 
         {/* Date Range */}
         <input
