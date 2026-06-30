@@ -58,4 +58,17 @@ function excludeAuthors(reels, { blockedHandles = new Set() } = {}) {
   return (reels || []).filter(r => !blockedHandles.has((r.account_handle || '').toLowerCase()));
 }
 
-module.exports = { radarConfig, selectWatchTerms, passesFloors, dedupeReels, excludeAuthors };
+const round2 = (n) => Math.round(n * 100) / 100;
+
+function scoreReel(reel, author, cfg) {
+  const views = Number(reel.view_count) || 0;
+  const med = author && Number(author.median_views) > 0 ? Number(author.median_views) : 0;
+  const denom = med > 0 ? Math.max(med, cfg.viewFloor) : cfg.minViews;
+  const breakout = Math.min(views / denom, cfg.breakoutCap);
+  const overlap = Math.min(Number(reel._hashtagOverlap) || 0, 5);
+  const nicheFit = 1 + 0.1 * overlap;
+  const total = cfg.wBreakout * breakout + cfg.wNiche * nicheFit;
+  return { breakout_score: round2(breakout), niche_fit_score: round2(nicheFit), total_score: round2(total) };
+}
+
+module.exports = { radarConfig, selectWatchTerms, passesFloors, dedupeReels, excludeAuthors, scoreReel };

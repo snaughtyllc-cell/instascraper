@@ -74,3 +74,21 @@ test('dedupeReels / excludeAuthors', () => {
   const e = radar.excludeAuthors(d, { blockedHandles: new Set(['x']) });
   assert.deepStrictEqual(e.map(r => r.shortcode), ['B']);
 });
+
+test('scoreReel: breakout vs known median, cap, unknown-median fallback', () => {
+  const cfg = radar.radarConfig({});
+  const known = radar.scoreReel({ view_count: 500000, _hashtagOverlap: 0 }, { median_views: 50000 }, cfg);
+  assert.strictEqual(known.breakout_score, 10);      // 500k / 50k
+  const capped = radar.scoreReel({ view_count: 999000000 }, { median_views: 1000 }, cfg);
+  assert.strictEqual(capped.breakout_score, 50);     // breakoutCap
+  const unknown = radar.scoreReel({ view_count: 50000 }, null, cfg);
+  assert.strictEqual(unknown.breakout_score, 1);     // 50k / minViews(50k)
+  assert.ok(known.total_score > unknown.total_score);
+});
+
+test('scoreReel: niche overlap raises niche_fit', () => {
+  const cfg = radar.radarConfig({});
+  const a = radar.scoreReel({ view_count: 50000, _hashtagOverlap: 0 }, null, cfg).niche_fit_score;
+  const b = radar.scoreReel({ view_count: 50000, _hashtagOverlap: 3 }, null, cfg).niche_fit_score;
+  assert.ok(b > a);
+});
