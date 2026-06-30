@@ -81,25 +81,43 @@ async function runAutoScrape() {
   jobStatus.autoScrape.lastRun = new Date().toISOString();
   console.log('[Scheduler] Auto-scrape starting...');
   try {
-    const result = await pool.query("SELECT username FROM tracked_accounts WHERE status = 'active'");
-    if (result.rows.length === 0) { jobStatus.autoScrape.message = 'No active accounts'; jobStatus.autoScrape.status = 'idle'; return; }
+    const cfg = cadenceConfig();
+    const accountsRes = await pool.query("SELECT username, last_scraped_at, last_attempt_at, consecutive_failures FROM tracked_accounts WHERE status = 'active'");
+    if (accountsRes.rows.length === 0) { jobStatus.autoScrape.message = 'No active accounts'; jobStatus.autoScrape.status = 'idle'; return; }
+
+    const freqRes = await pool.query(
+      `SELECT account_handle AS username, COUNT(*) AS recent_post_count FROM posts
+       WHERE posted_at >= TO_CHAR(NOW() - INTERVAL '${cfg.freqWindowDays} days', 'YYYY-MM-DD"T"HH24:MI:SS"Z"')
+         AND (soft_deleted = 0 OR soft_deleted IS NULL)
+       GROUP BY account_handle`
+    );
+
+    const now = Date.now();
+    const accounts = buildCadenceAccounts(accountsRes.rows, freqRes.rows, cfg);
+    const due = selectDueAccounts(accounts, now, cfg);
+    const totalDue = accounts.filter(a => isDue(a, now, cfg)).length;
+    const capped = Math.max(0, totalDue - due.length);
+    const backedOff = accounts.filter(a => !isDue(a, now, cfg) && daysSince(a.last_scraped_at, now) >= computeInterval(a.postsPerWeek, cfg)).length;
+
     let scraped = 0;
-    for (const account of result.rows) {
+    for (const account of due) {
       try {
+        await pool.query(`UPDATE tracked_accounts SET last_attempt_at = TO_CHAR(NOW(), 'YYYY-MM-DD"T"HH24:MI:SS"Z"') WHERE username = $1`, [account.username]);
         await scraperInstance.startScrapeJob({ query: account.username, queryType: 'username', minLikes: null, minViews: null, startDate: null, endDate: null, source: 'auto' });
         scraped++;
-        if (scraped < result.rows.length) await new Promise(r => setTimeout(r, 30000));
+        if (scraped < due.length) await new Promise(r => setTimeout(r, 30000));
       } catch (err) {
         if (err instanceof BudgetExceededError) {
-          console.log(`[Metric] auto_scrape_budget_stop scraped=${scraped} total=${result.rows.length} msg="${err.message}"`);
-          jobStatus.autoScrape.message = `Stopped at ${scraped}/${result.rows.length} — ${err.message}`;
+          console.log(`[Metric] auto_scrape_budget_stop scraped=${scraped} due=${due.length} msg="${err.message}"`);
+          jobStatus.autoScrape.message = `Stopped at ${scraped}/${due.length} due — ${err.message}`;
           jobStatus.autoScrape.status = 'idle';
           return;
         }
         console.error(`[Scheduler] Failed to scrape @${account.username}:`, err.message);
       }
     }
-    jobStatus.autoScrape.message = `Scraped ${scraped}/${result.rows.length} accounts`;
+    console.log(`[Metric] cadence due=${due.length} scraped=${scraped} capped=${capped} backed_off=${backedOff}`);
+    jobStatus.autoScrape.message = `Scraped ${scraped} of ${due.length} due (cap ${cfg.maxPerCycle}), ${capped} capped, ${backedOff} backed off`;
     jobStatus.autoScrape.status = 'idle';
   } catch (err) { jobStatus.autoScrape.status = 'error'; jobStatus.autoScrape.message = err.message; }
 }
@@ -248,7 +266,7 @@ async function runThumbnailSweep() {
 
 function startScheduler(scraper) {
   scraperInstance = scraper;
-  cron.schedule('0 3 */3 * *', () => runAutoScrape());
+  cron.schedule('0 3 * * *', () => runAutoScrape()); // daily; cadence interval + per-cycle cap control actual spend
   cron.schedule('0 0 * * 0', () => runEngagementRollup());
   cron.schedule('0 2 * * *', () => runAutoCleanup());
   cron.schedule('0 4 * * 1', () => runDiscovery());
