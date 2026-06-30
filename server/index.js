@@ -13,6 +13,7 @@ const { startScheduler, getSchedulerStatus, runAutoScrape, runEngagementRollup, 
 const { asyncHandler, dbErrorMiddleware, initWithRetry, wrapAsyncRoutes } = require('./db-health');
 const health = require('./health');
 const { downloadThumbnail, DEFAULT_THUMB_DIR } = require('./thumbnails');
+const { buildBulkUpdate } = require('./content-bulk');
 
 const app = express();
 wrapAsyncRoutes(app);
@@ -140,7 +141,7 @@ app.post('/scrape/import-urls', async (req, res) => {
 // ─── Content Routes ─────────────────────────────────────────────
 
 app.get('/content', async (req, res) => {
-  const { page = 1, limit = 24, sort = 'newest', tag, account, minViews, startDate, endDate, search, showArchived, contentType } = req.query;
+  const { page = 1, limit = 24, sort = 'newest', tag, account, minViews, startDate, endDate, search, showArchived, contentType, untagged } = req.query;
   let where = [];
   let params = [];
   let paramIdx = 1;
@@ -149,6 +150,7 @@ app.get('/content', async (req, res) => {
   if (showArchived !== 'true') where.push(`(archived = 0 OR archived IS NULL)`);
   if (contentType) { where.push(`COALESCE(posts.content_type, ct.content_type) = $${paramIdx++}`); params.push(contentType); }
   if (tag) { where.push(`tag = $${paramIdx++}`); params.push(tag); }
+  if (untagged === 'true') where.push(`(tag IS NULL OR tag = '')`);
   if (account) { where.push(`posts.account_handle = $${paramIdx++}`); params.push(account); }
   if (minViews) { where.push(`view_count >= $${paramIdx++}`); params.push(Number(minViews)); }
   if (startDate) { where.push(`posted_at >= $${paramIdx++}`); params.push(startDate); }
@@ -220,6 +222,16 @@ app.post('/content/:id/archive', async (req, res) => {
   const result = await pool.query('UPDATE posts SET archived = $1 WHERE id = $2', [archived ? 1 : 0, Number(req.params.id)]);
   if (result.rowCount === 0) return res.status(404).json({ error: 'Post not found' });
   res.json({ success: true });
+});
+
+app.post('/content/bulk', async (req, res) => {
+  const { action, value, ids } = req.body || {};
+  const built = buildBulkUpdate(action, value, ids);
+  if (built.error) return res.status(400).json({ error: built.error });
+  if (!built.sql) return res.json({ updated: 0 });
+  const result = await pool.query(built.sql, built.params);
+  console.log(`[Content] bulk action=${action} value=${value} ids=${built.ids.length} updated=${result.rowCount}`);
+  res.json({ updated: result.rowCount });
 });
 
 // ─── Tracked Accounts Routes ────────────────────────────────────

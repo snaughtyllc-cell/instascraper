@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useCallback } from 'react';
-import { getContent, getCreators, exportContent, importUrls } from '../api';
+import { getContent, getCreators, exportContent, importUrls, bulkUpdateContent } from '../api';
+import BulkActionBar from '../components/BulkActionBar';
 import ContentCard from '../components/ContentCard';
 import FilterBar from '../components/FilterBar';
 import { daysAgoISO } from '../utils/date';
@@ -17,6 +18,7 @@ export default function LibraryTab() {
   const [importResult, setImportResult] = useState(null);
   const [filters, setFilters] = useState({
     sort: 'newest',
+    search: '',
     tag: '',
     account: '',
     contentType: '',
@@ -25,6 +27,8 @@ export default function LibraryTab() {
     endDate: '',
     showArchived: false,
   });
+  const [selected, setSelected] = useState(new Set());
+  const [loading, setLoading] = useState(false);
 
   const loadCreatorTypes = useCallback(async () => {
     try {
@@ -38,10 +42,13 @@ export default function LibraryTab() {
   }, []);
 
   const loadContent = useCallback(async () => {
+    setLoading(true);
     try {
       const params = { page, limit: 24 };
       if (filters.sort) params.sort = filters.sort;
-      if (filters.tag) params.tag = filters.tag;
+      if (filters.tag === '__untagged__') params.untagged = 'true';
+      else if (filters.tag) params.tag = filters.tag;
+      if (filters.search) params.search = filters.search;
       if (filters.account) params.account = filters.account;
       if (filters.contentType) params.contentType = filters.contentType;
       if (filters.minViews) params.minViews = filters.minViews;
@@ -56,6 +63,8 @@ export default function LibraryTab() {
       setAccounts(data.accounts || []);
     } catch (err) {
       console.error('Failed to load content:', err);
+    } finally {
+      setLoading(false);
     }
   }, [page, filters]);
 
@@ -67,6 +76,30 @@ export default function LibraryTab() {
   const handleFilterChange = (key, value) => {
     setFilters((f) => ({ ...f, [key]: value }));
     setPage(1);
+    setSelected(new Set());
+  };
+
+  const toggleSelect = (id) => {
+    setSelected((prev) => {
+      const next = new Set(prev);
+      next.has(id) ? next.delete(id) : next.add(id);
+      return next;
+    });
+  };
+  const selectAllOnPage = () => setSelected(new Set(posts.map((p) => p.id)));
+  const clearSelection = () => setSelected(new Set());
+
+  const handleBulk = async (action, value) => {
+    if (selected.size === 0) return;
+    try {
+      await bulkUpdateContent([...selected], action, value);
+      clearSelection();
+      loadContent();
+      loadCreatorTypes();
+    } catch (err) {
+      console.error('Bulk action failed:', err);
+      alert('Bulk action failed: ' + (err.response?.data?.error || err.message));
+    }
   };
 
   const handleUpdate = () => {
@@ -144,7 +177,24 @@ export default function LibraryTab() {
         onExport={() => exportContent('json')}
       />
 
-      {posts.length === 0 ? (
+      <BulkActionBar
+        count={selected.size}
+        onTag={(t) => handleBulk('tag', t)}
+        onArchive={(a) => handleBulk('archive', a)}
+        onSetType={(ct) => handleBulk('content-type', ct)}
+        onSelectAll={selectAllOnPage}
+        onClear={clearSelection}
+      />
+
+      {loading ? (
+        <div className="flex items-center justify-center py-20 text-gray-500">
+          <svg className="w-6 h-6 animate-spin mr-2" viewBox="0 0 24 24" fill="none">
+            <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+            <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v4a4 4 0 00-4 4H4z" />
+          </svg>
+          Loading…
+        </div>
+      ) : posts.length === 0 ? (
         <div className="text-center py-20">
           <p className="text-gray-500 text-lg">No content found.</p>
           <p className="text-gray-600 text-sm mt-1">Try adjusting your filters or scrape some content first.</p>
@@ -152,7 +202,14 @@ export default function LibraryTab() {
       ) : (
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4">
           {posts.map((post) => (
-            <ContentCard key={post.id} post={post} creatorTypes={creatorTypes} onUpdate={handleUpdate} />
+            <ContentCard
+              key={post.id}
+              post={post}
+              creatorTypes={creatorTypes}
+              onUpdate={handleUpdate}
+              selected={selected.has(post.id)}
+              onToggleSelect={toggleSelect}
+            />
           ))}
         </div>
       )}
@@ -160,23 +217,11 @@ export default function LibraryTab() {
       {/* Pagination */}
       {totalPages > 1 && (
         <div className="flex items-center justify-center gap-2 pt-4">
-          <button
-            onClick={() => setPage((p) => Math.max(1, p - 1))}
-            disabled={page === 1}
-            className="px-3 py-1.5 rounded-lg text-sm bg-gray-800 text-gray-300 hover:bg-gray-700 disabled:opacity-30"
-          >
-            Previous
-          </button>
+          <button onClick={() => { setPage((p) => Math.max(1, p - 1)); setSelected(new Set()); }} disabled={page === 1} className="px-3 py-1.5 rounded-lg text-sm bg-gray-800 text-gray-300 hover:bg-gray-700 disabled:opacity-30">Previous</button>
           <span className="text-sm text-gray-400">
             Page {page} of {totalPages}
           </span>
-          <button
-            onClick={() => setPage((p) => Math.min(totalPages, p + 1))}
-            disabled={page === totalPages}
-            className="px-3 py-1.5 rounded-lg text-sm bg-gray-800 text-gray-300 hover:bg-gray-700 disabled:opacity-30"
-          >
-            Next
-          </button>
+          <button onClick={() => { setPage((p) => Math.min(totalPages, p + 1)); setSelected(new Set()); }} disabled={page === totalPages} className="px-3 py-1.5 rounded-lg text-sm bg-gray-800 text-gray-300 hover:bg-gray-700 disabled:opacity-30">Next</button>
         </div>
       )}
     </div>

@@ -42,7 +42,7 @@ const ER_COLORS = {
   Low: 'bg-gray-600/80 text-gray-300',
 };
 
-export default function ContentCard({ post, creatorTypes = {}, onUpdate }) {
+export default function ContentCard({ post, creatorTypes = {}, onUpdate, selected = false, onToggleSelect }) {
   const [expanded, setExpanded] = useState(false);
   const [notes, setNotes] = useState(post.notes || '');
   const [showVideo, setShowVideo] = useState(false);
@@ -83,9 +83,19 @@ export default function ContentCard({ post, creatorTypes = {}, onUpdate }) {
   const tagBadge = TAG_OPTIONS.find((t) => t.value === post.tag);
 
   return (
-    <div className="bg-gray-900 rounded-xl border border-gray-800 overflow-hidden group hover:border-gray-700 transition-colors">
+    <div className={`bg-gray-900 rounded-xl border overflow-hidden group transition-colors ${selected ? 'border-gold ring-1 ring-gold/50' : 'border-gray-800 hover:border-gray-700'}`}>
       {/* Thumbnail */}
       <div className="relative aspect-[4/5] bg-gray-800 overflow-hidden">
+        {onToggleSelect && (
+          <label className="absolute top-2 left-2 z-10 cursor-pointer" onClick={(e) => e.stopPropagation()}>
+            <input
+              type="checkbox"
+              checked={selected}
+              onChange={() => onToggleSelect(post.id)}
+              className="w-5 h-5 rounded accent-gold"
+            />
+          </label>
+        )}
         {showVideo && post.video_url ? (
           <video
             src={post.video_url}
