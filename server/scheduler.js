@@ -1,6 +1,6 @@
 const cron = require('node-cron');
 const pool = require('./db');
-const { BudgetExceededError } = require('./scraper');
+const { BudgetExceededError, aggregateCandidates, scoreCandidate } = require('./scraper');
 
 const ContentIdeaAgent = require('./ai-agent');
 const { deliverBatch } = require('./delivery');
@@ -103,27 +103,38 @@ async function runDiscovery() {
     const trackedResult = await pool.query("SELECT username FROM tracked_accounts WHERE status = 'active'");
     const suggestedResult = await pool.query("SELECT username FROM suggested_accounts");
     const existing = new Set([...trackedResult.rows.map(a => a.username), ...suggestedResult.rows.map(a => a.username)]);
-    let candidates = [];
+    let raw = [];
     for (const account of trackedResult.rows.slice(0, 5)) {
       try {
         const related = await scraperInstance.discoverRelated(account.username);
-        for (const profile of related) { if (!existing.has(profile.username)) { existing.add(profile.username); candidates.push(profile); } }
+        for (const profile of related) {
+          if (!existing.has(profile.username)) raw.push({ ...profile, sourceAccount: profile.sourceAccount || account.username });
+        }
       } catch (err) { console.error(`[Discovery] Failed for @${account.username}:`, err.message); }
       await new Promise(r => setTimeout(r, 10000));
     }
-    console.log(`[Scheduler] Discovery found ${candidates.length} total candidates`);
+
+    const aggregated = aggregateCandidates(raw);
+    const female = aggregated.filter(c => c.gender === 'female').length;
+    const unknown = aggregated.filter(c => c.gender !== 'female').length;
+    console.log(`[Metric] discovery candidates=${aggregated.length} female=${female} unknown=${unknown}`);
+
     let added = 0;
-    for (const item of candidates.slice(0, 30)) {
-      const relevancePts = Math.min(((item.relevanceScore || 25) / 40) * 50, 50);
-      const erPts = Math.min((item.avgEr || 0) / 6, 1) * 30;
-      const freqPts = Math.min((item.postsPerWeek || 0) / 5, 1) * 20;
-      const totalScore = Math.round(relevancePts + erPts + freqPts);
+    for (const item of aggregated.slice(0, 50)) {
+      if (existing.has(item.username)) continue;
+      existing.add(item.username);
+      const totalScore = scoreCandidate({ collabStrength: item.collabStrength, avgEr: item.avgEr, postsPerWeek: item.postsPerWeek });
       try {
-        await pool.query(`INSERT INTO suggested_accounts (username, source, followers, avg_er, posts_per_week, bio, content_breakdown, top_hashtags, relevance_reason, suggestion_score) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) ON CONFLICT (username) DO NOTHING`, [item.username, item.source || 'discovery', item.followers || 0, item.avgEr || 0, item.postsPerWeek || 0, item.bio || '', item.contentBreakdown || '', item.topHashtags || '', item.relevanceReason || '', totalScore]);
+        await pool.query(
+          `INSERT INTO suggested_accounts (username, source, followers, avg_er, posts_per_week, bio, content_breakdown, top_hashtags, relevance_reason, suggestion_score, gender)
+           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11) ON CONFLICT (username) DO NOTHING`,
+          [item.username, item.source || 'discovery', item.followers || 0, item.avgEr || 0, item.postsPerWeek || 0,
+           item.bio || '', item.contentBreakdown || '', item.topHashtags || '', item.relevanceReason || '', totalScore, item.gender || 'unknown']
+        );
         added++;
-      } catch (e) { /* skip */ }
+      } catch (e) { console.error(`[Discovery] insert failed for @${item.username}:`, e.message); }
     }
-    jobStatus.discovery.message = `Found ${candidates.length} candidates, added ${added}`;
+    jobStatus.discovery.message = `Found ${aggregated.length} candidates, added ${added}`;
     jobStatus.discovery.status = 'idle';
     console.log(`[Scheduler] Discovery done: ${added} new suggestions`);
   } catch (err) { jobStatus.discovery.status = 'error'; jobStatus.discovery.message = err.message; }

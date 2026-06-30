@@ -33,6 +33,84 @@ function extractUsageUsd(runObject) {
   return (typeof u === 'number' && isFinite(u)) ? u : 0;
 }
 
+// ── Targeted Suggestions: discovery precision helpers (pure) ──
+const FEMALE_WORDS = /\b(woman|women|girl|girls|female|wife|mom|mama|mother|daughter|sister|gal|lady|ladies|miss|mrs|ms\.|queen|princess)\b/;
+const MALE_WORDS = /\b(man|men|guy|guys|male|husband|dad|daddy|father|son|brother|king|prince|mr\.|sir|bro)\b/;
+
+function classifyGenderKeyword(username, bio) {
+  const text = `${username} ${bio || ''}`.toLowerCase();
+  const femalePronouns = /\b(she\/her|she\s*\/\s*her|her\/she|she-her)\b/.test(text);
+  const malePronouns = /\b(he\/him|he\s*\/\s*him|him\/he|he-him)\b/.test(text);
+  if (femalePronouns && !malePronouns) return 'female';
+  if (malePronouns && !femalePronouns) return 'male';
+  const f = FEMALE_WORDS.test(text);
+  const m = MALE_WORDS.test(text);
+  if (f && !m) return 'female';
+  if (m && !f) return 'male';
+  return 'unknown';
+}
+
+function parseGenderBatch(text, usernames) {
+  const out = {};
+  for (const u of usernames) out[String(u).toLowerCase()] = 'unknown';
+  if (!text) return out;
+  let data;
+  try {
+    const block = (String(text).match(/\{[\s\S]*\}/) || [String(text)])[0];
+    data = JSON.parse(block);
+  } catch { return out; }
+  const list = Array.isArray(data) ? data : (Array.isArray(data.verdicts) ? data.verdicts : []);
+  for (const v of list) {
+    const u = String((v && (v.username || v.user)) || '').toLowerCase();
+    const g = String((v && v.gender) || '').toLowerCase();
+    if (u in out && (g === 'female' || g === 'male')) out[u] = g;
+  }
+  return out;
+}
+
+function scoreCandidate({ collabStrength = 1, avgEr = 0, postsPerWeek = 0 } = {}) {
+  const relevancePts = Math.min(collabStrength / 3, 1) * 50;
+  const erPts = Math.min((avgEr || 0) / 6, 1) * 30;
+  const freqPts = Math.min((postsPerWeek || 0) / 5, 1) * 20;
+  return Math.round(relevancePts + erPts + freqPts);
+}
+
+function genderRank(gender) {
+  return gender === 'female' ? 0 : 1;
+}
+
+function aggregateCandidates(rawList) {
+  const map = new Map();
+  for (const c of rawList || []) {
+    const key = String(c.username).toLowerCase();
+    if (!map.has(key)) {
+      map.set(key, { ...c, sources: new Set([c.sourceAccount].filter(Boolean)) });
+    } else {
+      const ex = map.get(key);
+      if (c.sourceAccount) ex.sources.add(c.sourceAccount);
+      ex.followers = Math.max(ex.followers || 0, c.followers || 0);
+      ex.avgEr = Math.max(ex.avgEr || 0, c.avgEr || 0);
+      ex.postsPerWeek = Math.max(ex.postsPerWeek || 0, c.postsPerWeek || 0);
+      if (!ex.bio && c.bio) ex.bio = c.bio;
+      if (ex.gender === 'unknown' && c.gender && c.gender !== 'unknown') ex.gender = c.gender;
+      if (!ex.captionSnippet && c.captionSnippet) ex.captionSnippet = c.captionSnippet;
+    }
+  }
+  return [...map.values()].map((c) => {
+    const collabStrength = c.sources.size || 1;
+    const relevanceReason = collabStrength > 1
+      ? `Collab'd with ${collabStrength} of your creators`
+      : (c.relevanceReason || 'Tagged by a tracked creator');
+    return { ...c, collabStrength, relevanceReason };
+  });
+}
+
+function suggestionsOrderClause(sort) {
+  const sortMap = { score: 'suggestion_score DESC', er: 'avg_er DESC', followers: 'followers DESC', newest: 'discovered_at DESC' };
+  const tail = sortMap[sort] || 'suggestion_score DESC';
+  return `CASE WHEN gender = 'female' THEN 0 ELSE 1 END, ${tail}`;
+}
+
 async function budgetStatus(db, nowMs = Date.now()) {
   const ceilingUsd = parseFloat(process.env.APIFY_BUDGET_USD_30D) || 0;
   const enforced = ceilingUsd > 0;
@@ -130,46 +208,45 @@ class InstagramScraper {
     } catch { return null; }
   }
 
-  // Quick keyword check first, then AI classifier as fallback
-  // Returns 'female', 'male', or 'unknown'
-  async _classifyGender(username, bio) {
-    const text = `${username} ${bio || ''}`.toLowerCase();
+  // Classify many candidates in ONE call. items: [{ username, bio, captionSnippet, taggedBy }].
+  // Returns { usernameLower: 'female'|'male'|'unknown' }. Never throws.
+  async _classifyGenderBatch(items) {
+    const result = {};
+    const remaining = [];
+    for (const it of items) {
+      const kw = classifyGenderKeyword(it.username, it.bio);
+      if (kw !== 'unknown') result[it.username.toLowerCase()] = kw;
+      else remaining.push(it);
+    }
+    if (remaining.length === 0) return result;
 
-    // Strong signals first (free + instant)
-    const femalePronouns = /\b(she\/her|she\s*\/\s*her|her\/she|she-her)\b/.test(text);
-    const malePronouns = /\b(he\/him|he\s*\/\s*him|him\/he|he-him)\b/.test(text);
-    if (femalePronouns && !malePronouns) return 'female';
-    if (malePronouns && !femalePronouns) return 'male';
-
-    const femaleWords = /\b(woman|women|girl|girls|female|wife|mom|mama|mother|daughter|sister|gal|lady|ladies|miss|mrs|ms\.|queen|princess)\b/;
-    const maleWords = /\b(man|men|guy|guys|male|husband|dad|daddy|father|son|brother|king|prince|mr\.|sir|bro)\b/;
-    const f = femaleWords.test(text);
-    const m = maleWords.test(text);
-    if (f && !m) return 'female';
-    if (m && !f) return 'male';
-
-    // Fall back to AI classifier
     const client = this._getAnthropic();
-    if (!client) return 'unknown';
+    if (!client) {
+      for (const it of remaining) result[it.username.toLowerCase()] = 'unknown';
+      return result;
+    }
 
+    const t0 = Date.now();
     try {
+      const lines = remaining.map((it, i) =>
+        `${i + 1}. username: ${it.username} | bio: ${it.bio || '(none)'} | seen in caption: ${(it.captionSnippet || '').slice(0, 120) || '(none)'} | tagged by: ${it.taggedBy || '(none)'}`
+      ).join('\n');
       const response = await client.messages.create({
         model: 'claude-haiku-4-5-20251001',
-        max_tokens: 20,
+        max_tokens: 1500,
         temperature: 0,
-        messages: [{
-          role: 'user',
-          content: `Classify the gender of this Instagram creator based on their username and bio. Respond with ONLY one word: "female", "male", or "unknown".\n\nUsername: ${username}\nBio: ${bio || '(empty)'}`,
-        }],
+        system: 'You classify the likely gender of Instagram creators for a female-creator competitor list. Respond with ONLY JSON: {"verdicts":[{"username":"<as given>","gender":"female|male|unknown"}]}. Use "unknown" when unsure — do not guess.',
+        messages: [{ role: 'user', content: `Classify each creator:\n${lines}` }],
       });
-      const result = response.content[0].text.trim().toLowerCase();
-      if (result.includes('female')) return 'female';
-      if (result.includes('male')) return 'male';
-      return 'unknown';
+      const text = (response.content || []).map(b => b.text || '').join('');
+      const verdicts = parseGenderBatch(text, remaining.map(it => it.username));
+      Object.assign(result, verdicts);
     } catch (err) {
-      console.log(`[Gender] Classify failed for @${username}: ${err.message}`);
-      return 'unknown';
+      console.log(`[Gender] Batch classify failed: ${err.message}`);
+      for (const it of remaining) if (!(it.username.toLowerCase() in result)) result[it.username.toLowerCase()] = 'unknown';
     }
+    console.log(`[Metric] classify_batch n=${remaining.length} ms=${Date.now() - t0}`);
+    return result;
   }
 
   async startScrapeJob({ query, queryType, minLikes, minViews, startDate, endDate, source }) {
@@ -488,46 +565,10 @@ class InstagramScraper {
           candidates.push({
             username: handle,
             source: `mentioned_by:${username}`,
+            sourceAccount: username,
+            captionSnippet: (post.caption || '').slice(0, 160),
             relevanceReason: `Tagged by @${username}`,
             relevanceScore: 35,
-          });
-        }
-      }
-    }
-
-    // Phase 1b: Find accounts that share hashtags with tracked accounts
-    const topHashtagsResult = await pool.query(
-      `SELECT caption FROM posts WHERE account_handle = $1 AND caption LIKE '%#%' ORDER BY like_count DESC LIMIT 20`,
-      [username]
-    );
-
-    const hashtagCounts = {};
-    for (const p of topHashtagsResult.rows) {
-      const tags = (p.caption || '').match(/#([a-zA-Z0-9_]+)/g) || [];
-      tags.forEach(t => { hashtagCounts[t.toLowerCase()] = (hashtagCounts[t.toLowerCase()] || 0) + 1; });
-    }
-    const commonHashtags = Object.entries(hashtagCounts).sort((a, b) => b[1] - a[1]).slice(0, 5).map(([t]) => t);
-
-    if (commonHashtags.length > 0) {
-      const otherPostsResult = await pool.query(
-        `SELECT DISTINCT account_handle, caption, like_count, comment_count, followers_at_scrape
-         FROM posts WHERE account_handle != $1 AND account_handle != ''
-         AND (soft_deleted = 0 OR soft_deleted IS NULL)`,
-        [username]
-      );
-
-      for (const p of otherPostsResult.rows) {
-        if (seen.has(p.account_handle.toLowerCase())) continue;
-        const postTags = (p.caption || '').match(/#([a-zA-Z0-9_]+)/g) || [];
-        const overlap = postTags.filter(t => commonHashtags.includes(t.toLowerCase()));
-        if (overlap.length >= 2) {
-          seen.add(p.account_handle.toLowerCase());
-          candidates.push({
-            username: p.account_handle,
-            source: `hashtag_overlap:${username}`,
-            relevanceReason: `Shares hashtags with @${username}: ${overlap.slice(0, 3).join(', ')}`,
-            relevanceScore: 25,
-            followers: p.followers_at_scrape || 0,
           });
         }
       }
@@ -557,6 +598,8 @@ class InstagramScraper {
             candidates.push({
               username: handle,
               source: `mentioned_by:${username}`,
+              sourceAccount: username,
+              captionSnippet: (item.caption || '').slice(0, 160),
               relevanceReason: `Tagged by @${username}`,
               relevanceScore: 35,
             });
@@ -571,6 +614,8 @@ class InstagramScraper {
             candidates.push({
               username: handle,
               source: `tagged_by:${username}`,
+              sourceAccount: username,
+              captionSnippet: (item.caption || '').slice(0, 160),
               relevanceReason: `Photo-tagged by @${username}`,
               relevanceScore: 40,
             });
@@ -591,7 +636,7 @@ class InstagramScraper {
       if (!candidate.postsPerWeek) candidate.postsPerWeek = 0;
       if (!candidate.bio) candidate.bio = '';
       if (!candidate.contentBreakdown) candidate.contentBreakdown = '';
-      if (!candidate.topHashtags) candidate.topHashtags = commonHashtags.join(', ');
+      if (!candidate.topHashtags) candidate.topHashtags = '';
 
       const existing = await pool.query(
         `SELECT COUNT(*) as cnt, ROUND(AVG(er_percent)::numeric, 2) as avg_er, MAX(followers_at_scrape) as followers
@@ -646,17 +691,17 @@ class InstagramScraper {
 
     let filtered = enriched.filter(c => c.followers <= 500000);
 
-    // Gender filter: keep only female (or unknown when bio is empty/ambiguous)
+    // Gender: classify the whole batch once; drop male, keep female + unknown (unknown parks at read time).
     console.log(`[Discovery] Classifying gender for ${filtered.length} candidates...`);
+    const verdicts = await this._classifyGenderBatch(
+      filtered.map(c => ({ username: c.username, bio: c.bio || '', captionSnippet: c.captionSnippet, taggedBy: c.sourceAccount }))
+    );
     const genderResults = [];
     for (const c of filtered) {
-      const gender = await this._classifyGender(c.username, c.bio || '');
-      if (gender !== 'male') {
-        c.gender = gender;
-        genderResults.push(c);
-      } else {
-        console.log(`[Discovery] Filtered out @${c.username} (male)`);
-      }
+      const gender = verdicts[c.username.toLowerCase()] || 'unknown';
+      if (gender === 'male') { console.log(`[Discovery] Filtered out @${c.username} (male)`); continue; }
+      c.gender = gender;
+      genderResults.push(c);
     }
     filtered = genderResults;
 
@@ -824,3 +869,9 @@ module.exports.recordRunLaunch = recordRunLaunch;
 module.exports.recordRunCompletion = recordRunCompletion;
 module.exports.usageSummary = usageSummary;
 module.exports.hasActiveJob = hasActiveJob;
+module.exports.classifyGenderKeyword = classifyGenderKeyword;
+module.exports.parseGenderBatch = parseGenderBatch;
+module.exports.scoreCandidate = scoreCandidate;
+module.exports.genderRank = genderRank;
+module.exports.aggregateCandidates = aggregateCandidates;
+module.exports.suggestionsOrderClause = suggestionsOrderClause;

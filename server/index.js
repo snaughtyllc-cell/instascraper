@@ -8,7 +8,7 @@ const fs = require('fs');
 const fetch = require('node-fetch');
 const pool = require('./db');
 const InstagramScraper = require('./scraper');
-const { BudgetExceededError, usageSummary } = InstagramScraper;
+const { BudgetExceededError, usageSummary, suggestionsOrderClause } = InstagramScraper;
 const { startScheduler, getSchedulerStatus, runAutoScrape, runEngagementRollup, runAutoCleanup, runDiscovery, runIdeaGeneration } = require('./scheduler');
 const { asyncHandler, dbErrorMiddleware, initWithRetry, wrapAsyncRoutes } = require('./db-health');
 const health = require('./health');
@@ -270,6 +270,28 @@ app.delete('/tracked/:username', async (req, res) => {
   res.json({ success: true });
 });
 
+app.post('/tracked/scrape-bulk', async (req, res) => {
+  const usernames = (Array.isArray(req.body?.usernames) ? req.body.usernames : [])
+    .filter(u => typeof u === 'string' && u.trim())
+    .map(u => u.trim());
+  const results = [];
+  let stopped = null;
+  for (const username of usernames) {
+    try {
+      const r = await scraper.startScrapeJob({ query: username, queryType: 'username', minLikes: null, minViews: null, startDate: null, endDate: null, source: 'manual' });
+      if (!(r && r.skipped)) {
+        // un-pause only when a scrape actually started, so the account joins the active rotation
+        await pool.query("UPDATE tracked_accounts SET status = 'active' WHERE username = $1", [username]);
+      }
+      results.push({ username, ...(r && r.skipped ? { skipped: true } : { status: 'running' }) });
+    } catch (err) {
+      if (err instanceof BudgetExceededError) { stopped = { username, message: err.message }; break; }
+      results.push({ username, error: err.message });
+    }
+  }
+  res.json({ started: results.filter(r => r.status === 'running').length, results, stopped });
+});
+
 // ─── Suggested Accounts Routes ──────────────────────────────────
 
 app.get('/suggested', async (req, res) => {
@@ -278,8 +300,7 @@ app.get('/suggested', async (req, res) => {
   const params = [];
   let idx = 1;
   if (status) { where += ` AND status = $${idx++}`; params.push(status); }
-  const sortMap = { score: 'suggestion_score DESC', er: 'avg_er DESC', followers: 'followers DESC', newest: 'discovered_at DESC' };
-  const orderBy = sortMap[sort] || 'suggestion_score DESC';
+  const orderBy = suggestionsOrderClause(sort);
   const result = await pool.query(`SELECT * FROM suggested_accounts ${where} ORDER BY ${orderBy}`, params);
   res.json(result.rows);
 });
@@ -291,9 +312,35 @@ app.post('/suggested/:username/approve', async (req, res) => {
   await pool.query("UPDATE suggested_accounts SET status = 'approved', reviewed_at = TO_CHAR(NOW(), 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"') WHERE username = $1", [username]);
   const s = suggestion.rows[0];
   try {
-    await pool.query('INSERT INTO tracked_accounts (username, tags, followers, bio, avg_er) VALUES ($1, $2, $3, $4, $5)', [username, 'discovered', s.followers || 0, s.bio || '', s.avg_er || 0]);
+    await pool.query(
+      `INSERT INTO tracked_accounts (username, status, tags, followers, bio, avg_er) VALUES ($1, 'paused', $2, $3, $4, $5)`,
+      [username, 'discovered', s.followers || 0, s.bio || '', s.avg_er || 0]
+    );
   } catch (e) { /* already tracked */ }
   res.json({ success: true });
+});
+
+app.post('/suggested/approve-bulk', async (req, res) => {
+  const usernames = (Array.isArray(req.body?.usernames) ? req.body.usernames : [])
+    .filter(u => typeof u === 'string' && u.trim())
+    .map(u => u.trim());
+  let approved = 0;
+  for (const username of usernames) {
+    try {
+      const suggestion = await pool.query('SELECT * FROM suggested_accounts WHERE username = $1', [username]);
+      if (suggestion.rows.length === 0) continue;
+      const s = suggestion.rows[0];
+      await pool.query("UPDATE suggested_accounts SET status = 'approved', reviewed_at = TO_CHAR(NOW(), 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"') WHERE username = $1", [username]);
+      try {
+        await pool.query(
+          `INSERT INTO tracked_accounts (username, status, tags, followers, bio, avg_er) VALUES ($1, 'paused', $2, $3, $4, $5)`,
+          [username, 'discovered', s.followers || 0, s.bio || '', s.avg_er || 0]
+        );
+      } catch (e) { /* already tracked */ }
+      approved++;
+    } catch (e) { console.error(`[Suggested] bulk approve failed for ${username}:`, e.message); }
+  }
+  res.json({ approved, total: usernames.length, status: 'paused' });
 });
 
 app.post('/suggested/:username/dismiss', async (req, res) => {

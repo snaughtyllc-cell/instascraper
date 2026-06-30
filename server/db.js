@@ -272,6 +272,7 @@ async function initDB() {
       `ALTER TABLE scrape_jobs ADD COLUMN IF NOT EXISTS source TEXT DEFAULT 'manual'`,
       `ALTER TABLE posts ADD COLUMN IF NOT EXISTS thumbnail_cache_status TEXT`,
       `ALTER TABLE posts ADD COLUMN IF NOT EXISTS thumbnail_cache_error TEXT`,
+      `ALTER TABLE suggested_accounts ADD COLUMN IF NOT EXISTS gender TEXT DEFAULT 'unknown'`,
     ];
     for (const sql of migrations) {
       try { await db.query(sql); } catch (e) { /* ignore */ }
@@ -283,6 +284,7 @@ async function initDB() {
       `ALTER TABLE scrape_jobs ADD COLUMN source TEXT DEFAULT 'manual'`,
       `ALTER TABLE posts ADD COLUMN thumbnail_cache_status TEXT`,
       `ALTER TABLE posts ADD COLUMN thumbnail_cache_error TEXT`,
+      `ALTER TABLE suggested_accounts ADD COLUMN gender TEXT DEFAULT 'unknown'`,
     ];
     for (const sql of migrations) {
       try { await db.query(sql); } catch (e) { /* column already exists */ }
