@@ -10,6 +10,8 @@ function radarConfig(env = process.env) {
     termsPerCycle: Math.floor(num(env.RADAR_TERMS_PER_CYCLE, 10)),
     resultsPerTerm: Math.floor(num(env.RADAR_RESULTS_PER_TERM, 50)),
     authorsEnrichMax: Math.floor(num(env.RADAR_AUTHORS_ENRICH_MAX, 20)),
+    autoseedMax: Math.floor(num(env.RADAR_AUTOSEED_MAX, 15)),
+    autoseedWindowDays: num(env.RADAR_AUTOSEED_WINDOW_DAYS, 90),
     minViews: num(env.RADAR_MIN_VIEWS, 50000),
     minLikes: num(env.RADAR_MIN_LIKES, 1000),
     maxAgeDays: num(env.RADAR_MAX_AGE_DAYS, 14),
@@ -20,6 +22,46 @@ function radarConfig(env = process.env) {
     wBreakout: num(env.RADAR_W_BREAKOUT, 0.7),
     wNiche: num(env.RADAR_W_NICHE, 0.3),
   };
+}
+
+// PURE: extract #tags from captions, lowercase + strip leading '#', count,
+// return top `max` by count (deterministic tie-break: tag asc).
+function topHashtagsFromCaptions(captions, max) {
+  const counts = new Map();
+  for (const cap of captions || []) {
+    const tags = (String(cap || '').match(/#([a-zA-Z0-9_]+)/g) || [])
+      .map(h => h.replace(/^#/, '').toLowerCase());
+    for (const tag of tags) counts.set(tag, (counts.get(tag) || 0) + 1);
+  }
+  return [...counts.entries()]
+    .map(([tag, count]) => ({ tag, count }))
+    .sort((a, b) => (b.count - a.count) || a.tag.localeCompare(b.tag))
+    .slice(0, Math.max(0, max | 0));
+}
+
+// Auto-seed watch_terms by mining hashtags from tracked accounts' scraped post
+// captions. ON CONFLICT DO NOTHING so admin pins/excludes always win.
+async function seedWatchTerms(pool, cfg) {
+  const windowDays = Math.max(0, Math.floor(Number(cfg.autoseedWindowDays) || 0));
+  const capRes = await pool.query(
+    `SELECT p.caption FROM posts p
+     WHERE LOWER(p.account_handle) IN (SELECT LOWER(username) FROM tracked_accounts WHERE status = 'active')
+       AND p.caption IS NOT NULL
+       AND p.posted_at >= TO_CHAR(NOW() - INTERVAL '${windowDays} days', 'YYYY-MM-DD"T"HH24:MI:SS"Z"')`
+  );
+  const captions = (capRes.rows || []).map(r => r.caption);
+  const top = topHashtagsFromCaptions(captions, cfg.autoseedMax);
+  let seeded = 0;
+  for (const { tag } of top) {
+    try {
+      const ins = await pool.query(
+        `INSERT INTO watch_terms (term, kind, source, status) VALUES ($1,'hashtag','auto','active')
+         ON CONFLICT (term, kind) DO NOTHING`,
+        [tag]);
+      if (ins.rowCount > 0) seeded++;
+    } catch (e) { /* best-effort per-term */ }
+  }
+  return seeded;
 }
 
 function selectWatchTerms(terms, max) {
@@ -193,6 +235,10 @@ async function runRadar(scraper, { env = process.env } = {}) {
   const now = Date.now();
   const stats = { terms: 0, harvested: 0, survivors: 0, enriched: 0, reels: 0, authors: 0, started: true };
   try {
+    // Auto-seed the watchlist from tracked accounts' post hashtags (best-effort).
+    try { await seedWatchTerms(pool, cfg); }
+    catch (e) { console.error('[Radar] auto-seed failed:', e.message); }
+
     const termsRes = await pool.query("SELECT id, term, kind, source, status, last_run_at FROM watch_terms");
     const chosen = selectWatchTerms(termsRes.rows, cfg.termsPerCycle);
     stats.terms = chosen.length;
@@ -264,4 +310,4 @@ async function persistRadarReel(pool, r) {
      r.author_followers, r.author_median_views, r.breakout_score, r.niche_fit_score, r.total_score]);
 }
 
-module.exports = { radarConfig, selectWatchTerms, passesFloors, dedupeReels, excludeAuthors, scoreReel, normalizeHashtagItem, harvestHashtag, authorMedianFromReels, enrichAuthors, selectRolloupAuthors, rollupAuthors, runRadar, getRadarStatus, __setRunning, persistRadarReel };
+module.exports = { radarConfig, topHashtagsFromCaptions, seedWatchTerms, selectWatchTerms, passesFloors, dedupeReels, excludeAuthors, scoreReel, normalizeHashtagItem, harvestHashtag, authorMedianFromReels, enrichAuthors, selectRolloupAuthors, rollupAuthors, runRadar, getRadarStatus, __setRunning, persistRadarReel };

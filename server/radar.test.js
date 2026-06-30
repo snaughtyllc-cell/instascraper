@@ -60,6 +60,29 @@ test('passesFloors: views/likes/age boundaries', () => {
   assert.strictEqual(radar.passesFloors({ ...ok, like_count: 10 }, cfg, now), false);
   assert.strictEqual(radar.passesFloors({ ...ok, posted_at: '2026-01-01T00:00:00Z' }, cfg, now), false);
   assert.strictEqual(radar.passesFloors({ ...ok, view_count: null }, cfg, now), false);
+  // future-dated post (posted after now) is rejected
+  assert.strictEqual(radar.passesFloors({ ...ok, posted_at: '2026-07-05T00:00:00Z' }, cfg, now), false);
+});
+
+test('topHashtagsFromCaptions: extraction, lowercase, top-N, tie-break, empty', () => {
+  const captions = [
+    'leg day #Fitness #Gym',
+    'more #fitness vibes #gym #booty',
+    '#FITNESS again #abs',
+    null,
+    'no tags here',
+  ];
+  // fitness=3, gym=2, abs=1, booty=1 → top 2 = fitness, gym
+  const top2 = radar.topHashtagsFromCaptions(captions, 2);
+  assert.deepStrictEqual(top2.map(t => t.tag), ['fitness', 'gym']);
+  assert.strictEqual(top2[0].count, 3);
+  assert.strictEqual(top2[1].count, 2);
+  // tie-break by tag asc: abs before booty (both count 1)
+  const top4 = radar.topHashtagsFromCaptions(captions, 4).map(t => t.tag);
+  assert.deepStrictEqual(top4, ['fitness', 'gym', 'abs', 'booty']);
+  // empty input
+  assert.deepStrictEqual(radar.topHashtagsFromCaptions([], 5), []);
+  assert.deepStrictEqual(radar.topHashtagsFromCaptions(['no hashtags'], 5), []);
 });
 
 test('dedupeReels / excludeAuthors', () => {
