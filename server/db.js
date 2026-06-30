@@ -274,6 +274,8 @@ async function initDB() {
       `ALTER TABLE posts ADD COLUMN IF NOT EXISTS thumbnail_cache_error TEXT`,
       `ALTER TABLE suggested_accounts ADD COLUMN IF NOT EXISTS gender TEXT DEFAULT 'unknown'`,
       `ALTER TABLE posts ADD COLUMN IF NOT EXISTS tagged_users TEXT DEFAULT NULL`,
+      `ALTER TABLE tracked_accounts ADD COLUMN IF NOT EXISTS last_attempt_at TEXT DEFAULT NULL`,
+      `ALTER TABLE tracked_accounts ADD COLUMN IF NOT EXISTS consecutive_failures INTEGER DEFAULT 0`,
     ];
     for (const sql of migrations) {
       try { await db.query(sql); } catch (e) { /* ignore */ }
@@ -287,6 +289,8 @@ async function initDB() {
       `ALTER TABLE posts ADD COLUMN thumbnail_cache_error TEXT`,
       `ALTER TABLE suggested_accounts ADD COLUMN gender TEXT DEFAULT 'unknown'`,
       `ALTER TABLE posts ADD COLUMN tagged_users TEXT DEFAULT NULL`,
+      `ALTER TABLE tracked_accounts ADD COLUMN last_attempt_at TEXT DEFAULT NULL`,
+      `ALTER TABLE tracked_accounts ADD COLUMN consecutive_failures INTEGER DEFAULT 0`,
     ];
     for (const sql of migrations) {
       try { await db.query(sql); } catch (e) { /* column already exists */ }

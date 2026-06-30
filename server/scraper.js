@@ -57,6 +57,10 @@ function parseTaggedUsers(json) {
   return arr.filter(h => typeof h === 'string' && h.trim()).map(h => h.trim().toLowerCase());
 }
 
+function isTrackedUsernameQuery(query) {
+  return typeof query === 'string' && query.trim() !== '' && !query.startsWith('#') && !query.startsWith('http');
+}
+
 function isoNoMillis(ms) {
   return new Date(ms).toISOString().replace(/\.\d{3}Z$/, 'Z');
 }
@@ -423,6 +427,9 @@ class InstagramScraper {
             `UPDATE scrape_jobs SET status = $1, error = $2, progress = $3, status_message = $4, completed_at = TO_CHAR(NOW(), 'YYYY-MM-DD"T"HH24:MI:SS"Z"') WHERE id = $5`,
             ['failed', `Apify run ${status}`, progress, statusMessage, jobId]
           );
+          if (isTrackedUsernameQuery(filters.query)) {
+            try { await pool.query(`UPDATE tracked_accounts SET consecutive_failures = COALESCE(consecutive_failures, 0) + 1 WHERE username = $1`, [filters.query.replace('@', '')]); } catch (e) {}
+          }
           try { await recordRunCompletion(pool, { runId, runObject: run, status: 'failed' }); } catch (e) { console.error('[Apify] ledger finalize failed:', e.message); }
           return;
         }
@@ -439,6 +446,9 @@ class InstagramScraper {
             `UPDATE scrape_jobs SET status = $1, error = $2, progress = $3, completed_at = TO_CHAR(NOW(), 'YYYY-MM-DD"T"HH24:MI:SS"Z"') WHERE id = $4`,
             ['failed', 'Polling timeout', progress, jobId]
           );
+          if (isTrackedUsernameQuery(filters.query)) {
+            try { await pool.query(`UPDATE tracked_accounts SET consecutive_failures = COALESCE(consecutive_failures, 0) + 1 WHERE username = $1`, [filters.query.replace('@', '')]); } catch (e) {}
+          }
           try { await recordRunCompletion(pool, { runId, runObject: run, status: 'failed' }); } catch (e) { console.error('[Apify] ledger finalize failed:', e.message); }
         }
       } catch (err) {
@@ -560,9 +570,17 @@ class InstagramScraper {
     // Update tracked account if it exists
     if (accountHandle) {
       await pool.query(
-        `UPDATE tracked_accounts SET last_scraped_at = TO_CHAR(NOW(), 'YYYY-MM-DD"T"HH24:MI:SS"Z"'), last_post_count = $1, followers = $2, updated_at = TO_CHAR(NOW(), 'YYYY-MM-DD"T"HH24:MI:SS"Z"') WHERE username = $3`,
+        `UPDATE tracked_accounts SET last_scraped_at = TO_CHAR(NOW(), 'YYYY-MM-DD"T"HH24:MI:SS"Z"'), last_post_count = $1, followers = $2, consecutive_failures = 0, updated_at = TO_CHAR(NOW(), 'YYYY-MM-DD"T"HH24:MI:SS"Z"') WHERE username = $3`,
         [count, followersCount, accountHandle]
       );
+    } else if (count === 0 && isTrackedUsernameQuery(filters.query) && !filters.minLikes && !filters.minViews && !filters.startDate && !filters.endDate) {
+      // Scrape completed but found nothing for a tracked account (no filters) → count as a failure for cadence backoff.
+      try {
+        await pool.query(
+          `UPDATE tracked_accounts SET consecutive_failures = COALESCE(consecutive_failures, 0) + 1 WHERE username = $1`,
+          [filters.query.replace('@', '')]
+        );
+      } catch (e) { console.error('[Cadence] 0-post failure record failed:', e.message); }
     }
 
     await pool.query(
@@ -934,6 +952,7 @@ module.exports.hasActiveJob = hasActiveJob;
 module.exports.extractViews = extractViews;
 module.exports.normalizeTaggedUsers = normalizeTaggedUsers;
 module.exports.parseTaggedUsers = parseTaggedUsers;
+module.exports.isTrackedUsernameQuery = isTrackedUsernameQuery;
 module.exports.classifyGenderKeyword = classifyGenderKeyword;
 module.exports.parseGenderBatch = parseGenderBatch;
 module.exports.scoreCandidate = scoreCandidate;
