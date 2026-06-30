@@ -105,6 +105,19 @@ export default function SuggestedAccountsTab() {
   const female = suggestions.filter((s) => s.gender === 'female');
   const unclassified = suggestions.filter((s) => s.gender !== 'female');
 
+  const allFemaleSelected = female.length > 0 && female.every((s) => selected.has(s.username));
+  const toggleSelectAllFemale = () => {
+    setSelected((prev) => {
+      const next = new Set(prev);
+      if (female.length > 0 && female.every((s) => prev.has(s.username))) {
+        female.forEach((s) => next.delete(s.username)); // all selected → deselect them
+      } else {
+        female.forEach((s) => next.add(s.username));     // select all visible female
+      }
+      return next;
+    });
+  };
+
   const renderCard = (s) => (
     <div key={s.username} className="bg-gray-900 rounded-xl border border-gray-800 p-4 space-y-3 hover:border-gray-700 transition-colors">
       {/* Header */}
@@ -264,8 +277,19 @@ export default function SuggestedAccountsTab() {
         <div className="space-y-6">
           {/* Female section */}
           {female.length > 0 && (
-            <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4">
-              {female.map(renderCard)}
+            <div>
+              <div className="flex items-center justify-between mb-1">
+                <span className="text-xs text-gray-500">{female.length} female</span>
+                <button
+                  onClick={toggleSelectAllFemale}
+                  className="px-2.5 py-1 rounded-lg text-xs font-medium bg-gray-800 border border-gray-700 text-gray-300 hover:text-white hover:border-gray-600"
+                >
+                  {allFemaleSelected ? 'Deselect all' : `Select all ${female.length} female`}
+                </button>
+              </div>
+              <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4">
+                {female.map(renderCard)}
+              </div>
             </div>
           )}
 
