@@ -181,4 +181,84 @@ async function rollupAuthors(pool, authors) {
   return { added, bumped };
 }
 
-module.exports = { radarConfig, selectWatchTerms, passesFloors, dedupeReels, excludeAuthors, scoreReel, normalizeHashtagItem, harvestHashtag, authorMedianFromReels, enrichAuthors, selectRolloupAuthors, rollupAuthors };
+const radarState = { running: false, lastRun: null, message: '' };
+function __setRunning(v) { radarState.running = v; }       // test hook
+function getRadarStatus() { return radarState; }
+
+async function runRadar(scraper, { env = process.env } = {}) {
+  if (radarState.running) return { started: false, reason: 'already_running' };
+  if (!scraper || !scraper.apiKey) return { started: false, reason: 'no_api_key' };
+  radarState.running = true; radarState.lastRun = new Date().toISOString();
+  const cfg = radarConfig(env);
+  const now = Date.now();
+  const stats = { terms: 0, harvested: 0, survivors: 0, enriched: 0, reels: 0, authors: 0, started: true };
+  try {
+    const termsRes = await pool.query("SELECT id, term, kind, source, status, last_run_at FROM watch_terms");
+    const chosen = selectWatchTerms(termsRes.rows, cfg.termsPerCycle);
+    stats.terms = chosen.length;
+
+    // dedup context
+    const known = new Set();
+    for (const t of ['posts', 'radar_reels']) {
+      const r = await pool.query(`SELECT shortcode FROM ${t}`);
+      r.rows.forEach(x => known.add(x.shortcode));
+    }
+    const trackedRes = await pool.query("SELECT username FROM tracked_accounts");
+    const reviewedRes = await pool.query("SELECT username FROM suggested_accounts WHERE status IN ('approved','dismissed')");
+    const blocked = new Set([...trackedRes.rows, ...reviewedRes.rows].map(x => x.username.toLowerCase()));
+
+    let allScored = [];
+    for (const term of chosen) {
+      let harvested = [];
+      try { harvested = await harvestHashtag(scraper, term.term, cfg); }
+      catch (e) { if (e.name === 'BudgetExceededError') { console.log(`[Metric] radar_budget_stop term=${term.term}`); break; }
+                  console.error(`[Radar] harvest failed for #${term.term}:`, e.message); }
+      stats.harvested += harvested.length;
+      // stamp last_run_at best-effort
+      try { await pool.query(`UPDATE watch_terms SET last_run_at = TO_CHAR(NOW(), 'YYYY-MM-DD"T"HH24:MI:SS"Z"') WHERE id = $1`, [term.id]); } catch (e) {}
+
+      let survivors = harvested.filter(r => passesFloors(r, cfg, now));
+      survivors = excludeAuthors(dedupeReels(survivors, { knownShortcodes: known }), { blockedHandles: blocked });
+      survivors.forEach(r => known.add(r.shortcode)); // avoid intra-cycle dupes across terms
+      stats.survivors += survivors.length;
+      if (survivors.length === 0) continue;
+
+      const authorsMap = await enrichAuthors(scraper, survivors.map(r => r.account_handle), cfg);
+      stats.enriched += authorsMap.size;
+      for (const r of survivors) {
+        const author = authorsMap.get(r.account_handle) || null;
+        r._hashtagOverlap = (r._hashtags || []).filter(h => h !== `#${term.term}`).length;
+        const s = scoreReel(r, author, cfg);
+        Object.assign(r, s, {
+          author_followers: author ? author.followers : null,
+          author_median_views: author ? author.median_views : null,
+        });
+        await persistRadarReel(pool, r);
+        stats.reels++;
+        allScored.push(r);
+      }
+    }
+    const rollup = selectRolloupAuthors(allScored, cfg);
+    const { added, bumped } = await rollupAuthors(pool, rollup);
+    stats.authors = added + bumped;
+    console.log(`[Metric] radar terms=${stats.terms} harvested=${stats.harvested} survivors=${stats.survivors} reels=${stats.reels} authors=${stats.authors}`);
+    radarState.message = `Reels ${stats.reels}, authors +${added}/~${bumped}`;
+  } catch (err) {
+    radarState.message = err.message; console.error('[Radar] run failed:', err.message);
+  } finally { radarState.running = false; }
+  return stats;
+}
+
+async function persistRadarReel(pool, r) {
+  await pool.query(
+    `INSERT INTO radar_reels (shortcode, account_handle, video_url, thumbnail_url, caption,
+       like_count, comment_count, view_count, posted_at, post_url, discovered_via,
+       author_followers, author_median_views, breakout_score, niche_fit_score, total_score)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)
+     ON CONFLICT (shortcode) DO NOTHING`,
+    [r.shortcode, r.account_handle, r.video_url, r.thumbnail_url, r.caption,
+     r.like_count, r.comment_count, r.view_count, r.posted_at, r.post_url, r.discovered_via,
+     r.author_followers, r.author_median_views, r.breakout_score, r.niche_fit_score, r.total_score]);
+}
+
+module.exports = { radarConfig, selectWatchTerms, passesFloors, dedupeReels, excludeAuthors, scoreReel, normalizeHashtagItem, harvestHashtag, authorMedianFromReels, enrichAuthors, selectRolloupAuthors, rollupAuthors, runRadar, getRadarStatus, __setRunning, persistRadarReel };

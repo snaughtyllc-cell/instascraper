@@ -150,3 +150,11 @@ test('accumulation upsert: bump pending, never demote reviewed (sqlite)', () => 
   assert.strictEqual(a.source, 'radar:x,radar:y');
   assert.strictEqual(b.suggestion_score, 5); // reviewed row untouched
 });
+
+test('runRadar: re-entrancy guard returns started:false when already running', async () => {
+  radar.__setRunning(true);
+  const res = await radar.runRadar({ /* scraper unused when guarded */ });
+  assert.strictEqual(res.started, false);
+  assert.strictEqual(res.reason, 'already_running');
+  radar.__setRunning(false);
+});

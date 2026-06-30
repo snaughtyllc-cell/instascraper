@@ -350,6 +350,8 @@ function startScheduler(scraper) {
   cron.schedule('0 4 * * 1', () => runDiscovery());
   cron.schedule('0 8 * * *', () => runIdeaGeneration()); // Daily 8am, checks delivery_day
   cron.schedule('0 5 * * *', () => runThumbnailSweep());
+  const radar = require('./radar');
+  cron.schedule('0 6 * * 1', () => radar.runRadar(scraper));
   console.log('[Scheduler] All cron jobs registered');
 }
 
