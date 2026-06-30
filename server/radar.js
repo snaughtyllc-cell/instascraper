@@ -254,6 +254,8 @@ async function runRadar(scraper, { env = process.env } = {}) {
     const blocked = new Set([...trackedRes.rows, ...reviewedRes.rows].map(x => x.username.toLowerCase()));
 
     let allScored = [];
+    const authorCache = new Map(); // handle → { median_views, followers }; cycle-level
+    let enrichedCount = 0;          // cycle-level cap counter
     for (const term of chosen) {
       let harvested = [];
       try { harvested = await harvestHashtag(scraper, term.term, cfg); }
@@ -269,13 +271,22 @@ async function runRadar(scraper, { env = process.env } = {}) {
       stats.survivors += survivors.length;
       if (survivors.length === 0) continue;
 
-      let authorsMap;
-      try { authorsMap = await enrichAuthors(scraper, survivors.map(r => r.account_handle), cfg); }
-      catch (e) { if (e && e.name === 'BudgetExceededError') { console.log(`[Metric] radar_budget_stop term=${term.term}`); break; }
-                  throw e; }
-      stats.enriched += authorsMap.size;
+      // Cycle-level enrich cap: only fetch handles not already cached, up to the
+      // global remaining budget (cfg.authorsEnrichMax across the whole cycle).
+      const distinctHandles = [...new Set(survivors.map(r => r.account_handle).filter(Boolean))];
+      const toEnrich = distinctHandles.filter(h => !authorCache.has(h))
+        .slice(0, Math.max(0, cfg.authorsEnrichMax - enrichedCount));
+      if (toEnrich.length > 0) {
+        let fresh;
+        try { fresh = await enrichAuthors(scraper, toEnrich, cfg); }
+        catch (e) { if (e && e.name === 'BudgetExceededError') { console.log(`[Metric] radar_budget_stop term=${term.term}`); break; }
+                    throw e; }
+        for (const [h, v] of fresh) {
+          if (!authorCache.has(h)) { authorCache.set(h, v); enrichedCount++; stats.enriched++; }
+        }
+      }
       for (const r of survivors) {
-        const author = authorsMap.get(r.account_handle) || null;
+        const author = authorCache.get(r.account_handle) || null;
         r._hashtagOverlap = (r._hashtags || []).filter(h => h !== `#${term.term}`).length;
         const s = scoreReel(r, author, cfg);
         Object.assign(r, s, {
