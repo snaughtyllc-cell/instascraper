@@ -1,5 +1,15 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
-import { addTrackedAccount, bulkRadarReels, dismissRadarReel, getRadarReels, saveRadarReel } from '../api';
+import {
+  addTrackedAccount,
+  addWatchTerm,
+  bulkRadarReels,
+  dismissRadarReel,
+  getRadarReels,
+  getWatchTerms,
+  runRadar,
+  saveRadarReel,
+  setWatchTermStatus,
+} from '../api';
 import BulkActionBar from '../components/BulkActionBar';
 import ContentCard from '../components/ContentCard';
 
@@ -30,12 +40,32 @@ function radarBadges(reel) {
   ];
 }
 
+function formatLastRun(value) {
+  if (!value) return 'Never';
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return 'Never';
+  return date.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+}
+
+function statusClass(status) {
+  if (status === 'active') return 'bg-green-500/10 text-green-400 border-green-500/30';
+  if (status === 'excluded') return 'bg-red-500/10 text-red-300 border-red-500/30';
+  if (status === 'paused') return 'bg-yellow-500/10 text-yellow-300 border-yellow-500/30';
+  return 'bg-gray-700/50 text-gray-300 border-gray-600';
+}
+
 export default function RadarTab() {
   const [reels, setReels] = useState([]);
+  const [watchTerms, setWatchTerms] = useState([]);
   const [total, setTotal] = useState(0);
   const [filters, setFilters] = useState({ term: '', min_breakout: '' });
   const [selected, setSelected] = useState(new Set());
   const [actionMessage, setActionMessage] = useState('');
+  const [watchlistOpen, setWatchlistOpen] = useState(true);
+  const [newTerm, setNewTerm] = useState('');
+  const [termsLoading, setTermsLoading] = useState(true);
+  const [termMessage, setTermMessage] = useState('');
+  const [runningRadar, setRunningRadar] = useState(false);
   const [loading, setLoading] = useState(true);
   const [acting, setActing] = useState(false);
   const [error, setError] = useState('');
@@ -62,14 +92,34 @@ export default function RadarTab() {
     }
   }, [filters]);
 
+  const loadTerms = useCallback(async () => {
+    setTermsLoading(true);
+    try {
+      const { data } = await getWatchTerms();
+      setWatchTerms(Array.isArray(data?.terms) ? data.terms : []);
+    } catch (err) {
+      console.error('Failed to load Radar watch terms:', err);
+      setWatchTerms([]);
+    } finally {
+      setTermsLoading(false);
+    }
+  }, []);
+
   useEffect(() => {
     loadReels();
   }, [loadReels]);
 
+  useEffect(() => {
+    loadTerms();
+  }, [loadTerms]);
+
   const terms = useMemo(() => (
-    [...new Set(reels.map((r) => r.discovered_via).filter(Boolean))]
+    [...new Set([
+      ...watchTerms.map((t) => t.term),
+      ...reels.map((r) => r.discovered_via),
+    ].filter(Boolean))]
       .sort((a, b) => String(a).localeCompare(String(b)))
-  ), [reels]);
+  ), [reels, watchTerms]);
 
   const handleFilterChange = (key, value) => {
     setFilters((prev) => ({ ...prev, [key]: value }));
@@ -159,6 +209,52 @@ export default function RadarTab() {
     }
   };
 
+  const handleAddTerm = async (e) => {
+    e.preventDefault();
+    const clean = newTerm.trim().replace(/^#/, '').toLowerCase();
+    if (!clean) return;
+    setTermMessage('');
+    try {
+      await addWatchTerm(clean, 'hashtag');
+      setNewTerm('');
+      setTermMessage(`Pinned #${clean}.`);
+      await loadTerms();
+    } catch (err) {
+      console.error('Failed to add Radar term:', err);
+      setError(err.response?.data?.error || err.message || 'Failed to add watch term');
+    }
+  };
+
+  const handleTermStatus = async (id, status) => {
+    setTermMessage('');
+    try {
+      await setWatchTermStatus(id, status);
+      setTermMessage(`Watch term ${status}.`);
+      await loadTerms();
+    } catch (err) {
+      console.error('Failed to update Radar term:', err);
+      setError(err.response?.data?.error || err.message || 'Failed to update watch term');
+    }
+  };
+
+  const handleRunRadar = async () => {
+    setRunningRadar(true);
+    setTermMessage('');
+    try {
+      const { data } = await runRadar();
+      if (data?.started === false) {
+        setTermMessage(data.reason === 'already_running' ? 'Radar is already running.' : `Radar did not start: ${data.reason || 'not started'}.`);
+      } else {
+        setTermMessage('Radar run started.');
+      }
+    } catch (err) {
+      console.error('Failed to run Radar:', err);
+      setError(err.response?.data?.error || err.message || 'Failed to run Radar');
+    } finally {
+      setRunningRadar(false);
+    }
+  };
+
   const renderActions = (reel) => (
     <div className="grid grid-cols-2 gap-1.5 pt-1">
       <button
@@ -233,6 +329,117 @@ export default function RadarTab() {
             </label>
           </div>
         </div>
+      </div>
+
+      <div className="bg-gray-900 rounded-xl border border-gray-800 overflow-hidden">
+        <button
+          type="button"
+          onClick={() => setWatchlistOpen((open) => !open)}
+          className="w-full px-5 py-4 flex items-center justify-between text-left hover:bg-gray-800/40 transition-colors"
+        >
+          <div>
+            <h3 className="text-sm font-semibold text-white">Watchlist</h3>
+            <p className="text-xs text-gray-500 mt-0.5">{watchTerms.length} terms tracked</p>
+          </div>
+          <span className="text-gray-500 text-sm">{watchlistOpen ? 'Hide' : 'Show'}</span>
+        </button>
+
+        {watchlistOpen && (
+          <div className="border-t border-gray-800 p-5 space-y-4">
+            <div className="flex flex-col lg:flex-row gap-3 lg:items-center justify-between">
+              <form onSubmit={handleAddTerm} className="flex flex-col sm:flex-row gap-2 flex-1">
+                <input
+                  value={newTerm}
+                  onChange={(e) => setNewTerm(e.target.value)}
+                  placeholder="#hashtag"
+                  className="flex-1 bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm text-white placeholder-gray-600"
+                />
+                <button
+                  type="submit"
+                  disabled={!newTerm.trim()}
+                  className="px-4 py-2 bg-gold text-gray-950 rounded-lg font-semibold text-sm hover:bg-gold-light disabled:opacity-50 disabled:cursor-not-allowed"
+                >
+                  Pin term
+                </button>
+              </form>
+              <button
+                type="button"
+                onClick={handleRunRadar}
+                disabled={runningRadar}
+                className="px-4 py-2 rounded-lg text-sm font-semibold bg-gray-800 border border-gold text-gold hover:bg-gray-700 disabled:opacity-50 disabled:cursor-not-allowed"
+              >
+                {runningRadar ? 'Starting...' : 'Run Radar now'}
+              </button>
+            </div>
+
+            {termMessage && (
+              <div className="text-sm text-green-300 bg-green-500/10 border border-green-500/30 rounded-lg px-3 py-2">
+                {termMessage}
+              </div>
+            )}
+
+            {termsLoading ? (
+              <div className="text-sm text-gray-500 py-4">Loading watchlist...</div>
+            ) : watchTerms.length === 0 ? (
+              <div className="text-sm text-gray-500 py-4">No watch terms yet.</div>
+            ) : (
+              <div className="overflow-x-auto">
+                <table className="w-full text-sm">
+                  <thead>
+                    <tr className="text-left text-xs uppercase text-gray-500 border-b border-gray-800">
+                      <th className="py-2 pr-4 font-medium">Term</th>
+                      <th className="py-2 pr-4 font-medium">Source</th>
+                      <th className="py-2 pr-4 font-medium">Status</th>
+                      <th className="py-2 pr-4 font-medium">Last run</th>
+                      <th className="py-2 pr-4 font-medium">Reels</th>
+                      <th className="py-2 font-medium text-right">Actions</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-gray-800">
+                    {watchTerms.map((term) => (
+                      <tr key={term.id}>
+                        <td className="py-3 pr-4 text-white font-medium">#{term.term}</td>
+                        <td className="py-3 pr-4 text-gray-400">{term.source || 'auto'}</td>
+                        <td className="py-3 pr-4">
+                          <span className={`px-2 py-0.5 rounded-full text-xs border ${statusClass(term.status)}`}>
+                            {term.status || 'active'}
+                          </span>
+                        </td>
+                        <td className="py-3 pr-4 text-gray-400">{formatLastRun(term.last_run_at)}</td>
+                        <td className="py-3 pr-4 text-gray-300">{Number(term.reels_surfaced) || 0}</td>
+                        <td className="py-3">
+                          <div className="flex justify-end gap-1.5">
+                            <button
+                              onClick={() => handleTermStatus(term.id, 'active')}
+                              disabled={term.status === 'active'}
+                              className="px-2 py-1 rounded-md text-xs bg-gray-800 border border-gray-700 text-gray-300 hover:text-white disabled:opacity-40 disabled:cursor-not-allowed"
+                            >
+                              Pin
+                            </button>
+                            <button
+                              onClick={() => handleTermStatus(term.id, 'paused')}
+                              disabled={term.status === 'paused'}
+                              className="px-2 py-1 rounded-md text-xs bg-gray-800 border border-gray-700 text-yellow-300 hover:border-yellow-600 disabled:opacity-40 disabled:cursor-not-allowed"
+                            >
+                              Pause
+                            </button>
+                            <button
+                              onClick={() => handleTermStatus(term.id, 'excluded')}
+                              disabled={term.status === 'excluded'}
+                              className="px-2 py-1 rounded-md text-xs bg-gray-800 border border-gray-700 text-red-300 hover:border-red-600 disabled:opacity-40 disabled:cursor-not-allowed"
+                            >
+                              Exclude
+                            </button>
+                          </div>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </div>
+        )}
       </div>
 
       {error && (
