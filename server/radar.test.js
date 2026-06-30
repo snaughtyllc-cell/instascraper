@@ -1,6 +1,7 @@
 const { test } = require('node:test');
 const assert = require('node:assert');
 const Database = require('better-sqlite3');
+const radar = require('./radar');
 
 // Mirror of the SQLite DDL initDB will create (asserts the shape is creatable & insertable).
 function makeSchema(db) {
@@ -26,4 +27,26 @@ test('schema: watch_terms enforces UNIQUE(term,kind) and radar_reels UNIQUE(shor
   assert.throws(() => db.prepare("INSERT INTO watch_terms (term,kind,source) VALUES ('fitgirl','hashtag','admin')").run());
   db.prepare("INSERT INTO radar_reels (shortcode,account_handle) VALUES ('ABC','x')").run();
   assert.throws(() => db.prepare("INSERT INTO radar_reels (shortcode,account_handle) VALUES ('ABC','y')").run());
+});
+
+test('radarConfig: defaults and env override', () => {
+  const d = radar.radarConfig({});
+  assert.strictEqual(d.termsPerCycle, 10);
+  assert.strictEqual(d.minViews, 50000);
+  assert.strictEqual(d.wBreakout, 0.7);
+  const o = radar.radarConfig({ RADAR_TERMS_PER_CYCLE: '3', RADAR_MIN_VIEWS: '1000' });
+  assert.strictEqual(o.termsPerCycle, 3);
+  assert.strictEqual(o.minViews, 1000);
+});
+
+test('selectWatchTerms: active only, excluded suppresses twin, NULL-first ordering, cap', () => {
+  const terms = [
+    { id: 1, term: 'a', kind: 'hashtag', status: 'active',  last_run_at: '2026-06-01T00:00:00Z' },
+    { id: 2, term: 'b', kind: 'hashtag', status: 'active',  last_run_at: null },
+    { id: 3, term: 'c', kind: 'hashtag', status: 'paused',  last_run_at: null },
+    { id: 4, term: 'd', kind: 'hashtag', status: 'active',  last_run_at: '2026-05-01T00:00:00Z' },
+    { id: 5, term: 'd', kind: 'hashtag', status: 'excluded',last_run_at: null }, // excludes term 'd'
+  ];
+  const out = radar.selectWatchTerms(terms, 10).map(t => t.term);
+  assert.deepStrictEqual(out, ['b', 'a']);
 });
