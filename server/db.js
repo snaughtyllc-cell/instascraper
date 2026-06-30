@@ -264,6 +264,45 @@ async function initDB() {
     )
   `);
 
+  await db.query(`
+    CREATE TABLE IF NOT EXISTS watch_terms (
+      id ${SERIAL},
+      term TEXT NOT NULL,
+      kind TEXT DEFAULT 'hashtag',
+      source TEXT DEFAULT 'auto',
+      status TEXT DEFAULT 'active',
+      model_id INTEGER DEFAULT NULL,
+      added_at TEXT DEFAULT ${NOW_DEFAULT},
+      last_run_at TEXT DEFAULT NULL,
+      notes TEXT DEFAULT '',
+      UNIQUE(term, kind)
+    )
+  `);
+
+  await db.query(`
+    CREATE TABLE IF NOT EXISTS radar_reels (
+      id ${SERIAL},
+      shortcode TEXT UNIQUE NOT NULL,
+      account_handle TEXT,
+      video_url TEXT,
+      thumbnail_url TEXT,
+      caption TEXT,
+      like_count INTEGER DEFAULT 0,
+      comment_count INTEGER DEFAULT 0,
+      view_count INTEGER,
+      posted_at TEXT,
+      post_url TEXT,
+      discovered_via TEXT,
+      author_followers INTEGER DEFAULT NULL,
+      author_median_views INTEGER DEFAULT NULL,
+      breakout_score REAL DEFAULT 0,
+      niche_fit_score REAL DEFAULT 0,
+      total_score REAL DEFAULT 0,
+      status TEXT DEFAULT 'new',
+      discovered_at TEXT DEFAULT ${NOW_DEFAULT}
+    )
+  `);
+
   // Migrations for existing tables
   if (USE_PG) {
     const migrations = [
