@@ -200,6 +200,23 @@ async function initDB() {
     )
   `);
 
+  await db.query(`
+    CREATE TABLE IF NOT EXISTS suggested_reels (
+      id ${SERIAL},
+      username TEXT NOT NULL,
+      shortcode TEXT UNIQUE NOT NULL,
+      thumbnail_url TEXT,
+      video_url TEXT,
+      view_count INTEGER DEFAULT 0,
+      like_count INTEGER DEFAULT 0,
+      comment_count INTEGER DEFAULT 0,
+      permalink TEXT,
+      posted_at TEXT,
+      rank INTEGER DEFAULT 0,
+      captured_at TEXT DEFAULT ${NOW_DEFAULT}
+    )
+  `);
+
   // Model profiles for AI content ideas
   await db.query(`
     CREATE TABLE IF NOT EXISTS models (

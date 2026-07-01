@@ -61,6 +61,7 @@ function discoveryConfig(env = process.env) {
     maxSources: Math.floor(num(env.DISCOVERY_MAX_SOURCES, 5)),
     enrichMax: Math.floor(num(env.DISCOVERY_ENRICH_MAX, 8)),
     minReelShare: num(env.DISCOVERY_MIN_REEL_SHARE, 0.60),
+    reelsMax: Math.floor(num(env.DISCOVERY_REELS_MAX, 8)),
   };
 }
 
@@ -273,6 +274,8 @@ async function runDiscovery() {
     const repeats = aggregated.filter(c => suggestedSet.has(c.username) && !trackedSet.has(c.username));
 
     let added = 0, bumped = 0;
+    let reelsCaptured = 0;
+    let reelsBudgetStop = false;
     for (const item of freshKept.slice(0, 50)) {
       const totalScore = scoreCandidate({ collabStrength: item.collabStrength, avgEr: item.avgEr, postsPerWeek: item.postsPerWeek });
       try {
@@ -282,7 +285,18 @@ async function runDiscovery() {
           [item.username, item.source || 'discovery', item.followers || 0, item.avgEr || 0, item.postsPerWeek || 0,
            item.bio || '', item.contentBreakdown || '', item.topHashtags || '', item.relevanceReason || '', totalScore, item.gender || 'unknown', item.reelShare ?? null]
         );
-        if (ins.rowCount > 0) added++;
+        if (ins.rowCount > 0) {
+          added++;
+          if (!reelsBudgetStop && reelsCaptured < dcfg.reelsMax) {
+            try {
+              await scraperInstance.captureTopReels(item.username);
+              reelsCaptured++;
+            } catch (e) {
+              if (e instanceof BudgetExceededError) { reelsBudgetStop = true; console.log(`[Discovery] reel capture stopped at budget (captured ${reelsCaptured})`); }
+              else console.error(`[Discovery] reel capture failed for @${item.username}:`, e.message);
+            }
+          }
+        }
       } catch (e) { console.error(`[Discovery] insert failed for @${item.username}:`, e.message); }
     }
 
@@ -306,7 +320,7 @@ async function runDiscovery() {
       } catch (e) { console.error(`[Discovery] accumulate failed for @${item.username}:`, e.message); }
     }
 
-    console.log(`[Metric] discovery sources=${sources.length} candidates=${aggregated.length} enriched=${freshCandidates.length} female=${female} added=${added} bumped=${bumped}`);
+    console.log(`[Metric] discovery sources=${sources.length} candidates=${aggregated.length} enriched=${freshCandidates.length} female=${female} added=${added} bumped=${bumped} reels=${reelsCaptured}`);
     jobStatus.discovery.message = `Sources ${sources.length}, ${aggregated.length} candidates — added ${added}, bumped ${bumped}`;
     jobStatus.discovery.status = 'idle';
     console.log(`[Scheduler] Discovery done: ${added} new, ${bumped} bumped`);

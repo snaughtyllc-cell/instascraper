@@ -1,6 +1,6 @@
 const fetch = require('node-fetch');
 const pool = require('./db');
-const { sweepThumbnails } = require('./thumbnails');
+const { sweepThumbnails, downloadThumbnail } = require('./thumbnails');
 const { calcViewER } = require('./engagement-metrics');
 
 const APIFY_BASE = 'https://api.apify.com/v2';
@@ -46,6 +46,45 @@ function errorStubReason(item) {
     return item.requestErrorMessages.join(' | ');
   }
   return [item.error, item.errorDescription].filter(Boolean).join(': ');
+}
+
+// Top reels for a suggested-account preview: keep reels/videos that have a shortcode,
+// rank by real view count (extractViews), take the top n with a 1..n rank. Returns []
+// for an error-stub or non-array response. Pure — unit-tested.
+function pickTopReels(items, n = 3) {
+  if (!Array.isArray(items) || isErrorStubResponse(items)) return [];
+  const reels = items.filter(it =>
+    it && (it.type === 'Video' || it.productType === 'clips' || it.videoUrl) && (it.shortCode || it.id));
+  reels.sort((a, b) => (extractViews(b) || 0) - (extractViews(a) || 0));
+  return reels.slice(0, n).map((it, i) => {
+    const shortcode = it.shortCode || it.id;
+    let postedAt = null;
+    if (it.timestamp) postedAt = typeof it.timestamp === 'string' ? it.timestamp : new Date(it.timestamp * 1000).toISOString();
+    else if (it.takenAtTimestamp) postedAt = new Date(it.takenAtTimestamp * 1000).toISOString();
+    return {
+      shortcode,
+      thumbnailUrl: it.displayUrl || (it.images && it.images[0]) || null,
+      videoUrl: it.videoUrl || null,
+      viewCount: extractViews(it) || 0,
+      likeCount: (it.likesCount != null && it.likesCount >= 0) ? it.likesCount : (it.likes || 0),
+      commentCount: (it.commentsCount != null && it.commentsCount >= 0) ? it.commentsCount : (it.comments || 0),
+      permalink: it.url || `https://www.instagram.com/reel/${shortcode}/`,
+      postedAt,
+      rank: i + 1,
+    };
+  });
+}
+
+// Attach each account's reels (grouped by username, ordered by rank) as `top_reels`.
+// Pure — unit-tested.
+function attachTopReels(accounts, reels) {
+  const byUser = new Map();
+  for (const r of (reels || [])) {
+    if (!byUser.has(r.username)) byUser.set(r.username, []);
+    byUser.get(r.username).push(r);
+  }
+  for (const list of byUser.values()) list.sort((a, b) => (a.rank || 0) - (b.rank || 0));
+  return (accounts || []).map(a => ({ ...a, top_reels: byUser.get(a.username) || [] }));
 }
 
 // Collaborators: the reel actor returns taggedUsers/usertags per post. Extract
@@ -953,6 +992,44 @@ class InstagramScraper {
     return { followers, bio, avgEr, postsPerWeek, contentBreakdown: parts.join(', '), topHashtags, reelShare };
   }
 
+  // Fetch a suggested account's top reels (by views) for the preview strip. One reel-actor
+  // call. Rethrows BudgetExceededError so the caller can stop the cycle; other errors → [].
+  async _fetchTopReels(username) {
+    try {
+      const run = await this._startApifyRun(REEL_ACTOR_ID, {
+        username: [String(username).replace('@', '')],
+        resultsLimit: 12,
+      }, { purpose: 'suggested-reels', query: username });
+      const items = await this._waitForRun(run.id, 20);
+      return pickTopReels(items || [], 3);
+    } catch (err) {
+      if (err instanceof BudgetExceededError) throw err;
+      console.log(`[Discovery] top-reels fetch failed for @${username}: ${err.message}`);
+      return [];
+    }
+  }
+
+  // Fetch + persist a suggested account's top reels, then cache their thumbnails
+  // (fire-and-forget, URLs are freshest now). Returns how many reels were captured.
+  async captureTopReels(username) {
+    const reels = await this._fetchTopReels(username); // may throw BudgetExceededError
+    for (const r of reels) {
+      try {
+        await pool.query(
+          `INSERT INTO suggested_reels (username, shortcode, thumbnail_url, video_url, view_count, like_count, comment_count, permalink, posted_at, rank)
+           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) ON CONFLICT (shortcode) DO NOTHING`,
+          [username, r.shortcode, r.thumbnailUrl, r.videoUrl, r.viewCount, r.likeCount, r.commentCount, r.permalink, r.postedAt, r.rank]
+        );
+      } catch (e) { console.error(`[Discovery] reel insert failed for @${username}:`, e.message); }
+    }
+    for (const r of reels) {
+      if (r.thumbnailUrl && r.shortcode) {
+        downloadThumbnail({ shortcode: r.shortcode, thumbnail_url: r.thumbnailUrl }).catch(() => {});
+      }
+    }
+    return reels.length;
+  }
+
   async importByUrls(urls) {
     if (!urls || urls.length === 0) throw new Error('No URLs provided');
     const cleanUrls = urls.map(u => u.trim()).filter(Boolean);
@@ -1041,6 +1118,8 @@ module.exports.usageSummary = usageSummary;
 module.exports.hasActiveJob = hasActiveJob;
 module.exports.extractViews = extractViews;
 module.exports.isErrorStubResponse = isErrorStubResponse;
+module.exports.pickTopReels = pickTopReels;
+module.exports.attachTopReels = attachTopReels;
 module.exports.calcER = calcER;
 module.exports.normalizeTaggedUsers = normalizeTaggedUsers;
 module.exports.parseTaggedUsers = parseTaggedUsers;

@@ -5,7 +5,7 @@
   "scripts": {
     "start": "node index.js",
     "seed": "node seed.js",
-    "test": "node --test"
+    "test": "node --test --test-concurrency=1"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.85.0",
