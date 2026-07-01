@@ -1,6 +1,6 @@
 const fetch = require('node-fetch');
 const pool = require('./db');
-const { sweepThumbnails } = require('./thumbnails');
+const { sweepThumbnails, downloadThumbnail } = require('./thumbnails');
 const { calcViewER } = require('./engagement-metrics');
 
 const APIFY_BASE = 'https://api.apify.com/v2';
@@ -978,6 +978,44 @@ class InstagramScraper {
       .sort((a, b) => b[1] - a[1]).slice(0, 8).map(([t]) => t).join(', ');
 
     return { followers, bio, avgEr, postsPerWeek, contentBreakdown: parts.join(', '), topHashtags, reelShare };
+  }
+
+  // Fetch a suggested account's top reels (by views) for the preview strip. One reel-actor
+  // call. Rethrows BudgetExceededError so the caller can stop the cycle; other errors → [].
+  async _fetchTopReels(username) {
+    try {
+      const run = await this._startApifyRun(REEL_ACTOR_ID, {
+        username: [String(username).replace('@', '')],
+        resultsLimit: 12,
+      }, { purpose: 'suggested-reels', query: username });
+      const items = await this._waitForRun(run.id, 20);
+      return pickTopReels(items || [], 3);
+    } catch (err) {
+      if (err instanceof BudgetExceededError) throw err;
+      console.log(`[Discovery] top-reels fetch failed for @${username}: ${err.message}`);
+      return [];
+    }
+  }
+
+  // Fetch + persist a suggested account's top reels, then cache their thumbnails
+  // (fire-and-forget, URLs are freshest now). Returns how many reels were captured.
+  async captureTopReels(username) {
+    const reels = await this._fetchTopReels(username); // may throw BudgetExceededError
+    for (const r of reels) {
+      try {
+        await pool.query(
+          `INSERT INTO suggested_reels (username, shortcode, thumbnail_url, video_url, view_count, like_count, comment_count, permalink, posted_at, rank)
+           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) ON CONFLICT (shortcode) DO NOTHING`,
+          [username, r.shortcode, r.thumbnailUrl, r.videoUrl, r.viewCount, r.likeCount, r.commentCount, r.permalink, r.postedAt, r.rank]
+        );
+      } catch (e) { console.error(`[Discovery] reel insert failed for @${username}:`, e.message); }
+    }
+    for (const r of reels) {
+      if (r.thumbnailUrl && r.shortcode) {
+        downloadThumbnail({ shortcode: r.shortcode, thumbnail_url: r.thumbnailUrl }).catch(() => {});
+      }
+    }
+    return reels.length;
   }
 
   async importByUrls(urls) {
