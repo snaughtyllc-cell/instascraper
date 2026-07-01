@@ -48,6 +48,33 @@ function errorStubReason(item) {
   return [item.error, item.errorDescription].filter(Boolean).join(': ');
 }
 
+// Top reels for a suggested-account preview: keep reels/videos that have a shortcode,
+// rank by real view count (extractViews), take the top n with a 1..n rank. Returns []
+// for an error-stub or non-array response. Pure — unit-tested.
+function pickTopReels(items, n = 3) {
+  if (!Array.isArray(items) || isErrorStubResponse(items)) return [];
+  const reels = items.filter(it =>
+    it && (it.type === 'Video' || it.productType === 'clips' || it.videoUrl) && (it.shortCode || it.id));
+  reels.sort((a, b) => (extractViews(b) || 0) - (extractViews(a) || 0));
+  return reels.slice(0, n).map((it, i) => {
+    const shortcode = it.shortCode || it.id;
+    let postedAt = null;
+    if (it.timestamp) postedAt = typeof it.timestamp === 'string' ? it.timestamp : new Date(it.timestamp * 1000).toISOString();
+    else if (it.takenAtTimestamp) postedAt = new Date(it.takenAtTimestamp * 1000).toISOString();
+    return {
+      shortcode,
+      thumbnailUrl: it.displayUrl || (it.images && it.images[0]) || null,
+      videoUrl: it.videoUrl || null,
+      viewCount: extractViews(it) || 0,
+      likeCount: (it.likesCount != null && it.likesCount >= 0) ? it.likesCount : (it.likes || 0),
+      commentCount: (it.commentsCount != null && it.commentsCount >= 0) ? it.commentsCount : (it.comments || 0),
+      permalink: it.url || `https://www.instagram.com/reel/${shortcode}/`,
+      postedAt,
+      rank: i + 1,
+    };
+  });
+}
+
 // Collaborators: the reel actor returns taggedUsers/usertags per post. Extract
 // a clean, de-duped list of handles so discovery can mine collab partners later.
 function normalizeTaggedUsers(item, ownerHandle = '') {
@@ -1041,6 +1068,7 @@ module.exports.usageSummary = usageSummary;
 module.exports.hasActiveJob = hasActiveJob;
 module.exports.extractViews = extractViews;
 module.exports.isErrorStubResponse = isErrorStubResponse;
+module.exports.pickTopReels = pickTopReels;
 module.exports.calcER = calcER;
 module.exports.normalizeTaggedUsers = normalizeTaggedUsers;
 module.exports.parseTaggedUsers = parseTaggedUsers;
