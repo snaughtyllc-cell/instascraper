@@ -22,6 +22,32 @@ function extractViews(item) {
   return null;
 }
 
+// When Apify's IG actors can't return real posts they emit a single dataset ERROR STUB —
+// yet the run still finishes SUCCEEDED. Two shapes seen in prod:
+//   1. proxy block: { requestErrorMessages: ["Request blocked...", "BlockedError: BLOCKED"] }
+//   2. not found:   { error: "not_found", errorDescription: "Post does not exist" }
+// A response where EVERY item is such a stub (no real posts, even after the generic
+// fallback) is a failure, not an empty account; the caller records it as a retryable
+// failure instead of "0 reels". If any real post is present we got data → not a stub.
+function isErrorStub(item) {
+  if (!item || typeof item !== 'object') return false;
+  const hasReqErrs = Array.isArray(item.requestErrorMessages) && item.requestErrorMessages.length > 0;
+  const hasErrorFlag = typeof item.error === 'string' && item.error.trim().length > 0;
+  return hasReqErrs || hasErrorFlag;
+}
+// Pure — unit-tested.
+function isErrorStubResponse(items) {
+  return Array.isArray(items) && items.length > 0 && items.every(isErrorStub);
+}
+// Human-readable cause for a stub item (proxy block vs not-found/other).
+function errorStubReason(item) {
+  if (!item) return '';
+  if (Array.isArray(item.requestErrorMessages) && item.requestErrorMessages.length) {
+    return item.requestErrorMessages.join(' | ');
+  }
+  return [item.error, item.errorDescription].filter(Boolean).join(': ');
+}
+
 // Collaborators: the reel actor returns taggedUsers/usertags per post. Extract
 // a clean, de-duped list of handles so discovery can mine collab partners later.
 function normalizeTaggedUsers(item, ownerHandle = '') {
@@ -481,6 +507,31 @@ class InstagramScraper {
       } catch (err) {
         console.log(`[Scraper] Generic fallback failed: ${err.message}`);
       }
+    }
+
+    // Error-stub guard: if every item is an Apify error stub (no real posts, even after
+    // the fallback), the run "SUCCEEDED" but returned nothing usable. Record a retryable
+    // failure — mirrors the Apify-run-FAILED path — instead of a misleading "completed —
+    // 0 reels" that reads as "this account has no reels".
+    if (isErrorStubResponse(items)) {
+      const reason = errorStubReason(items[0]).slice(0, 300);
+      // proxy block → retry later; anything else (e.g. not_found) → likely a bad/private handle.
+      const blocked = items.some(it => Array.isArray(it.requestErrorMessages) && it.requestErrorMessages.length);
+      const label = blocked ? 'Blocked — no data (retry later)' : 'No data — account private, renamed, or not found';
+      console.log(`[Scraper] ${blocked ? 'Blocked' : 'Error stub'} for "${filters.query}" — ${reason}`);
+      await pool.query(
+        `UPDATE scrape_jobs SET status = $1, error = $2, progress = 100, status_message = $3, completed_at = TO_CHAR(NOW(), 'YYYY-MM-DD"T"HH24:MI:SS"Z"') WHERE id = $4`,
+        ['failed', `${blocked ? 'Blocked by Instagram (Apify)' : 'Apify returned no posts'}: ${reason}`, label, jobId]
+      );
+      if (isTrackedUsernameQuery(filters.query)) {
+        try {
+          await pool.query(
+            `UPDATE tracked_accounts SET consecutive_failures = COALESCE(consecutive_failures, 0) + 1 WHERE username = $1`,
+            [filters.query.replace('@', '').toLowerCase()]
+          );
+        } catch (e) { /* ignore */ }
+      }
+      return;
     }
 
     let followersCount = 0;
@@ -989,6 +1040,7 @@ module.exports.recordRunCompletion = recordRunCompletion;
 module.exports.usageSummary = usageSummary;
 module.exports.hasActiveJob = hasActiveJob;
 module.exports.extractViews = extractViews;
+module.exports.isErrorStubResponse = isErrorStubResponse;
 module.exports.calcER = calcER;
 module.exports.normalizeTaggedUsers = normalizeTaggedUsers;
 module.exports.parseTaggedUsers = parseTaggedUsers;
