@@ -10,6 +10,17 @@ function formatCount(n) {
   return n.toString();
 }
 
+function reelStats(reels) {
+  if (!reels || reels.length === 0) return { avgViews: 0, avgER: 0 };
+  const n = reels.length;
+  const avgViews = Math.round(reels.reduce((sum, r) => sum + (Number(r.view_count) || 0), 0) / n);
+  const avgER = Math.round((reels.reduce((sum, r) => {
+    const v = Number(r.view_count) || 0;
+    return sum + (v > 0 ? ((Number(r.like_count) || 0) + (Number(r.comment_count) || 0)) / v * 100 : 0);
+  }, 0) / n) * 100) / 100;
+  return { avgViews, avgER };
+}
+
 const ER_COLORS = {
   high: 'text-green-400 bg-green-500/10 border-green-500/30',
   mid: 'text-yellow-400 bg-yellow-500/10 border-yellow-500/30',
@@ -73,6 +84,12 @@ export default function SuggestedAccountsTab() {
   const [discovering, setDiscovering] = useState(false);
   const [selected, setSelected] = useState(new Set());
   const [showUnclassified, setShowUnclassified] = useState(false);
+  const [threshold, setThreshold] = useState(() => {
+    const v = Number(localStorage.getItem('suggestScoreThreshold'));
+    return Number.isFinite(v) && v > 0 ? v : 60;
+  });
+  useEffect(() => { localStorage.setItem('suggestScoreThreshold', String(threshold)); }, [threshold]);
+  const [showLowScore, setShowLowScore] = useState(false);
 
   const load = useCallback(async () => {
     try {
@@ -204,21 +221,27 @@ export default function SuggestedAccountsTab() {
         </div>
       </div>
 
-      {/* Stats */}
-      <div className="grid grid-cols-3 gap-2">
-        <div className="bg-gray-800/50 rounded-lg p-2 text-center border border-gray-700/50">
-          <div className="text-sm font-bold text-white">{formatCount(s.followers)}</div>
-          <div className="text-[10px] text-gray-500">Followers</div>
-        </div>
-        <div className={`rounded-lg p-2 text-center border ${erStyle(s.avg_er)}`}>
-          <div className="text-sm font-bold">{s.avg_er}%</div>
-          <div className="text-[10px] opacity-75">Avg ER</div>
-        </div>
-        <div className="bg-gray-800/50 rounded-lg p-2 text-center border border-gray-700/50">
-          <div className="text-sm font-bold text-white">{s.posts_per_week}</div>
-          <div className="text-[10px] text-gray-500">Posts/wk</div>
-        </div>
-      </div>
+      {/* Stats (reel-derived) */}
+      {(() => {
+        const { avgViews, avgER } = reelStats(s.top_reels);
+        const reelCount = (s.top_reels || []).length;
+        return (
+          <div className="grid grid-cols-3 gap-2">
+            <div className="bg-gray-800/50 rounded-lg p-2 text-center border border-gray-700/50">
+              <div className="text-sm font-bold text-white">{reelCount ? formatCount(avgViews) : '—'}</div>
+              <div className="text-[10px] text-gray-500">Avg Views</div>
+            </div>
+            <div className={`rounded-lg p-2 text-center border ${erStyle(avgER)}`}>
+              <div className="text-sm font-bold">{reelCount ? `${avgER}%` : '—'}</div>
+              <div className="text-[10px] opacity-75">Reel ER</div>
+            </div>
+            <div className="bg-gray-800/50 rounded-lg p-2 text-center border border-gray-700/50">
+              <div className="text-sm font-bold text-white">{s.followers > 0 ? formatCount(s.followers) : reelCount}</div>
+              <div className="text-[10px] text-gray-500">{s.followers > 0 ? 'Followers' : 'Reels'}</div>
+            </div>
+          </div>
+        );
+      })()}
 
       {/* Top reels */}
       <SuggestedReelStrip reels={s.top_reels} />
@@ -277,6 +300,14 @@ export default function SuggestedAccountsTab() {
             </p>
           </div>
           <div className="flex gap-3 items-center">
+            <label className="flex items-center gap-1.5 text-xs text-gray-400">
+              Min score
+              <input
+                type="number" min="0" max="100" value={threshold}
+                onChange={(e) => setThreshold(Math.max(0, Math.min(100, Number(e.target.value) || 0)))}
+                className="w-16 bg-gray-800 border border-gray-700 rounded-lg px-2 py-2 text-sm text-white"
+              />
+            </label>
             <select
               value={sort}
               onChange={(e) => setSort(e.target.value)}
@@ -336,9 +367,32 @@ export default function SuggestedAccountsTab() {
                   {allFemaleSelected ? 'Deselect all' : `Select all ${female.length} female`}
                 </button>
               </div>
-              <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4">
-                {female.map(renderCard)}
-              </div>
+              {(() => {
+                const above = female.filter((s) => (s.suggestion_score || 0) >= threshold);
+                const below = female.filter((s) => (s.suggestion_score || 0) < threshold);
+                return (
+                  <>
+                    <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4">
+                      {above.map(renderCard)}
+                    </div>
+                    {below.length > 0 && (
+                      <div className="mt-3">
+                        <button
+                          onClick={() => setShowLowScore((v) => !v)}
+                          className="text-sm text-gray-400 hover:text-white transition-colors mb-3"
+                        >
+                          {showLowScore ? '▾' : '▸'} Show {below.length} lower-scoring (under {threshold}%)
+                        </button>
+                        {showLowScore && (
+                          <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4">
+                            {below.map(renderCard)}
+                          </div>
+                        )}
+                      </div>
+                    )}
+                  </>
+                );
+              })()}
             </div>
           )}
 
