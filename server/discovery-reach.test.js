@@ -88,3 +88,32 @@ test('accumulation: does not touch reviewed (non-pending) suggestions', () => {
   assert.strictEqual(row.s, 40);
   assert.strictEqual(row.source, 'creatorA');
 });
+
+// Guard for the reel_share persistence INSERT in runDiscovery, with $n → ? for sqlite
+// (mirrors the dual-mode shim). Validates the 12-column/12-placeholder shape and that a
+// nullable REAL round-trips both a fractional value and NULL (unknown reel dominance).
+const INS_SQL = `INSERT INTO suggested_accounts (username, source, followers, avg_er, posts_per_week, bio, content_breakdown, top_hashtags, relevance_reason, suggestion_score, gender, reel_share)
+   VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`;
+function makeInsDb() {
+  const db = new Database(':memory:');
+  db.exec(`CREATE TABLE suggested_accounts (
+    username TEXT UNIQUE, source TEXT, followers INTEGER, avg_er REAL, posts_per_week REAL,
+    bio TEXT, content_breakdown TEXT, top_hashtags TEXT, relevance_reason TEXT,
+    suggestion_score REAL, gender TEXT, reel_share REAL DEFAULT NULL
+  )`);
+  return db;
+}
+const ins = (db, username, reelShare) =>
+  db.prepare(INS_SQL).run(username, 'discovery', 0, 0, 0, '', '', '', '', 0, 'female', reelShare ?? null);
+
+test('persist: reel_share stores a fractional value round-trip', () => {
+  const db = makeInsDb();
+  ins(db, 'reely', 0.83);
+  assert.strictEqual(db.prepare("SELECT reel_share r FROM suggested_accounts WHERE username='reely'").get().r, 0.83);
+});
+
+test('persist: unknown reel_share stores as NULL', () => {
+  const db = makeInsDb();
+  ins(db, 'mystery', null);
+  assert.strictEqual(db.prepare("SELECT reel_share r FROM suggested_accounts WHERE username='mystery'").get().r, null);
+});

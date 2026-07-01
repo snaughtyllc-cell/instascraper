@@ -194,6 +194,7 @@ async function initDB() {
       suggestion_score REAL DEFAULT 0,
       status TEXT DEFAULT 'pending',
       snoozed_until TEXT DEFAULT NULL,
+      reel_share REAL DEFAULT NULL,
       discovered_at TEXT DEFAULT ${NOW_DEFAULT},
       reviewed_at TEXT
     )
@@ -277,6 +278,7 @@ async function initDB() {
       `ALTER TABLE tracked_accounts ADD COLUMN IF NOT EXISTS last_attempt_at TEXT DEFAULT NULL`,
       `ALTER TABLE tracked_accounts ADD COLUMN IF NOT EXISTS consecutive_failures INTEGER DEFAULT 0`,
       `ALTER TABLE tracked_accounts ADD COLUMN IF NOT EXISTS last_discovery_at TEXT DEFAULT NULL`,
+      `ALTER TABLE suggested_accounts ADD COLUMN IF NOT EXISTS reel_share REAL DEFAULT NULL`,
     ];
     for (const sql of migrations) {
       try { await db.query(sql); } catch (e) { /* ignore */ }
@@ -293,6 +295,7 @@ async function initDB() {
       `ALTER TABLE tracked_accounts ADD COLUMN last_attempt_at TEXT DEFAULT NULL`,
       `ALTER TABLE tracked_accounts ADD COLUMN consecutive_failures INTEGER DEFAULT 0`,
       `ALTER TABLE tracked_accounts ADD COLUMN last_discovery_at TEXT DEFAULT NULL`,
+      `ALTER TABLE suggested_accounts ADD COLUMN reel_share REAL DEFAULT NULL`,
     ];
     for (const sql of migrations) {
       try { await db.query(sql); } catch (e) { /* column already exists */ }
