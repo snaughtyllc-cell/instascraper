@@ -762,6 +762,10 @@ class InstagramScraper {
       if (!candidate.postsPerWeek) candidate.postsPerWeek = 0;
       if (!candidate.bio) candidate.bio = '';
       if (!candidate.contentBreakdown) candidate.contentBreakdown = '';
+      // reelShare: default UNKNOWN (null), not 0 — a real 0 (no reels) must survive as a
+      // known value, so guard on undefined rather than falsiness. The DB-cache path below
+      // leaves it null (posts breakdown isn't recomputed there); the Apify path fills it in.
+      if (candidate.reelShare === undefined) candidate.reelShare = null;
       if (!candidate.topHashtags) candidate.topHashtags = '';
 
       const existing = await pool.query(
@@ -802,6 +806,7 @@ class InstagramScraper {
           candidate.avgEr = profile.avgEr || 0;
           candidate.postsPerWeek = profile.postsPerWeek || 0;
           candidate.contentBreakdown = profile.contentBreakdown || '';
+          candidate.reelShare = profile.reelShare ?? null; // may be null (profile had no posts)
           if (profile.topHashtags) candidate.topHashtags = profile.topHashtags;
         }
       } catch (err) {
@@ -888,11 +893,14 @@ class InstagramScraper {
       if (imageCount > 0) parts.push(`${Math.round(imageCount / total * 100)}% Images`);
       if (carouselCount > 0) parts.push(`${Math.round(carouselCount / total * 100)}% Carousels`);
     }
+    // Numeric reel-share (0..1) alongside the display string, for the reel-primary gate.
+    // null when there were no posts to compute from — "unknown", not a known 0.
+    const reelShare = total > 0 ? reelCount / total : null;
 
     const topHashtags = Object.entries(hashtagCounts)
       .sort((a, b) => b[1] - a[1]).slice(0, 8).map(([t]) => t).join(', ');
 
-    return { followers, bio, avgEr, postsPerWeek, contentBreakdown: parts.join(', '), topHashtags };
+    return { followers, bio, avgEr, postsPerWeek, contentBreakdown: parts.join(', '), reelShare, topHashtags };
   }
 
   async importByUrls(urls) {

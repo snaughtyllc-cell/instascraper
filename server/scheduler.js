@@ -60,7 +60,21 @@ function discoveryConfig(env = process.env) {
   return {
     maxSources: Math.floor(num(env.DISCOVERY_MAX_SOURCES, 5)),
     enrichMax: Math.floor(num(env.DISCOVERY_ENRICH_MAX, 8)),
+    // "primarily reels" = ≥60% of recent posts are reels. InstaScraper is a reels tool,
+    // so non-reel-primary accounts are noise and shouldn't qualify. See qualifiesByReelShare.
+    minReelShare: num(env.DISCOVERY_MIN_REEL_SHARE, 0.60),
   };
+}
+
+// Reel-primary gate (pure, unit-tested). Mirrors the "drop males" gender filter:
+// exclude ONLY when reelShare is a known number below the threshold. Unknown reel-share
+// (null/undefined/non-finite — no posts available to compute it) is PARKED (kept), never
+// dropped for missing data, exactly like unknown gender.
+function qualifiesByReelShare(candidate, cfg = discoveryConfig()) {
+  const rs = candidate == null ? null : candidate.reelShare;
+  const n = Number(rs);
+  if (rs === null || rs === undefined || !Number.isFinite(n)) return true; // unknown → keep
+  return n >= cfg.minReelShare;
 }
 
 // Rotation: least-recently-discovered first (never-discovered = highest priority),
@@ -250,6 +264,11 @@ async function runDiscovery() {
     for (const c of fresh) {
       const gender = verdicts[c.username.toLowerCase()] || 'unknown';
       if (gender === 'male') { console.log(`[Discovery] Filtered out @${c.username} (male)`); continue; }
+      // Reel-primary gate: drop known non-reel-primary accounts; unknown reel-share is parked.
+      if (!qualifiesByReelShare(c, dcfg)) {
+        console.log(`[Discovery] Filtered out @${c.username} (reel-share ${Math.round(c.reelShare * 100)}% < ${Math.round(dcfg.minReelShare * 100)}%)`);
+        continue;
+      }
       c.gender = gender;
       if (gender === 'female') female++;
       freshKept.push(c);
@@ -262,10 +281,10 @@ async function runDiscovery() {
       const totalScore = scoreCandidate({ collabStrength: item.collabStrength, avgEr: item.avgEr, postsPerWeek: item.postsPerWeek });
       try {
         const ins = await pool.query(
-          `INSERT INTO suggested_accounts (username, source, followers, avg_er, posts_per_week, bio, content_breakdown, top_hashtags, relevance_reason, suggestion_score, gender)
-           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11) ON CONFLICT (username) DO NOTHING`,
+          `INSERT INTO suggested_accounts (username, source, followers, avg_er, posts_per_week, bio, content_breakdown, top_hashtags, relevance_reason, suggestion_score, gender, reel_share)
+           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12) ON CONFLICT (username) DO NOTHING`,
           [item.username, item.source || 'discovery', item.followers || 0, item.avgEr || 0, item.postsPerWeek || 0,
-           item.bio || '', item.contentBreakdown || '', item.topHashtags || '', item.relevanceReason || '', totalScore, item.gender || 'unknown']
+           item.bio || '', item.contentBreakdown || '', item.topHashtags || '', item.relevanceReason || '', totalScore, item.gender || 'unknown', item.reelShare ?? null]
         );
         if (ins.rowCount > 0) added++;
       } catch (e) { console.error(`[Discovery] insert failed for @${item.username}:`, e.message); }
@@ -357,4 +376,4 @@ function startScheduler(scraper) {
 
 function getSchedulerStatus() { return jobStatus; }
 
-module.exports = { startScheduler, getSchedulerStatus, runAutoScrape, runEngagementRollup, runAutoCleanup, runDiscovery, runIdeaGeneration, runThumbnailSweep, cadenceConfig, computeInterval, backoffDays, daysSince, isDue, selectDueAccounts, buildCadenceAccounts, discoveryConfig, selectDiscoverySources };
+module.exports = { startScheduler, getSchedulerStatus, runAutoScrape, runEngagementRollup, runAutoCleanup, runDiscovery, runIdeaGeneration, runThumbnailSweep, cadenceConfig, computeInterval, backoffDays, daysSince, isDue, selectDueAccounts, buildCadenceAccounts, discoveryConfig, selectDiscoverySources, qualifiesByReelShare };

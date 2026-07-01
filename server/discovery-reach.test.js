@@ -1,15 +1,45 @@
 const { test } = require('node:test');
 const assert = require('node:assert');
 const Database = require('better-sqlite3');
-const { selectDiscoverySources, discoveryConfig } = require('./scheduler');
+const { selectDiscoverySources, discoveryConfig, qualifiesByReelShare } = require('./scheduler');
 
 test('discoveryConfig: defaults + env override, non-numeric falls back', () => {
   const d = discoveryConfig({});
   assert.strictEqual(d.maxSources, 5);
   assert.strictEqual(d.enrichMax, 8);
-  const e = discoveryConfig({ DISCOVERY_MAX_SOURCES: '12', DISCOVERY_ENRICH_MAX: 'nope' });
+  assert.strictEqual(d.minReelShare, 0.60); // "primarily reels" default
+  const e = discoveryConfig({ DISCOVERY_MAX_SOURCES: '12', DISCOVERY_ENRICH_MAX: 'nope', DISCOVERY_MIN_REEL_SHARE: '0.75' });
   assert.strictEqual(e.maxSources, 12);
   assert.strictEqual(e.enrichMax, 8); // bad value → default
+  assert.strictEqual(e.minReelShare, 0.75);
+  assert.strictEqual(discoveryConfig({ DISCOVERY_MIN_REEL_SHARE: 'nope' }).minReelShare, 0.60); // bad → default
+});
+
+// Reel-primary gate: InstaScraper is a reels tool, so non-reel-primary accounts are noise.
+// Mirrors the "drop males" gender gate — known-below-threshold excluded, unknown parked (kept).
+test('qualifiesByReelShare: at/above threshold qualifies, below excluded', () => {
+  const cfg = { minReelShare: 0.60 };
+  assert.strictEqual(qualifiesByReelShare({ reelShare: 0.83 }, cfg), true);  // primarily reels
+  assert.strictEqual(qualifiesByReelShare({ reelShare: 0.60 }, cfg), true);  // boundary → qualifies (>=)
+  assert.strictEqual(qualifiesByReelShare({ reelShare: 0.59 }, cfg), false); // just below → excluded
+  assert.strictEqual(qualifiesByReelShare({ reelShare: 0.17 }, cfg), false); // mostly carousels
+  assert.strictEqual(qualifiesByReelShare({ reelShare: 0 }, cfg), false);    // known zero reels → excluded
+});
+
+test('qualifiesByReelShare: unknown reel-share is kept (parked, not dropped)', () => {
+  const cfg = { minReelShare: 0.60 };
+  assert.strictEqual(qualifiesByReelShare({ reelShare: null }, cfg), true);      // no posts to compute → keep
+  assert.strictEqual(qualifiesByReelShare({ reelShare: undefined }, cfg), true); // field absent → keep
+  assert.strictEqual(qualifiesByReelShare({}, cfg), true);                       // never enriched → keep
+  assert.strictEqual(qualifiesByReelShare({ reelShare: NaN }, cfg), true);       // non-finite → treat as unknown
+});
+
+test('qualifiesByReelShare: honors a custom threshold and defaults cfg from env', () => {
+  assert.strictEqual(qualifiesByReelShare({ reelShare: 0.55 }, { minReelShare: 0.50 }), true);
+  assert.strictEqual(qualifiesByReelShare({ reelShare: 0.55 }, { minReelShare: 0.70 }), false);
+  // No cfg arg → falls back to discoveryConfig() default (0.60).
+  assert.strictEqual(qualifiesByReelShare({ reelShare: 0.90 }), true);
+  assert.strictEqual(qualifiesByReelShare({ reelShare: 0.10 }), false);
 });
 
 test('selectDiscoverySources: never-discovered first, then oldest-first, capped', () => {
