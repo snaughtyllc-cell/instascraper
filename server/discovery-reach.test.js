@@ -7,9 +7,12 @@ test('discoveryConfig: defaults + env override, non-numeric falls back', () => {
   const d = discoveryConfig({});
   assert.strictEqual(d.maxSources, 5);
   assert.strictEqual(d.enrichMax, 8);
+  assert.strictEqual(d.reelsMax, 8); // default reel-preview capture cap
   const e = discoveryConfig({ DISCOVERY_MAX_SOURCES: '12', DISCOVERY_ENRICH_MAX: 'nope' });
   assert.strictEqual(e.maxSources, 12);
   assert.strictEqual(e.enrichMax, 8); // bad value → default
+  assert.strictEqual(discoveryConfig({ DISCOVERY_REELS_MAX: '3' }).reelsMax, 3);
+  assert.strictEqual(discoveryConfig({ DISCOVERY_REELS_MAX: 'nope' }).reelsMax, 8); // bad → default
 });
 
 test('selectDiscoverySources: never-discovered first, then oldest-first, capped', () => {

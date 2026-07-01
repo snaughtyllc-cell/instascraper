@@ -61,6 +61,7 @@ function discoveryConfig(env = process.env) {
     maxSources: Math.floor(num(env.DISCOVERY_MAX_SOURCES, 5)),
     enrichMax: Math.floor(num(env.DISCOVERY_ENRICH_MAX, 8)),
     minReelShare: num(env.DISCOVERY_MIN_REEL_SHARE, 0.60),
+    reelsMax: Math.floor(num(env.DISCOVERY_REELS_MAX, 8)),
   };
 }
 
