@@ -75,6 +75,34 @@ function pickTopReels(items, n = 3) {
   });
 }
 
+// Suggestion scoring from an account's captured top reels — reach (log-scaled avg
+// views) + engagement (view-based ER). Returns an integer 0..100. Pure — unit-tested.
+function scoreConfig(env = process.env) {
+  const num = (v, d) => { const n = Number(v); return Number.isFinite(n) && n >= 0 ? n : d; };
+  return {
+    viewFloor: num(env.SUGGEST_VIEW_FLOOR, 1000),
+    viewTarget: num(env.SUGGEST_VIEW_TARGET, 1000000),
+    reachWeight: num(env.SUGGEST_REACH_WEIGHT, 60),
+    erTarget: num(env.SUGGEST_ER_TARGET, 6),
+    erWeight: num(env.SUGGEST_ER_WEIGHT, 40),
+  };
+}
+
+function scoreReels(reels, cfg = scoreConfig()) {
+  if (!Array.isArray(reels) || reels.length === 0) return 0;
+  const clamp = (x, lo, hi) => Math.max(lo, Math.min(hi, x));
+  const n = reels.length;
+  const avgViews = reels.reduce((s, r) => s + (Number(r.viewCount) || 0), 0) / n;
+  const avgER = reels.reduce((s, r) => s + calcViewER(r.likeCount, r.commentCount, r.viewCount).er_percent, 0) / n;
+  const denom = Math.log10(cfg.viewTarget) - Math.log10(cfg.viewFloor);
+  const reachFrac = denom > 0
+    ? clamp((Math.log10(Math.max(avgViews, 1)) - Math.log10(cfg.viewFloor)) / denom, 0, 1)
+    : 0;
+  const reachPts = reachFrac * cfg.reachWeight;
+  const erPts = clamp(avgER / (cfg.erTarget || 1), 0, 1) * cfg.erWeight;
+  return Math.round(reachPts + erPts);
+}
+
 // Attach each account's reels (grouped by username, ordered by rank) as `top_reels`.
 // Pure — unit-tested.
 function attachTopReels(accounts, reels) {
@@ -1119,6 +1147,8 @@ module.exports.hasActiveJob = hasActiveJob;
 module.exports.extractViews = extractViews;
 module.exports.isErrorStubResponse = isErrorStubResponse;
 module.exports.pickTopReels = pickTopReels;
+module.exports.scoreReels = scoreReels;
+module.exports.scoreConfig = scoreConfig;
 module.exports.attachTopReels = attachTopReels;
 module.exports.calcER = calcER;
 module.exports.normalizeTaggedUsers = normalizeTaggedUsers;
