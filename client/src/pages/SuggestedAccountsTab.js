@@ -1,6 +1,8 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import { getSuggestedAccounts, approveSuggested, dismissSuggested, snoozeSuggested, triggerJob, approveSuggestedBulk, scrapeTrackedBulk } from '../api';
 
+const API_URL = process.env.REACT_APP_API_URL || 'http://localhost:4000';
+
 function formatCount(n) {
   if (!n) return '0';
   if (n >= 1_000_000) return (n / 1_000_000).toFixed(1) + 'M';
@@ -18,6 +20,50 @@ function erStyle(er) {
   if (er >= 6) return ER_COLORS.high;
   if (er >= 2) return ER_COLORS.mid;
   return ER_COLORS.low;
+}
+
+function SuggestedReel({ reel }) {
+  const [playing, setPlaying] = useState(false);
+  const openIG = () => window.open(reel.permalink || `https://instagram.com/reel/${reel.shortcode}/`, '_blank', 'noopener');
+  if (playing && reel.video_url) {
+    return (
+      <video
+        src={reel.video_url}
+        controls
+        autoPlay
+        onError={() => { setPlaying(false); openIG(); }}
+        className="w-full aspect-[9/16] object-cover rounded-lg bg-black"
+      />
+    );
+  }
+  return (
+    <button
+      onClick={() => (reel.video_url ? setPlaying(true) : openIG())}
+      className="relative w-full aspect-[9/16] rounded-lg overflow-hidden bg-gray-800 group/reel"
+    >
+      <img
+        src={`${API_URL}/suggested/reels/${reel.id}/thumb`}
+        alt=""
+        loading="lazy"
+        className="w-full h-full object-cover"
+      />
+      <span className="absolute inset-0 flex items-center justify-center bg-black/30 opacity-0 group-hover/reel:opacity-100 transition-opacity">
+        <svg className="w-6 h-6 text-white" fill="currentColor" viewBox="0 0 24 24"><path d="M8 5v14l11-7z" /></svg>
+      </span>
+      <span className="absolute bottom-1 left-1 bg-black/70 text-white text-[10px] px-1.5 py-0.5 rounded">
+        {formatCount(reel.view_count)}
+      </span>
+    </button>
+  );
+}
+
+function SuggestedReelStrip({ reels }) {
+  if (!reels || reels.length === 0) return null;
+  return (
+    <div className="grid grid-cols-3 gap-1.5">
+      {reels.map((r) => <SuggestedReel key={r.id} reel={r} />)}
+    </div>
+  );
 }
 
 export default function SuggestedAccountsTab() {
@@ -173,6 +219,9 @@ export default function SuggestedAccountsTab() {
           <div className="text-[10px] text-gray-500">Posts/wk</div>
         </div>
       </div>
+
+      {/* Top reels */}
+      <SuggestedReelStrip reels={s.top_reels} />
 
       {/* Content breakdown */}
       {s.content_breakdown && (
