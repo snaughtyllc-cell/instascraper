@@ -1055,7 +1055,15 @@ class InstagramScraper {
         downloadThumbnail({ shortcode: r.shortcode, thumbnail_url: r.thumbnailUrl }).catch(() => {});
       }
     }
-    return reels.length;
+    // Reel-performance score → the account's suggestion_score (0 when no reels got through,
+    // which correctly sinks blocked/private accounts below the display threshold).
+    const score = scoreReels(reels, scoreConfig());
+    try {
+      await pool.query('UPDATE suggested_accounts SET suggestion_score = $1 WHERE username = $2', [score, username]);
+    } catch (e) {
+      console.error(`[Reels] score update failed for @${username}:`, e.message);
+    }
+    return { count: reels.length, score };
   }
 
   async importByUrls(urls) {
