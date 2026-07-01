@@ -61,7 +61,7 @@ function discoveryConfig(env = process.env) {
     maxSources: Math.floor(num(env.DISCOVERY_MAX_SOURCES, 5)),
     enrichMax: Math.floor(num(env.DISCOVERY_ENRICH_MAX, 8)),
     minReelShare: num(env.DISCOVERY_MIN_REEL_SHARE, 0.60),
-    reelsMax: Math.floor(num(env.DISCOVERY_REELS_MAX, 8)),
+    reelsMax: Math.floor(num(env.DISCOVERY_REELS_MAX, 0)),
   };
 }
 
@@ -287,7 +287,7 @@ async function runDiscovery() {
         );
         if (ins.rowCount > 0) {
           added++;
-          if (!reelsBudgetStop && reelsCaptured < dcfg.reelsMax) {
+          if (!reelsBudgetStop && (dcfg.reelsMax === 0 || reelsCaptured < dcfg.reelsMax)) {
             try {
               await scraperInstance.captureTopReels(item.username);
               reelsCaptured++;
@@ -301,20 +301,17 @@ async function runDiscovery() {
     }
 
     // Accumulate onto still-pending suggestions re-surfaced by a new source this cycle:
-    // merge the source token, bump score (monotonic — never demotes), refresh the reason.
+    // merge the source token, refresh the reason. Score is NOT touched here — it's reel-based
+    // now (captureTopReels sets it), and the old collab-derived score would corrupt it.
     for (const item of repeats) {
-      const totalScore = scoreCandidate({ collabStrength: item.collabStrength, avgEr: item.avgEr, postsPerWeek: item.postsPerWeek });
       const token = item.sourceAccount || item.source || 'discovery';
       try {
-        // Placeholders must appear once, in ascending textual order: the dual-mode
-        // shim strips $n → ? positionally, so duplicated/out-of-order $n break sqlite.
         const upd = await pool.query(
           `UPDATE suggested_accounts
-             SET suggestion_score = CASE WHEN $1 > suggestion_score THEN $2 ELSE suggestion_score END,
-                 source = CASE WHEN (',' || source || ',') LIKE ('%,' || $3 || ',%') THEN source ELSE source || ',' || $4 END,
-                 relevance_reason = $5
-           WHERE username = $6 AND status = 'pending'`,
-          [totalScore, totalScore, token, token, item.relevanceReason || '', item.username]
+             SET source = CASE WHEN (',' || source || ',') LIKE ('%,' || $1 || ',%') THEN source ELSE source || ',' || $2 END,
+                 relevance_reason = $3
+           WHERE username = $4 AND status = 'pending'`,
+          [token, token, item.relevanceReason || '', item.username]
         );
         if (upd.rowCount > 0) bumped++;
       } catch (e) { console.error(`[Discovery] accumulate failed for @${item.username}:`, e.message); }

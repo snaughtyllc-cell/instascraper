@@ -356,7 +356,7 @@ app.get('/suggested', async (req, res) => {
     const names = accounts.map(a => a.username);
     const ph = names.map((_, i) => `$${i + 1}`).join(',');
     reels = (await pool.query(
-      `SELECT id, username, shortcode, view_count, video_url, permalink, rank
+      `SELECT id, username, shortcode, view_count, like_count, comment_count, video_url, permalink, rank
        FROM suggested_reels WHERE username IN (${ph}) ORDER BY rank`,
       names
     )).rows;
