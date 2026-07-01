@@ -763,6 +763,9 @@ class InstagramScraper {
       if (!candidate.bio) candidate.bio = '';
       if (!candidate.contentBreakdown) candidate.contentBreakdown = '';
       if (!candidate.topHashtags) candidate.topHashtags = '';
+      // null = unknown reel dominance (DB-enriched or un-enriched candidates); the
+      // reels-tool qualifier parks unknowns. Only the Apify path below fills a number.
+      if (candidate.reelShare === undefined) candidate.reelShare = null;
 
       const existing = await pool.query(
         `SELECT COUNT(*) as cnt, ROUND(AVG(er_percent)::numeric, 2) as avg_er, MAX(followers_at_scrape) as followers
@@ -803,6 +806,7 @@ class InstagramScraper {
           candidate.postsPerWeek = profile.postsPerWeek || 0;
           candidate.contentBreakdown = profile.contentBreakdown || '';
           if (profile.topHashtags) candidate.topHashtags = profile.topHashtags;
+          candidate.reelShare = profile.reelShare ?? null;
         }
       } catch (err) {
         console.log(`[Discovery] Could not enrich @${candidate.username}: ${err.message}`);
@@ -888,11 +892,14 @@ class InstagramScraper {
       if (imageCount > 0) parts.push(`${Math.round(imageCount / total * 100)}% Images`);
       if (carouselCount > 0) parts.push(`${Math.round(carouselCount / total * 100)}% Carousels`);
     }
+    // Numeric reel dominance for the reels-tool qualifier. null when we saw no posts
+    // to classify (unknown), so discovery parks rather than guess-drops the account.
+    const reelShare = total > 0 ? reelCount / total : null;
 
     const topHashtags = Object.entries(hashtagCounts)
       .sort((a, b) => b[1] - a[1]).slice(0, 8).map(([t]) => t).join(', ');
 
-    return { followers, bio, avgEr, postsPerWeek, contentBreakdown: parts.join(', '), topHashtags };
+    return { followers, bio, avgEr, postsPerWeek, contentBreakdown: parts.join(', '), topHashtags, reelShare };
   }
 
   async importByUrls(urls) {

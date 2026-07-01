@@ -60,7 +60,16 @@ function discoveryConfig(env = process.env) {
   return {
     maxSources: Math.floor(num(env.DISCOVERY_MAX_SOURCES, 5)),
     enrichMax: Math.floor(num(env.DISCOVERY_ENRICH_MAX, 8)),
+    minReelShare: num(env.DISCOVERY_MIN_REEL_SHARE, 0.60),
   };
+}
+
+// Reels-tool qualifier: keep only accounts primarily posting reels. Pure — unit-tested.
+// Unknown share (null/undefined/non-finite) is PARKED (kept), mirroring unknown gender —
+// we never guess-drop a candidate we couldn't measure.
+function qualifiesByReelShare(reelShare, minReelShare) {
+  if (typeof reelShare !== 'number' || !Number.isFinite(reelShare)) return true;
+  return reelShare >= minReelShare;
 }
 
 // Rotation: least-recently-discovered first (never-discovered = highest priority),
@@ -250,6 +259,12 @@ async function runDiscovery() {
     for (const c of fresh) {
       const gender = verdicts[c.username.toLowerCase()] || 'unknown';
       if (gender === 'male') { console.log(`[Discovery] Filtered out @${c.username} (male)`); continue; }
+      // Reels tool: hard-drop accounts that aren't primarily reels. Unknown share is parked
+      // (kept) like unknown gender — c.reelShare is a finite number only when qualification fails.
+      if (!qualifiesByReelShare(c.reelShare, dcfg.minReelShare)) {
+        console.log(`[Discovery] Filtered out @${c.username} (reel_share ${Math.round(c.reelShare * 100)}%)`);
+        continue;
+      }
       c.gender = gender;
       if (gender === 'female') female++;
       freshKept.push(c);
@@ -262,10 +277,10 @@ async function runDiscovery() {
       const totalScore = scoreCandidate({ collabStrength: item.collabStrength, avgEr: item.avgEr, postsPerWeek: item.postsPerWeek });
       try {
         const ins = await pool.query(
-          `INSERT INTO suggested_accounts (username, source, followers, avg_er, posts_per_week, bio, content_breakdown, top_hashtags, relevance_reason, suggestion_score, gender)
-           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11) ON CONFLICT (username) DO NOTHING`,
+          `INSERT INTO suggested_accounts (username, source, followers, avg_er, posts_per_week, bio, content_breakdown, top_hashtags, relevance_reason, suggestion_score, gender, reel_share)
+           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12) ON CONFLICT (username) DO NOTHING`,
           [item.username, item.source || 'discovery', item.followers || 0, item.avgEr || 0, item.postsPerWeek || 0,
-           item.bio || '', item.contentBreakdown || '', item.topHashtags || '', item.relevanceReason || '', totalScore, item.gender || 'unknown']
+           item.bio || '', item.contentBreakdown || '', item.topHashtags || '', item.relevanceReason || '', totalScore, item.gender || 'unknown', item.reelShare ?? null]
         );
         if (ins.rowCount > 0) added++;
       } catch (e) { console.error(`[Discovery] insert failed for @${item.username}:`, e.message); }
@@ -355,4 +370,4 @@ function startScheduler(scraper) {
 
 function getSchedulerStatus() { return jobStatus; }
 
-module.exports = { startScheduler, getSchedulerStatus, runAutoScrape, runEngagementRollup, runAutoCleanup, runDiscovery, runIdeaGeneration, runThumbnailSweep, cadenceConfig, computeInterval, backoffDays, daysSince, isDue, selectDueAccounts, buildCadenceAccounts, discoveryConfig, selectDiscoverySources };
+module.exports = { startScheduler, getSchedulerStatus, runAutoScrape, runEngagementRollup, runAutoCleanup, runDiscovery, runIdeaGeneration, runThumbnailSweep, cadenceConfig, computeInterval, backoffDays, daysSince, isDue, selectDueAccounts, buildCadenceAccounts, discoveryConfig, selectDiscoverySources, qualifiesByReelShare };
