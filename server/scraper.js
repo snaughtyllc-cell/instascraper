@@ -75,6 +75,18 @@ function pickTopReels(items, n = 3) {
   });
 }
 
+// Attach each account's reels (grouped by username, ordered by rank) as `top_reels`.
+// Pure — unit-tested.
+function attachTopReels(accounts, reels) {
+  const byUser = new Map();
+  for (const r of (reels || [])) {
+    if (!byUser.has(r.username)) byUser.set(r.username, []);
+    byUser.get(r.username).push(r);
+  }
+  for (const list of byUser.values()) list.sort((a, b) => (a.rank || 0) - (b.rank || 0));
+  return (accounts || []).map(a => ({ ...a, top_reels: byUser.get(a.username) || [] }));
+}
+
 // Collaborators: the reel actor returns taggedUsers/usertags per post. Extract
 // a clean, de-duped list of handles so discovery can mine collab partners later.
 function normalizeTaggedUsers(item, ownerHandle = '') {
@@ -1107,6 +1119,7 @@ module.exports.hasActiveJob = hasActiveJob;
 module.exports.extractViews = extractViews;
 module.exports.isErrorStubResponse = isErrorStubResponse;
 module.exports.pickTopReels = pickTopReels;
+module.exports.attachTopReels = attachTopReels;
 module.exports.calcER = calcER;
 module.exports.normalizeTaggedUsers = normalizeTaggedUsers;
 module.exports.parseTaggedUsers = parseTaggedUsers;

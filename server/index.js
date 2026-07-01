@@ -8,7 +8,7 @@ const fs = require('fs');
 const fetch = require('node-fetch');
 const pool = require('./db');
 const InstagramScraper = require('./scraper');
-const { BudgetExceededError, usageSummary, suggestionsOrderClause } = InstagramScraper;
+const { BudgetExceededError, usageSummary, suggestionsOrderClause, attachTopReels } = InstagramScraper;
 const { startScheduler, getSchedulerStatus, runAutoScrape, runEngagementRollup, runAutoCleanup, runDiscovery, runIdeaGeneration } = require('./scheduler');
 const { asyncHandler, dbErrorMiddleware, initWithRetry, wrapAsyncRoutes } = require('./db-health');
 const health = require('./health');
@@ -350,7 +350,18 @@ app.get('/suggested', async (req, res) => {
   if (status) { where += ` AND status = $${idx++}`; params.push(status); }
   const orderBy = suggestionsOrderClause(sort);
   const result = await pool.query(`SELECT * FROM suggested_accounts ${where} ORDER BY ${orderBy}`, params);
-  res.json(result.rows);
+  const accounts = result.rows;
+  let reels = [];
+  if (accounts.length) {
+    const names = accounts.map(a => a.username);
+    const ph = names.map((_, i) => `$${i + 1}`).join(',');
+    reels = (await pool.query(
+      `SELECT id, username, shortcode, view_count, video_url, permalink, rank
+       FROM suggested_reels WHERE username IN (${ph}) ORDER BY rank`,
+      names
+    )).rows;
+  }
+  res.json(attachTopReels(accounts, reels));
 });
 
 app.post('/suggested/:username/approve', async (req, res) => {
@@ -825,6 +836,15 @@ app.get('/thumb/:postId', asyncHandler(async (req, res) => {
   const post = result.rows[0];
   if (!post || !post.thumbnail_url) return res.status(404).send('No thumbnail');
   const r = await downloadThumbnail(post);
+  if (r.status === 'cached') return res.sendFile(r.path);
+  return res.status(502).json({ error: `thumbnail ${r.status}: ${r.error || ''}` });
+}));
+
+app.get('/suggested/reels/:id/thumb', asyncHandler(async (req, res) => {
+  const result = await pool.query('SELECT thumbnail_url, shortcode FROM suggested_reels WHERE id = $1', [Number(req.params.id)]);
+  const reel = result.rows[0];
+  if (!reel || !reel.thumbnail_url) return res.status(404).send('No thumbnail');
+  const r = await downloadThumbnail(reel);
   if (r.status === 'cached') return res.sendFile(r.path);
   return res.status(502).json({ error: `thumbnail ${r.status}: ${r.error || ''}` });
 }));

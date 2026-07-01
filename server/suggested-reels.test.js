@@ -46,3 +46,17 @@ test('pickTopReels: error-stub / non-array input returns []', () => {
   assert.deepStrictEqual(pickTopReels([{ requestErrorMessages: ['BLOCKED'] }], 3), []);
   assert.deepStrictEqual(pickTopReels(null, 3), []);
 });
+
+const { attachTopReels } = require('./scraper');
+
+test('attachTopReels: groups reels by username, ordered by rank; empty when none', () => {
+  const accounts = [{ username: 'alice' }, { username: 'bob' }];
+  const reels = [
+    { id: 2, username: 'alice', rank: 2, shortcode: 'a2' },
+    { id: 1, username: 'alice', rank: 1, shortcode: 'a1' },
+    { id: 9, username: 'carol', rank: 1, shortcode: 'c1' },
+  ];
+  const out = attachTopReels(accounts, reels);
+  assert.deepStrictEqual(out[0].top_reels.map(r => r.shortcode), ['a1', 'a2']); // rank order
+  assert.deepStrictEqual(out[1].top_reels, []); // bob has none
+});
