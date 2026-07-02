@@ -282,6 +282,20 @@ async function initDB() {
     )
   `);
 
+  await db.query(`
+    CREATE TABLE IF NOT EXISTS watch_terms (
+      id ${SERIAL},
+      term TEXT NOT NULL,
+      kind TEXT DEFAULT 'keyword',
+      source TEXT DEFAULT 'user',
+      status TEXT DEFAULT 'active',
+      added_at TEXT DEFAULT ${NOW_DEFAULT},
+      last_run_at TEXT DEFAULT NULL,
+      notes TEXT DEFAULT '',
+      UNIQUE(term, kind)
+    )
+  `);
+
   // Migrations for existing tables
   if (USE_PG) {
     const migrations = [
