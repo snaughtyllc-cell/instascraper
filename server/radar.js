@@ -59,4 +59,63 @@ function passesFloors(reel, cfg, nowMs = Date.now()) {
   return ageDays >= 0 && ageDays <= cfg.maxAgeDays;
 }
 
-module.exports = { radarConfig, normalizeSearchReel, passesFloors };
+// PURE. Active terms, oldest-run first (never-run first), excluded twin suppressed, capped.
+function selectWatchTerms(terms, max) {
+  const excluded = new Set((terms || []).filter(t => t.status === 'excluded').map(t => t.term));
+  const ms = (iso) => { const t = iso ? new Date(iso).getTime() : NaN; return Number.isFinite(t) ? t : -1; };
+  return (terms || [])
+    .filter(t => t.status === 'active' && !excluded.has(t.term))
+    .sort((a, b) => {
+      const d = ms(a.last_run_at) - ms(b.last_run_at);
+      if (d !== 0) return d;
+      return String(a.term).localeCompare(String(b.term));
+    })
+    .slice(0, Math.max(0, max | 0));
+}
+
+// PURE. Drop falsy/known/repeat shortcodes (order-preserving).
+function dedupeReels(reels, { knownShortcodes = new Set() } = {}) {
+  const seen = new Set();
+  const out = [];
+  for (const r of reels || []) {
+    if (!r.shortcode || knownShortcodes.has(r.shortcode) || seen.has(r.shortcode)) continue;
+    seen.add(r.shortcode);
+    out.push(r);
+  }
+  return out;
+}
+
+// PURE. Drop reels whose author (lowercased) is blocked.
+function excludeAuthors(reels, { blockedHandles = new Set() } = {}) {
+  return (reels || []).filter(r => !blockedHandles.has(String(r.ownerUsername || '').toLowerCase()));
+}
+
+// PURE. Collapse surviving reels to distinct authors; the highest-view reel
+// wins the term + reason. Sort by best views desc, then username; cap authorsMax.
+function selectRollupAuthors(reels, cfg) {
+  const byAuthor = new Map();
+  for (const r of reels || []) {
+    const u = r.ownerUsername;
+    if (!u) continue;
+    const key = u.toLowerCase();
+    const views = Number(r.viewCount) || 0;
+    const cur = byAuthor.get(key);
+    if (!cur) {
+      byAuthor.set(key, { username: u, term: r.term, bestViews: views });
+    } else if (views > cur.bestViews) {
+      cur.bestViews = views;
+      cur.term = r.term;
+    }
+  }
+  return [...byAuthor.values()]
+    .sort((a, b) => (b.bestViews - a.bestViews) || String(a.username).localeCompare(String(b.username)))
+    .slice(0, Math.max(0, cfg.authorsMax | 0))
+    .map(a => ({
+      username: a.username,
+      term: a.term,
+      source: `radar:${a.term}`,
+      reason: `found via '${a.term}' — ${a.bestViews.toLocaleString('en-US')} view reel`,
+    }));
+}
+
+module.exports = { radarConfig, normalizeSearchReel, passesFloors, selectWatchTerms, dedupeReels, excludeAuthors, selectRollupAuthors };

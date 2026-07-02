@@ -88,3 +88,43 @@ test('passesFloors: minViews + age window, future-dated rejected', () => {
   assert.strictEqual(radar.passesFloors({ ...ok, postedAt: '2026-07-05T00:00:00Z' }, cfg, now), false); // future
   assert.strictEqual(radar.passesFloors({ ...ok, postedAt: null }, cfg, now), false);
 });
+
+test('selectWatchTerms: active only, excluded suppresses twin, null-first, cap', () => {
+  const terms = [
+    { id: 1, term: 'a', kind: 'keyword', status: 'active',   last_run_at: '2026-06-01T00:00:00Z' },
+    { id: 2, term: 'b', kind: 'keyword', status: 'active',   last_run_at: null },
+    { id: 3, term: 'c', kind: 'keyword', status: 'paused',   last_run_at: null },
+    { id: 4, term: 'd', kind: 'keyword', status: 'active',   last_run_at: '2026-05-01T00:00:00Z' },
+    { id: 5, term: 'd', kind: 'keyword', status: 'excluded', last_run_at: null }, // excludes 'd'
+  ];
+  assert.deepStrictEqual(radar.selectWatchTerms(terms, 10).map(t => t.term), ['b', 'a']);
+  assert.deepStrictEqual(radar.selectWatchTerms(terms, 1).map(t => t.term), ['b']); // cap
+});
+
+test('dedupeReels / excludeAuthors (author-centric shape)', () => {
+  const reels = [
+    { shortcode: 'A', ownerUsername: 'x' },
+    { shortcode: 'A', ownerUsername: 'x' },
+    { shortcode: 'B', ownerUsername: 'y' },
+    { shortcode: 'C', ownerUsername: 'z' },
+  ];
+  const d = radar.dedupeReels(reels, { knownShortcodes: new Set(['C']) });
+  assert.deepStrictEqual(d.map(r => r.shortcode), ['A', 'B']);
+  const e = radar.excludeAuthors(d, { blockedHandles: new Set(['x']) });
+  assert.deepStrictEqual(e.map(r => r.shortcode), ['B']);
+});
+
+test('selectRollupAuthors: distinct authors, best reel wins term, sorted, capped', () => {
+  const cfg = radar.radarConfig({ RADAR_AUTHORS_MAX: '2' });
+  const reels = [
+    { ownerUsername: 'a', viewCount: 100000, term: 'blonde' },
+    { ownerUsername: 'a', viewCount: 200000, term: 'petite' }, // best → term 'petite'
+    { ownerUsername: 'b', viewCount: 150000, term: 'blonde' },
+    { ownerUsername: 'c', viewCount: 50000,  term: 'blonde' }, // dropped by cap=2
+  ];
+  const out = radar.selectRollupAuthors(reels, cfg);
+  assert.deepStrictEqual(out.map(a => a.username), ['a', 'b']); // sorted by best views desc, capped
+  assert.strictEqual(out[0].source, 'radar:petite');
+  assert.ok(out[0].reason.includes("found via 'petite'"));
+  assert.ok(out[0].reason.includes('view reel'));
+});
