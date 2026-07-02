@@ -1,4 +1,5 @@
 const pool = require('./db');
+const { isErrorStubResponse } = require('./scraper');
 
 const DEFAULT_ACTOR_ID = 'data-slayer~instagram-search-reels';
 
@@ -118,4 +119,119 @@ function selectRollupAuthors(reels, cfg) {
     }));
 }
 
-module.exports = { radarConfig, normalizeSearchReel, passesFloors, selectWatchTerms, dedupeReels, excludeAuthors, selectRollupAuthors };
+// Apify glue: run the keyword-search actor for one term. Returns raw items.
+async function harvestKeyword(scraper, term, cfg) {
+  const run = await scraper._startApifyRun(
+    cfg.actorId,
+    { query: term, maxPages: cfg.maxPages },
+    { purpose: 'radar', query: term }
+  );
+  const items = await scraper._waitForRun(run.id, 20); // ~60s cap; keyword search is fast
+  return items || [];
+}
+
+const radarState = { running: false, lastRun: null, message: '' };
+function __setRunning(v) { radarState.running = v; }   // test hook
+function getRadarStatus() { return radarState; }
+
+// Orchestrator (mirrors runDiscovery): keyword → harvest → normalize → floors/dedupe/
+// exclude → distinct authors → gender-drop-males → INSERT suggested_accounts →
+// captureTopReels (budget-guarded). Emits one [Metric] line.
+async function runRadar(scraper, { env = process.env } = {}) {
+  if (radarState.running) return { started: false, reason: 'already_running' };
+  if (!scraper || !scraper.apiKey) return { started: false, reason: 'no_api_key' };
+  radarState.running = true;
+  radarState.lastRun = new Date().toISOString();
+  const cfg = radarConfig(env);
+  const now = Date.now();
+  const stats = { started: true, terms: 0, authors: 0, added: 0, reels: 0 };
+  try {
+    const termsRes = await pool.query('SELECT id, term, kind, source, status, last_run_at FROM watch_terms');
+    const chosen = selectWatchTerms(termsRes.rows, cfg.termsPerCycle);
+    stats.terms = chosen.length;
+
+    // Skip authors already tracked or already suggested (any status).
+    const trackedRes = await pool.query('SELECT username FROM tracked_accounts');
+    const suggestedRes = await pool.query('SELECT username FROM suggested_accounts');
+    const blocked = new Set(
+      [...trackedRes.rows, ...suggestedRes.rows].map(x => String(x.username).toLowerCase())
+    );
+
+    const known = new Set();   // intra-cycle shortcode dedupe
+    const surviving = [];
+    for (const term of chosen) {
+      let raw = [];
+      try {
+        raw = await harvestKeyword(scraper, term.term, cfg);
+      } catch (e) {
+        if (e && e.name === 'BudgetExceededError') { console.log(`[Metric] radar_budget_stop term=${term.term}`); break; }
+        console.error(`[Radar] harvest failed for '${term.term}':`, e.message);
+      }
+      // Stamp last_run_at best-effort (dual-mode NOW()).
+      try {
+        await pool.query(`UPDATE watch_terms SET last_run_at = TO_CHAR(NOW(), 'YYYY-MM-DD"T"HH24:MI:SS"Z"') WHERE id = $1`, [term.id]);
+      } catch (e) {}
+      // Third-party actor safety: an all-error-stub response means IG blocked us — skip.
+      if (isErrorStubResponse(raw)) { console.log(`[Radar] '${term.term}' harvest was all error-stubs — skipped`); continue; }
+
+      let reels = raw.map(it => normalizeSearchReel(it, term.term)).filter(Boolean);
+      reels = reels.filter(r => passesFloors(r, cfg, now));
+      reels = dedupeReels(reels, { knownShortcodes: known });
+      reels = excludeAuthors(reels, { blockedHandles: blocked });
+      reels.forEach(r => known.add(r.shortcode));
+      surviving.push(...reels);
+    }
+
+    const authors = selectRollupAuthors(surviving, cfg); // distinct, capped authorsMax
+
+    // Gender-classify once; drop males (mirror discovery). On failure: treat all as unknown.
+    let verdicts = {};
+    try {
+      verdicts = await scraper._classifyGenderBatch(
+        authors.map(a => ({ username: a.username, bio: '', captionSnippet: '', taggedBy: a.source }))
+      ) || {};
+    } catch (e) { console.error('[Radar] gender classify failed:', e.message); verdicts = {}; }
+    const kept = [];
+    for (const a of authors) {
+      const gender = verdicts[a.username.toLowerCase()] || 'unknown';
+      if (gender === 'male') { console.log(`[Radar] Filtered out @${a.username} (male)`); continue; }
+      a.gender = gender;
+      kept.push(a);
+    }
+    stats.authors = kept.length;
+
+    let budgetStop = false;
+    for (const a of kept) {
+      try {
+        const ins = await pool.query(
+          `INSERT INTO suggested_accounts (username, source, relevance_reason, gender)
+           VALUES ($1,$2,$3,$4) ON CONFLICT (username) DO NOTHING`,
+          [a.username, a.source, a.reason, a.gender || 'unknown']
+        );
+        if (ins.rowCount > 0) {
+          stats.added++;
+          if (!budgetStop) {
+            try {
+              await scraper.captureTopReels(a.username); // sets suggestion_score + reel previews
+              stats.reels++;
+            } catch (e) {
+              if (e && e.name === 'BudgetExceededError') { budgetStop = true; console.log(`[Radar] reel capture stopped at budget (captured ${stats.reels})`); }
+              else console.error(`[Radar] reel capture failed for @${a.username}:`, e.message);
+            }
+          }
+        }
+      } catch (e) { console.error(`[Radar] insert failed for @${a.username}:`, e.message); }
+    }
+
+    console.log(`[Metric] radar terms=${stats.terms} authors=${stats.authors} added=${stats.added} reels=${stats.reels}`);
+    radarState.message = `Terms ${stats.terms}, authors +${stats.added}, reels ${stats.reels}`;
+  } catch (err) {
+    radarState.message = err.message;
+    console.error('[Radar] run failed:', err.message);
+  } finally {
+    radarState.running = false;
+  }
+  return stats;
+}
+
+module.exports = { radarConfig, normalizeSearchReel, passesFloors, selectWatchTerms, dedupeReels, excludeAuthors, selectRollupAuthors, harvestKeyword, runRadar, getRadarStatus, __setRunning };

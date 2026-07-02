@@ -128,3 +128,23 @@ test('selectRollupAuthors: distinct authors, best reel wins term, sorted, capped
   assert.ok(out[0].reason.includes("found via 'petite'"));
   assert.ok(out[0].reason.includes('view reel'));
 });
+
+test('runRadar: re-entrancy guard returns started:false when already running', async () => {
+  radar.__setRunning(true);
+  const res = await radar.runRadar({ apiKey: 'x' });
+  assert.strictEqual(res.started, false);
+  assert.strictEqual(res.reason, 'already_running');
+  radar.__setRunning(false);
+});
+
+test('runRadar: no api key returns started:false', async () => {
+  const res = await radar.runRadar({}); // no apiKey
+  assert.strictEqual(res.started, false);
+  assert.strictEqual(res.reason, 'no_api_key');
+});
+
+test('getRadarStatus: exposes the shared radarState object', () => {
+  const s = radar.getRadarStatus();
+  assert.ok(s && typeof s === 'object');
+  assert.strictEqual(typeof s.running, 'boolean');
+});
