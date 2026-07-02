@@ -10,6 +10,7 @@ const pool = require('./db');
 const InstagramScraper = require('./scraper');
 const { BudgetExceededError, usageSummary, suggestionsOrderClause, attachTopReels } = InstagramScraper;
 const { startScheduler, getSchedulerStatus, runAutoScrape, runEngagementRollup, runAutoCleanup, runDiscovery, runIdeaGeneration } = require('./scheduler');
+const radar = require('./radar');
 const { asyncHandler, dbErrorMiddleware, initWithRetry, wrapAsyncRoutes } = require('./db-health');
 const health = require('./health');
 const { downloadThumbnail, DEFAULT_THUMB_DIR } = require('./thumbnails');
@@ -110,6 +111,7 @@ app.use('/scheduler', requireAuth);
 app.use('/models', requireAuth);
 app.use('/ideas', requireAuth);
 app.use('/admin', requireAuth);
+app.use('/radar', requireAuth);
 
 const ContentIdeaAgent = require('./ai-agent');
 const { deliverBatch } = require('./delivery');
@@ -451,6 +453,46 @@ app.post('/scheduler/run/:job', async (req, res) => {
   if (!jobs[job]) return res.status(400).json({ error: `Unknown job: ${job}` });
   jobs[job]();
   res.json({ success: true, message: `Job '${job}' started` });
+});
+
+// ─── Reel Radar Routes ──────────────────────────────────────────
+app.get('/radar/terms', async (req, res) => {
+  const rows = await pool.query(
+    'SELECT id, term, kind, source, status, last_run_at FROM watch_terms ORDER BY status, term'
+  );
+  res.json({ terms: rows.rows });
+});
+
+app.post('/radar/terms', async (req, res) => {
+  const { term } = req.body || {};
+  if (!term || !String(term).trim()) return res.status(400).json({ ok: false, error: 'term_required' });
+  const norm = String(term).replace(/^#/, '').trim().toLowerCase();
+  await pool.query(
+    `INSERT INTO watch_terms (term, kind, source, status) VALUES ($1,'keyword','user','active')
+     ON CONFLICT (term, kind) DO UPDATE SET status = 'active'`,
+    [norm]
+  );
+  const idRow = (await pool.query("SELECT id FROM watch_terms WHERE term = $1 AND kind = 'keyword'", [norm])).rows[0];
+  res.json({ ok: true, id: idRow && idRow.id });
+});
+
+app.patch('/radar/terms/:id', async (req, res) => {
+  const { status } = req.body || {};
+  if (!['active', 'paused'].includes(status)) return res.status(400).json({ ok: false, error: 'bad_status' });
+  await pool.query('UPDATE watch_terms SET status = $1 WHERE id = $2', [status, Number(req.params.id)]);
+  res.json({ ok: true });
+});
+
+app.delete('/radar/terms/:id', async (req, res) => {
+  await pool.query('DELETE FROM watch_terms WHERE id = $1', [Number(req.params.id)]);
+  res.json({ ok: true });
+});
+
+app.post('/radar/run', (req, res) => {
+  if (radar.getRadarStatus().running) return res.json({ ok: true, started: false, reason: 'already_running' });
+  if (!scraper || !scraper.apiKey) return res.json({ ok: true, started: false, reason: 'no_api_key' });
+  radar.runRadar(scraper).catch(e => console.error('[Radar] run failed:', e.message));
+  res.json({ ok: true, started: true });
 });
 
 // ─── Admin Routes ───────────────────────────────────────────────
