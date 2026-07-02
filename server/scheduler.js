@@ -4,6 +4,7 @@ const { BudgetExceededError, aggregateCandidates, scoreCandidate } = require('./
 
 const ContentIdeaAgent = require('./ai-agent');
 const { deliverBatch } = require('./delivery');
+const radar = require('./radar');
 
 function cadenceConfig(env = process.env) {
   const num = (v, d) => { const n = Number(v); return Number.isFinite(n) && n >= 0 ? n : d; };
@@ -374,6 +375,10 @@ function startScheduler(scraper) {
   cron.schedule('0 0 * * 0', () => runEngagementRollup());
   cron.schedule('0 2 * * *', () => runAutoCleanup());
   cron.schedule('0 4 * * 1', () => runDiscovery());
+  cron.schedule('0 6 * * 1', () => {
+    if (!scraperInstance || !scraperInstance.apiKey) return;
+    radar.runRadar(scraperInstance).catch(e => console.error('[Radar] cron run failed:', e.message));
+  });
   cron.schedule('0 8 * * *', () => runIdeaGeneration()); // Daily 8am, checks delivery_day
   cron.schedule('0 5 * * *', () => runThumbnailSweep());
   console.log('[Scheduler] All cron jobs registered');
