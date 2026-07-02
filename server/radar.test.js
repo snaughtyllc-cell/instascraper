@@ -29,3 +29,62 @@ test('watch_terms: defaults apply and ON CONFLICT(term,kind) DO NOTHING is idemp
   assert.strictEqual(rows[0].source, 'user');    // default
   assert.strictEqual(rows[0].status, 'active');  // default
 });
+
+const radar = require('./radar');
+
+test('radarConfig: defaults, env override, non-numeric fallback', () => {
+  const d = radar.radarConfig({});
+  assert.strictEqual(d.termsPerCycle, 10);
+  assert.strictEqual(d.maxPages, 1);
+  assert.strictEqual(d.authorsMax, 30);
+  assert.strictEqual(d.minViews, 20000);
+  assert.strictEqual(d.maxAgeDays, 30);
+  assert.strictEqual(d.actorId, 'data-slayer~instagram-search-reels');
+  const o = radar.radarConfig({ RADAR_TERMS_PER_CYCLE: '3', RADAR_MIN_VIEWS: '1000', RADAR_ACTOR_ID: 'custom~actor' });
+  assert.strictEqual(o.termsPerCycle, 3);
+  assert.strictEqual(o.minViews, 1000);
+  assert.strictEqual(o.actorId, 'custom~actor');
+  // non-numeric env falls back to default
+  assert.strictEqual(radar.radarConfig({ RADAR_MIN_VIEWS: 'abc' }).minViews, 20000);
+});
+
+test('normalizeSearchReel: maps a data-slayer item, drops incomplete, null views', () => {
+  const item = {
+    code: 'ABC123',
+    user: { username: 'kameron.whit', full_name: 'Kameron' },
+    ig_play_count: 50178, like_count: 1200, comment_count: 30,
+    caption: { text: 'Blonde is the outfit', hashtags: ['blonde'] },
+    taken_at_date: '2026-06-20T00:00:00Z',
+    video_url: 'https://cdn/v.mp4', thumbnail_url: 'https://cdn/t.jpg',
+  };
+  const r = radar.normalizeSearchReel(item, 'blonde');
+  assert.strictEqual(r.shortcode, 'ABC123');
+  assert.strictEqual(r.ownerUsername, 'kameron.whit');
+  assert.strictEqual(r.viewCount, 50178);
+  assert.strictEqual(r.likeCount, 1200);
+  assert.strictEqual(r.commentCount, 30);
+  assert.strictEqual(r.caption, 'Blonde is the outfit');
+  assert.strictEqual(r.permalink, 'https://www.instagram.com/reel/ABC123/');
+  assert.strictEqual(r.term, 'blonde');
+  // missing code / username → null
+  assert.strictEqual(radar.normalizeSearchReel({ ...item, code: undefined }, 'blonde'), null);
+  assert.strictEqual(radar.normalizeSearchReel({ ...item, user: {} }, 'blonde'), null);
+  // null ig_play_count → viewCount null (not 0)
+  assert.strictEqual(radar.normalizeSearchReel({ ...item, ig_play_count: null }, 'blonde').viewCount, null);
+  // taken_at_date as epoch seconds → ISO string
+  const epoch = radar.normalizeSearchReel({ ...item, taken_at_date: 1750377600 }, 'blonde');
+  assert.strictEqual(typeof epoch.postedAt, 'string');
+  assert.ok(epoch.postedAt.startsWith('2025-'));
+});
+
+test('passesFloors: minViews + age window, future-dated rejected', () => {
+  const cfg = radar.radarConfig({}); // minViews 20000, maxAgeDays 30
+  const now = Date.parse('2026-06-30T00:00:00Z');
+  const ok = { viewCount: 60000, postedAt: '2026-06-25T00:00:00Z' };
+  assert.strictEqual(radar.passesFloors(ok, cfg, now), true);
+  assert.strictEqual(radar.passesFloors({ ...ok, viewCount: 10000 }, cfg, now), false);
+  assert.strictEqual(radar.passesFloors({ ...ok, viewCount: null }, cfg, now), false);
+  assert.strictEqual(radar.passesFloors({ ...ok, postedAt: '2026-01-01T00:00:00Z' }, cfg, now), false); // too old
+  assert.strictEqual(radar.passesFloors({ ...ok, postedAt: '2026-07-05T00:00:00Z' }, cfg, now), false); // future
+  assert.strictEqual(radar.passesFloors({ ...ok, postedAt: null }, cfg, now), false);
+});
