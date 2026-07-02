@@ -45,6 +45,13 @@ export const snoozeSuggested = (username) => api.post(`/suggested/${username}/sn
 export const approveSuggestedBulk = (usernames) => api.post('/suggested/approve-bulk', { usernames });
 export const scrapeTrackedBulk = (usernames) => api.post('/tracked/scrape-bulk', { usernames });
 
+// Reel Radar (keyword-driven creator discovery)
+export const getRadarTerms = () => api.get('/radar/terms');
+export const addRadarTerm = (term) => api.post('/radar/terms', { term });
+export const setRadarTermStatus = (id, status) => api.patch(`/radar/terms/${id}`, { status });
+export const removeRadarTerm = (id) => api.delete(`/radar/terms/${id}`);
+export const triggerRadar = () => api.post('/radar/run');
+
 // Delete log
 export const getDeleteLog = (params) => api.get('/delete-log', { params });
 export const restorePost = (id) => api.post(`/delete-log/${id}/restore`);

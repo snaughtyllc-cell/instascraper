@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useCallback } from 'react';
-import { getSuggestedAccounts, approveSuggested, dismissSuggested, snoozeSuggested, triggerJob, approveSuggestedBulk, scrapeTrackedBulk } from '../api';
+import { getSuggestedAccounts, approveSuggested, dismissSuggested, snoozeSuggested, triggerJob, approveSuggestedBulk, scrapeTrackedBulk, getRadarTerms, addRadarTerm, removeRadarTerm, triggerRadar } from '../api';
 
 const API_URL = process.env.REACT_APP_API_URL || 'http://localhost:4000';
 
@@ -104,6 +104,57 @@ export default function SuggestedAccountsTab() {
   useEffect(() => {
     load();
   }, [load]);
+
+  // ── Reel Radar ──
+  const [radarTerms, setRadarTerms] = useState([]);
+  const [newTerm, setNewTerm] = useState('');
+  const [radarRunning, setRadarRunning] = useState(false);
+
+  const loadRadarTerms = useCallback(async () => {
+    try {
+      const { data } = await getRadarTerms();
+      setRadarTerms(data.terms || []);
+    } catch (e) { /* non-fatal */ }
+  }, []);
+
+  useEffect(() => { loadRadarTerms(); }, [loadRadarTerms]);
+
+  const handleAddTerm = async (e) => {
+    if (e && e.preventDefault) e.preventDefault();
+    const t = newTerm.trim();
+    if (!t) return;
+    try {
+      await addRadarTerm(t);
+      setNewTerm('');
+      await loadRadarTerms();
+    } catch (err) { console.error('Failed to add radar term:', err); }
+  };
+
+  const handleRemoveTerm = async (id) => {
+    try { await removeRadarTerm(id); await loadRadarTerms(); }
+    catch (err) { console.error('Failed to remove radar term:', err); }
+  };
+
+  const handleRunRadar = async () => {
+    setRadarRunning(true);
+    try { await triggerRadar(); } catch (e) { /* keep polling anyway */ }
+    // Radar makes several Apify calls; poll the suggestions list every 15s
+    // until it grows or a 5-minute cap, mirroring Run Discovery.
+    const startLen = suggestions.length;
+    let elapsed = 0;
+    const poll = setInterval(async () => {
+      elapsed += 15;
+      try {
+        const { data } = await getSuggestedAccounts({ status: 'pending', sort });
+        if (data.length > startLen || elapsed >= 300) {
+          clearInterval(poll);
+          setSuggestions(data);
+          setRadarRunning(false);
+          loadRadarTerms(); // refresh last_run_at
+        }
+      } catch (e) { /* keep polling */ }
+    }, 15000);
+  };
 
   const handleApprove = async (username) => {
     await approveSuggested(username);
@@ -330,6 +381,66 @@ export default function SuggestedAccountsTab() {
               {discovering ? 'Discovering...' : 'Run Discovery'}
             </button>
           </div>
+        </div>
+      </div>
+
+      {/* Reel Radar — keyword-driven creator discovery */}
+      <div className="bg-gray-900 rounded-xl border border-gray-800 p-5">
+        <div className="flex items-center justify-between mb-3">
+          <div>
+            <h3 className="text-sm font-semibold text-white">Reel Radar</h3>
+            <p className="text-xs text-gray-500">Find fresh creators by keyword. New creators land in the list below.</p>
+          </div>
+          <button
+            onClick={handleRunRadar}
+            disabled={radarRunning}
+            className={`px-4 py-2 rounded-lg text-sm font-medium transition-colors ${
+              radarRunning
+                ? 'bg-gold/20 border border-gold/40 text-gold animate-pulse'
+                : 'bg-gold hover:bg-gold-light text-gray-950 font-semibold'
+            }`}
+          >
+            {radarRunning ? 'Scanning...' : 'Run Radar'}
+          </button>
+        </div>
+        <form onSubmit={handleAddTerm} className="flex gap-2 mb-3">
+          <input
+            type="text"
+            value={newTerm}
+            onChange={(e) => setNewTerm(e.target.value)}
+            placeholder="Add a keyword (e.g. blonde)"
+            className="flex-1 bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm text-white"
+          />
+          <button
+            type="submit"
+            className="px-3 py-2 rounded-lg text-sm font-medium bg-gray-800 border border-gray-700 text-white hover:bg-gray-700 transition-colors"
+          >
+            Add
+          </button>
+        </form>
+        <div className="flex flex-wrap gap-2">
+          {radarTerms.length === 0 && (
+            <span className="text-xs text-gray-500 italic">No keywords yet — add one to start.</span>
+          )}
+          {radarTerms.map((t) => (
+            <span
+              key={t.id}
+              className={`inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full text-[11px] font-medium border ${
+                t.status === 'active'
+                  ? 'bg-gold/10 text-gold border-gold/30'
+                  : 'bg-gray-800 text-gray-400 border-gray-700'
+              }`}
+            >
+              {t.term}
+              <button
+                onClick={() => handleRemoveTerm(t.id)}
+                className="text-gray-400 hover:text-white"
+                title="Remove"
+              >
+                ✕
+              </button>
+            </span>
+          ))}
         </div>
       </div>
 
