@@ -43,12 +43,14 @@ test('downloadVideo skips a too-big body with NO content-length [CX-6, R2-6]', a
     { fs, fetch: fetchOf({ headers: { 'content-type': 'video/mp4' }, chunks }), videoDir: DIR, inflight: new Map() });
   assert.strictEqual(r.status, 'skipped');
   assert.ok(!fs.existsSync(path.join(DIR, '4.mp4')), 'temp cleaned up, no final file');
+  assert.deepStrictEqual(fs.readdirSync(DIR).filter(f => f.startsWith('4.')), [], 'no leftover .tmp file for id 4');
 });
 test('downloadVideo returns error on an empty (0-byte) 200 body [R3-4]', async () => {
   const r = await downloadVideo({ id: 9, video_url: 'http://x' },
     { fs, fetch: fetchOf({ headers: { 'content-type': 'video/mp4' }, chunks: [] }), videoDir: DIR, inflight: new Map() });
   assert.strictEqual(r.status, 'error');
   assert.ok(!fs.existsSync(path.join(DIR, '9.mp4')), 'no 0-byte file left behind');
+  assert.deepStrictEqual(fs.readdirSync(DIR).filter(f => f.startsWith('9.')), [], 'no leftover .tmp file for id 9');
 });
 test('downloadVideo returns cached without refetching if file exists', async () => {
   fs.writeFileSync(path.join(DIR, '5.mp4'), Buffer.alloc(5));
@@ -67,4 +69,16 @@ test('downloadVideo dedups concurrent fetches of the same id+url [CX-5]', async 
   assert.strictEqual(a.status, 'cached');
   assert.strictEqual(b.status, 'cached');
   assert.strictEqual(calls, 1, 'same id+url fetched once');
+});
+test('downloadVideo does NOT dedup concurrent fetches of the same id but different url [CX-5]', async () => {
+  let calls = 0;
+  const slow = async () => { calls++; await new Promise(r => setTimeout(r, 20)); return { status: 200, ok: true, headers: { get: () => null }, body: Readable.from([Buffer.alloc(10, 1)]) }; };
+  const inflight = new Map();
+  const [a, b] = await Promise.all([
+    downloadVideo({ id: 7, video_url: 'http://x/a.mp4' }, { fs, fetch: slow, videoDir: DIR, inflight }),
+    downloadVideo({ id: 7, video_url: 'http://x/b.mp4' }, { fs, fetch: slow, videoDir: DIR, inflight }),
+  ]);
+  assert.strictEqual(a.status, 'cached');
+  assert.strictEqual(b.status, 'cached');
+  assert.strictEqual(calls, 2, 'different urls for same id are each fetched (not deduped)');
 });
