@@ -39,7 +39,7 @@ export default function SavedPage() {
   };
 
   return (
-    <div className="px-3 py-4 space-y-4">
+    <div className="px-4 py-5 space-y-6">
       {loading ? (
         <div className="flex items-center justify-center py-20 text-gray-500">
           <svg className="w-6 h-6 animate-spin mr-2" viewBox="0 0 24 24" fill="none">
@@ -50,11 +50,11 @@ export default function SavedPage() {
         </div>
       ) : posts.length === 0 ? (
         <div className="text-center py-20">
-          <p className="text-gray-500 text-lg">No saved reels yet.</p>
-          <p className="text-gray-600 text-sm mt-1">Tap the heart on a reel in your Feed to save it here.</p>
+          <p className="text-gray-400 text-base">No saved reels yet.</p>
+          <p className="text-gray-600 text-sm mt-1.5">Tap the heart on a reel in your Feed to save it here.</p>
         </div>
       ) : (
-        <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-5">
           {posts.map((post) => (
             <ContentCard
               key={post.id}

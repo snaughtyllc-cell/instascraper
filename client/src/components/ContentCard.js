@@ -63,6 +63,7 @@ export default function ContentCard({
   registerRef,
   onToggleSave,
   isSaved = false,
+  adaptiveMedia = false,
 }) {
   const [expanded, setExpanded] = useState(false);
   const [notes, setNotes] = useState(post.notes || '');
@@ -141,7 +142,7 @@ export default function ContentCard({
   return (
     <div ref={cardRef} className={`bg-gray-900 rounded-xl border overflow-hidden group transition-colors ${selected ? 'border-gold ring-1 ring-gold/50' : 'border-gray-800 hover:border-gray-700'}`}>
       {/* Thumbnail */}
-      <div className="relative aspect-[4/5] bg-gray-800 overflow-hidden">
+      <div className={`relative overflow-hidden ${adaptiveMedia ? 'bg-black' : 'aspect-[4/5] bg-gray-800'}`}>
         {onToggleSelect && (
           <label className="absolute top-2 left-2 z-10 cursor-pointer" onClick={(e) => e.stopPropagation()}>
             <input
@@ -179,7 +180,7 @@ export default function ContentCard({
               muted={autoplayInView ? !soundOn : false}
               loop={autoplayInView}
               controls={!autoplayInView}
-              className="w-full h-full object-cover"
+              className={adaptiveMedia ? 'w-full h-auto max-h-[80vh] object-contain' : 'w-full h-full object-cover'}
               onError={() => setVideoFailed(true)}
             />
             {autoplayInView && (
@@ -197,7 +198,7 @@ export default function ContentCard({
             <img
               src={thumbnailSrc}
               alt=""
-              className="w-full h-full object-cover"
+              className={adaptiveMedia ? 'w-full h-auto max-h-[80vh] object-contain' : 'w-full h-full object-cover'}
               loading="lazy"
               onError={(e) => {
                 if (e.target.src !== post.thumbnail_url && post.thumbnail_url) {

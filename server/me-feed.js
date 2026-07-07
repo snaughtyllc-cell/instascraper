@@ -17,9 +17,19 @@ function nicheVisibilityClause(niches, startIdx = 1) {
   return { clause, params: list };
 }
 
-function buildMeFeedQuery(niches, { page = 1, limit = 24 } = {}) {
-  const { clause, params } = nicheVisibilityClause(niches, 1);
-  if (!clause) return { sql: null, params: [] };
+function visibilityOnlyClause() {
+  return `(posts.soft_deleted = 0 OR posts.soft_deleted IS NULL)`
+    + ` AND (posts.archived = 0 OR posts.archived IS NULL)`;
+}
+
+function buildMeFeedQuery(niches, { page = 1, limit = 24, all = false } = {}) {
+  let clause, params;
+  if (all) {
+    clause = visibilityOnlyClause(); params = [];
+  } else {
+    ({ clause, params } = nicheVisibilityClause(niches, 1));
+    if (!clause) return { sql: null, params: [] };
+  }
   const offset = (Math.max(1, Number(page)) - 1) * limit;
   const limIdx = params.length + 1, offIdx = params.length + 2;
   const sql = `
@@ -31,4 +41,4 @@ function buildMeFeedQuery(niches, { page = 1, limit = 24 } = {}) {
     LIMIT $${limIdx} OFFSET $${offIdx}`;
   return { sql, params: [...params, limit, offset] };
 }
-module.exports = { buildMeFeedQuery, nicheVisibilityClause, parseNiches };
+module.exports = { buildMeFeedQuery, nicheVisibilityClause, parseNiches, visibilityOnlyClause };
