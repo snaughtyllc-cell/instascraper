@@ -32,3 +32,33 @@ Verified before revising: `posts.archived` exists (db.js:130). All 11 findings i
 - #10 → accepted as documented tradeoff (model_saved_posts CREATE isn't in the exported array; columns tested non-vacuously via SQLITE_MIGRATIONS).
 - #11 → curl cookie `-c`/`-b` fix in Task 3.
 Shared helpers `nicheVisibilityClause` + `parseNiches` (me-feed.js) + `sessionModelNiches` (index.js) keep the visibility logic in one place across feed/saves/video.
+
+## Round 2 — Codex
+
+"Main security direction much better than round 1", but:
+1. Unique-email index created BEFORE `models.email` exists (index placed after the models CREATE, but auth columns are added later in the migration loop) → fails + silently skipped → uniqueness NOT enforced. Fix: create the index AFTER both migration loops; don't just log-and-continue on failure.
+2. Task 5 uses `parseNiches` before it exists (deferred to Task 6). Fix: implement/export/test `parseNiches` in Task 5.
+3. Duplicate `require('./me-feed')` / `const parseNiches` across Task 5 + Task 6 = syntax error. Fix: one consolidated top-level import.
+4. Disabled model sessions can still hit `/video` (it's requireAuth not requireModel; sessionModelNiches loads only niches, not status/login_enabled). Fix: media visibility helper must require an active+enabled model, or a `requireActiveModelOrAdmin` media middleware.
+5. Hard boundary still leaks THUMBNAILS: `/thumb/:postId` fetches any post's thumbnail by id; `/thumbnails` serves cached files statically. Fix: scope `/thumb/:postId` too; don't expose raw `/thumbnails` static to models unless tokenized.
+6. Global route policy inconsistent: Global Constraints says models reach only /me/*, auth, /thumb, /thumbnails, but Task 4 leaves /video accessible. Fix: reconcile the allowlist; specify /thumb scoping if the hard boundary remains.
+
+VERDICT: REVISE
+
+### Note: findings 4-6 hinge on a HARD-vs-SOFT isolation decision (surfaced to the human). Hard isolation = scope video+thumb+thumbnails-static + active-model media middleware (big). Soft = isolate only private data (saves/ideas) + niche-scope the feed as a UX filter; media stays shared (reels are public content). Fixes 1-3 apply either way.
+
+### Claude's response (Round 2 → revised plan) + HUMAN DECISION: SOFT isolation
+
+The human chose SOFT isolation: media (`/video`/`/thumb`/`/thumbnails`) is shared public content across all authed users; isolation is enforced only on private per-model data (saves/ideas, session-keyed) + the feed is niche-scoped as a relevance filter. This makes R2-#4/#5/#6 (media revocation/thumbnail-leak/route-policy) MOOT and REVERTS R1-#1 (/video niche branch) and R1-#2 (/me/saves visibility guard) to the simpler session-keyed versions.
+
+Fixes applied (decision-independent, findings 1-3):
+- R2-#1: unique-email index moved to AFTER both migration loops (email exists by then); on a real duplicate it now THROWS (fail boot) instead of log-and-continue — uniqueness is genuinely enforced. (Task 1)
+- R2-#2: `parseNiches` is defined/exported/tested in Task 5 (was deferred to Task 6). (Task 5)
+- R2-#3: ONE consolidated `const { buildMeFeedQuery, nicheVisibilityClause, parseNiches } = require('./me-feed')` at the top of Task 5; Task 6 reuses it and never re-declares (no duplicate-const syntax error). (Tasks 5/6)
+
+SOFT reverts:
+- Task 6 `/me/saves` POST/GET → simple session-keyed (owner always the session modelId; GET filters soft_deleted for quality; no niche/visibility guard). Removed `sessionModelNiches`.
+- Task 6 Step 5 (`/video` niche branch) → removed entirely; `/video` stays shared `requireAuth`.
+- Global Constraints route allowlist now lists `/video` as a shared media route (reconciles R2-#6).
+
+Kept (real security regardless of isolation): dialect-safe IN() feed + sqlite exec test (R1-#3), archived filter in feed (R1-#4), active+enabled login + per-request requireModel re-check + disable-on-delete (R1-#5), unique email + 409 (R1-#6), no role escalation (R1-#7), allowlist SET (R1-#8), GET /models off SELECT* (R1-#9), curl fix (R1-#11).

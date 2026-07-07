@@ -16,7 +16,7 @@
 - **SECURITY — non-negotiable, Codex will scrutinize:**
   - Every `/me/*` handler derives `modelId` **from `req.session.user.modelId`**, NEVER from a route param, query, or body. A model must not read/write another model's data by changing an id.
   - Bcrypt (cost 10, matching the existing `bcrypt.hashSync(AUTH_PASSWORD, 10)`) for model passwords; never store or log plaintext.
-  - `requireAdmin` on every existing admin route; models reach ONLY `/me/*`, `/auth/check`, `/login`, `/logout`, `/thumb`, `/thumbnails`.
+  - `requireAdmin` on every existing admin route; models reach ONLY `/me/*`, `/auth/check`, `/login`, `/logout`, and the SHARED media routes `/thumb`, `/thumbnails`, `/video` (reels are public content — see the SOFT-isolation decision below). Private per-model data (`/me/saves`, `/me/ideas`) is always session-keyed and isolated.
   - Preserve the existing `checkProdSecrets` boot fail-fast and the `x-api-key` admin bypass (`API_KEY`).
   - Login attempts are throttled (per-identifier lockout) to blunt brute force.
 - **Back-compat:** the current admin login (team `AUTH_PASSWORD`, no email) must keep working; existing behavior when `AUTH_PASSWORD` is unset (auth disabled → treat as admin) must be preserved.
@@ -100,7 +100,7 @@ and to the inline Postgres `migrations` array (`db.js:339-355`):
 `ALTER TABLE models ADD COLUMN IF NOT EXISTS login_enabled INTEGER DEFAULT 0`,
 ```
 
-and add the `model_saved_posts` CREATE + a unique-email index directly in `initDB` after the `models` CREATE (~`db.js:272`):
+and add the `model_saved_posts` CREATE directly in `initDB` after the `models` CREATE (~`db.js:272`) — this table has no dependency on the new columns:
 
 ```js
   await db.query(`
@@ -111,14 +111,25 @@ and add the `model_saved_posts` CREATE + a unique-email index directly in `initD
       PRIMARY KEY (model_id, post_id)
     )
   `);
-  // [R1-#6] case-insensitive unique email for non-empty emails. Partial + expression index
-  // works on BOTH Postgres and SQLite. Wrap in try/catch like the migration loops so a
-  // pre-existing duplicate (from before the constraint) doesn't crash boot — log and continue.
+```
+
+> **[R2-#1 — index ORDER matters].** The unique-email index references `models.email`, which is added by the migration LOOPS (which run AFTER all `CREATE TABLE`s, ~`db.js:356-363`). Creating the index up here would fail ("no such column: email") and be silently skipped → uniqueness NOT enforced. So put the index creation **AFTER both migration loops** (right before or after the `seedContentTypes` call, ~`db.js:365`):
+
+```js
+  // [R1-#6] AFTER the migration loops (email now exists). Case-insensitive unique for
+  // non-empty emails; partial + expression index works on Postgres AND SQLite.
   try {
     await db.query(`CREATE UNIQUE INDEX IF NOT EXISTS models_email_lower_uk
       ON models (LOWER(email)) WHERE email IS NOT NULL AND email <> ''`);
-  } catch (e) { console.error('[db] models_email_lower_uk index not created:', e.message); }
+  } catch (e) {
+    // A failure here means real DUPLICATE emails exist (not just "already created") — this
+    // must not pass silently, or logins become ambiguous. Surface it loudly. [R2-#1]
+    console.error('[db] FATAL: models_email_lower_uk could not be created (duplicate emails?):', e.message);
+    throw e;
+  }
 ```
+
+(On a fresh `email` column there are no duplicates, so this won't trip on first migration; the `throw` guards against a future duplicate slipping in.)
 
 - [ ] **Step 4: Run → PASS**, then boot check: `cd server && node -e "delete process.env.DATABASE_URL; require('./db').initDB().then(()=>console.log('ok')).catch(e=>{console.error(e);process.exit(1)})"` → prints `ok`.
 
@@ -392,9 +403,7 @@ test('model gate: admin (no modelId) denied, model allowed', () => {
 
 In `server/index.js:102-118`, change these prefixes from `requireAuth` to `requireAdmin`: `/scrape`, `/content`, `/content-types`, `/creators`, `/engagement`, `/export`, `/tracked`, `/suggested`, `/delete-log`, `/scheduler`, `/models`, `/ideas`, `/admin`, `/radar`. **Leave `/thumb`, `/thumbnails`, AND `/video` (`index.js:110`, added by Plan 3) on `requireAuth`** — models need thumbnails AND videos for their niche feed. Add `app.use('/me', requireModel);` (routes added in Tasks 5–7).
 
-> **[R1-#1 — `/video/:id` is niche-scoped for models, NOT an accepted IDOR]** Codex round 1 rejected the accept-the-risk stance: sequential ids are guessable and a model could stream any reel outside their niche. So `/video/:id` (`index.js:958`) gains a **role branch**: an **admin** session (or `x-api-key`) keeps full access; a **model** session may only stream a post that passes the same `nicheVisibilityClause` (niche + not archived + not soft-deleted) — otherwise `404`. This is added as a step in Task 6 (where the visibility helper + `sessionModelNiches` live), since `/video/:id` is a Plan-3 handler that must now consult model context.
->
-> **DECISION FOR THE HUMAN (build gate):** this makes niche a HARD boundary — a model literally cannot stream/save content outside their niche. That's the secure default and matches "personalized account." If you instead want models to browse ALL niches (they're your own trusted team; reels are public content), we relax it by dropping the model branch on `/video` and the visibility guard on `/me/saves` — say so at the build gate and I'll adjust before implementing.
+> **[ISOLATION DECISION — SOFT, chosen by the human 2026-07-07]** Media routes (`/video`, `/thumb`, `/thumbnails`) stay on `requireAuth` and are SHARED across all authenticated users (admin + models) — reels are public Instagram content, and the models are the operator's own trusted team. No per-request niche gating on media, no active-model media middleware (Codex R2-#4/#5/#6 are moot under SOFT). **Isolation is enforced only where it matters: private per-model data** — `/me/saves` and `/me/ideas` are strictly session-keyed (a model can only ever read/write their OWN saves/ideas). The **feed** is niche-scoped purely as a relevance filter (a "talking" model sees talking reels), NOT as a security boundary. If requirements later change to adversarial/multi-tenant models, revisit hard isolation (scope `/video` + `/thumb` + tokenize `/thumbnails` + active-model media middleware).
 
 - [ ] **Step 4: Manual verify** a model session is 403 on `/content` and 200 on `/thumb`. Start server with `AUTH_PASSWORD` set, create a model login (Task 8 or a direct DB insert), log in as the model, `curl` `/content` → 403, `/me/feed` → 200. Document in report. (If Task 8's admin UI isn't built yet, insert a model row with a bcrypt hash via a one-off `node -e`.)
 
@@ -459,6 +468,13 @@ test('buildMeFeedQuery actually EXECUTES against sqlite and scopes by niche + ar
 - [ ] **Step 3: Implement `server/me-feed.js`**
 
 ```js
+// [R2-#2] parseNiches lives HERE (Task 5) — the /me/feed route uses it immediately, and
+// /me/saves (Task 6) reuses it. One definition, one import site.
+function parseNiches(modelRow = {}) {
+  return [modelRow.primary_niche, ...String(modelRow.secondary_niches || '').split(',')]
+    .map(s => (s || '').trim()).filter(Boolean);
+}
+
 function nicheVisibilityClause(niches, startIdx = 1) {
   const list = (Array.isArray(niches) ? niches : []).filter(Boolean);
   if (list.length === 0) return { clause: null, params: [] };
@@ -484,15 +500,18 @@ function buildMeFeedQuery(niches, { page = 1, limit = 24 } = {}) {
     LIMIT $${limIdx} OFFSET $${offIdx}`;
   return { sql, params: [...params, limit, offset] };
 }
-module.exports = { buildMeFeedQuery, nicheVisibilityClause };
+module.exports = { buildMeFeedQuery, nicheVisibilityClause, parseNiches };
 ```
 
 > `ORDER BY posts.posted_at DESC` (no `NULLS LAST` — SQLite doesn't support that syntax; Postgres defaults NULLs first on DESC, acceptable here since scraped reels always have `posted_at`).
+> Add a `parseNiches` unit test: `parseNiches({primary_niche:'talking', secondary_niches:'dance, skit'})` → `['talking','dance','skit']`; `parseNiches({primary_niche:'talking'})` → `['talking']`.
+> **[R2-#3] Single import in `index.js`:** all of Task 5/6's me-feed usage goes through ONE top-level `const { buildMeFeedQuery, nicheVisibilityClause, parseNiches } = require('./me-feed');`. Task 6 must NOT re-`require` or re-declare `parseNiches` (duplicate `const` = syntax error) — it reuses the single import.
 
 - [ ] **Step 4: Run → PASS.** Then add the route to `server/index.js`:
 
 ```js
-const { buildMeFeedQuery, parseNiches } = require('./me-feed');
+// [R2-#3] THE single top-level me-feed import — Task 6 reuses these, never re-requires.
+const { buildMeFeedQuery, nicheVisibilityClause, parseNiches } = require('./me-feed');
 app.get('/me/feed', asyncHandler(async (req, res) => {
   const modelId = req.session.user.modelId; // requireModel guarantees this
   const m = await pool.query('SELECT primary_niche, secondary_niches FROM models WHERE id = $1', [modelId]);
@@ -523,10 +542,8 @@ git commit -m "feat(me): GET /me/feed — niche-scoped, session-derived modelId"
 - Test: `server/me-saves.test.js` (guard logic)
 
 **Interfaces:**
-- Produces: saves keyed by `(session modelId, postId)`. The OWNER is always `req.session.user.modelId` — never a client value. A model may ONLY save a post that is **visible to them** (in their niche, not archived, not soft-deleted) — this blocks the "save a guessed id to read arbitrary post metadata" leak [R1-#2]. `GET /me/saves` joins saves to `posts` AND re-applies the visibility clause, so a save that later becomes hidden (archived / niche removed) drops out.
-- New in `server/me-saves.js`: `saveParams(modelId, postId)` (pure id coercion). Consumes `nicheVisibilityClause` + `parseNiches` from `me-feed.js`.
-
-> **[RETARGET] add `parseNiches(modelRow)` to `me-feed.js`** (pure): `[modelRow.primary_niche, ...String(modelRow.secondary_niches||'').split(',')].map(s=>(s||'').trim()).filter(Boolean)`. Used by `/me/feed`, `/me/saves`, and the `/video/:id` check so niche parsing lives in one place. Update Task 5's `/me/feed` handler to use it too.
+- Produces: saves keyed by `(session modelId, postId)`. The OWNER is always `req.session.user.modelId` — never a client value. `GET /me/saves` returns the model's own saved posts joined to `posts` (soft-deleted filtered out for quality). **[SOFT isolation]** no niche/visibility guard on the save — reels are shared public content; the only isolation guarantee is that a model reads/writes ONLY their OWN saves (session-keyed). `saveParams` still int4-bounds the id.
+- New in `server/me-saves.js`: `saveParams(modelId, postId)` (pure id coercion). No dependency on `me-feed.js`.
 
 - [ ] **Step 1: Write the failing test (pure id coercion)**
 
@@ -555,28 +572,16 @@ function saveParams(modelId, postId) {
 module.exports = { saveParams };
 ```
 
-- [ ] **Step 3: Run → PASS.** Add routes to `server/index.js` — the POST is **visibility-guarded**, the GET **re-filters by visibility**:
+- [ ] **Step 3: Run → PASS.** Add routes to `server/index.js` — session-keyed only (SOFT isolation; the owner is ALWAYS the session modelId, never a client value):
 
 ```js
 const { saveParams } = require('./me-saves');
-const { nicheVisibilityClause, parseNiches } = require('./me-feed');
-
-// Load the session model's niches (used by saves + /video). Returns [] if none.
-async function sessionModelNiches(req) {
-  const m = await pool.query('SELECT primary_niche, secondary_niches FROM models WHERE id = $1', [req.session.user.modelId]);
-  return m.rows[0] ? parseNiches(m.rows[0]) : [];
-}
+// NOTE: buildMeFeedQuery/nicheVisibilityClause/parseNiches were already imported once at
+// the top of Task 5 — do NOT re-require me-feed here [R2-#3].
 
 app.post('/me/saves/:postId', asyncHandler(async (req, res) => {
   const p = saveParams(req.session.user.modelId, req.params.postId);
   if (!p) return res.status(400).json({ error: 'Invalid post id' });
-  // [R1-#2] only save a post the model can actually see (niche + not archived/soft-deleted)
-  const { clause, params } = nicheVisibilityClause(await sessionModelNiches(req), 2);
-  if (!clause) return res.status(404).json({ error: 'Not found' });
-  const vis = await pool.query(
-    `SELECT 1 FROM posts LEFT JOIN creator_types ct ON posts.account_handle = ct.account_handle
-     WHERE posts.id = $1 AND ${clause} LIMIT 1`, [p.postId, ...params]);
-  if (vis.rows.length === 0) return res.status(404).json({ error: 'Not found' });
   await pool.query(
     'INSERT INTO model_saved_posts (model_id, post_id, saved_at) VALUES ($1,$2,$3) ON CONFLICT (model_id, post_id) DO NOTHING',
     [p.modelId, p.postId, new Date().toISOString()]);
@@ -591,43 +596,22 @@ app.delete('/me/saves/:postId', asyncHandler(async (req, res) => {
 }));
 
 app.get('/me/saves', asyncHandler(async (req, res) => {
-  const { clause, params } = nicheVisibilityClause(await sessionModelNiches(req), 2);
-  if (!clause) return res.json({ posts: [] });
   const r = await pool.query(
     `SELECT posts.* FROM model_saved_posts s
        JOIN posts ON posts.id = s.post_id
-       LEFT JOIN creator_types ct ON posts.account_handle = ct.account_handle
-     WHERE s.model_id = $1 AND ${clause}
-     ORDER BY s.saved_at DESC`, [req.session.user.modelId, ...params]);
+     WHERE s.model_id = $1 AND (posts.soft_deleted = 0 OR posts.soft_deleted IS NULL)
+     ORDER BY s.saved_at DESC`, [req.session.user.modelId]);
   res.json({ posts: r.rows });
 }));
 ```
 
-- [ ] **Step 4: Manual verify isolation (TWO checks)** — (a) model A saves post X; model B `GET /me/saves` does NOT include X (per-model isolation). (b) A model tries `POST /me/saves/<id of a post OUTSIDE their niche>` → `404`, and it does NOT appear in their saves (the R1-#2 IDOR fix). Document both.
+- [ ] **Step 4: Manual verify per-model isolation** — model A saves post X; log in as model B, `GET /me/saves` does NOT include X (the key isolation check — a model reads only their OWN saves). Document.
 
-- [ ] **Step 5: Niche-scope `/video/:id` for model sessions [R1-#1].** In the existing Plan-3 `GET /video/:id` handler (`index.js:958`), before serving, branch on role: admin or `x-api-key` → unchanged (full access); a **model** session → verify the post passes `nicheVisibilityClause` for the model's niches, else `404` (so the poster shows, exactly like an uncached video). Concretely, near the top of the handler after loading the row:
-
-```js
-// [R1-#1] models may only stream reels in their own niche
-const u = req.session && req.session.user;
-const isApiKey = API_KEY && req.headers['x-api-key'] === API_KEY;
-if (!isApiKey && u && u.role === 'model') {
-  const { clause, params } = nicheVisibilityClause(await sessionModelNiches(req), 2);
-  if (!clause) return res.status(404).send('not found');
-  const vis = await pool.query(
-    `SELECT 1 FROM posts LEFT JOIN creator_types ct ON posts.account_handle = ct.account_handle
-     WHERE posts.id = $1 AND ${clause} LIMIT 1`, [id, ...params]);
-  if (vis.rows.length === 0) return res.status(404).send('not found');
-}
-```
-
-(`sessionModelNiches` + `nicheVisibilityClause` are already in scope from this task. `id` is the validated numeric id from the Plan-3 handler.) Manual verify: as a model, `GET /video/<in-niche id>` streams; `GET /video/<out-of-niche id>` → 404.
-
-- [ ] **Step 6: Commit**
+- [ ] **Step 5: Commit**
 
 ```bash
 git add server/me-saves.js server/me-saves.test.js server/index.js
-git commit -m "feat(me): per-model saves + niche-scoped /video, owner/visibility always from session"
+git commit -m "feat(me): per-model saves (session-keyed owner, soft isolation)"
 ```
 
 ---
@@ -828,10 +812,11 @@ export const getMyIdeas = () => api.get('/me/ideas');
 
 **Security self-check:** every `/me/*` handler reads `req.session.user.modelId` and never a param; `requireModel` guarantees a modelId AND re-checks active+enabled per request; admin routes are `requireAdmin`; passwords are bcrypt-only and `password_hash` is never returned (`GET /models` narrowed off `SELECT *`); login is throttled and requires active+enabled; the prod fail-fast and API-key bypass are preserved.
 
-**Round-1 Codex findings — disposition (all incorporated):**
-- R1-#1 (`/video/:id` niche-scoped for model sessions, not an accepted IDOR — Task 6 Step 5; flagged as a relaxable human decision at the build gate), R1-#2 (`/me/saves` insert visibility-guarded + list re-filtered — Task 6), R1-#3 (dialect-safe `IN()` not `= ANY()` + real sqlite execution test — Task 5), R1-#4 (`archived` filter in the shared visibility clause — Task 5), R1-#5 (login requires active+enabled; `requireModel` re-checks per request; delete disables login — Tasks 2/3/8), R1-#6 (case-insensitive unique email index + 409 on conflict — Tasks 1/8), R1-#7 (`role` never settable from the model form; `resolveLogin` always yields `'model'` — Tasks 2/8), R1-#8 (dynamic SET built from the `MODEL_WRITE_FIELDS` allowlist, never request keys — Task 8), R1-#9 (`GET /models` explicit columns + audit other `SELECT * FROM models` — Task 8), R1-#11 (curl cookie `-c`/`-b` fix — Task 3). R1-#10 (weak `model_saved_posts` test) accepted as a documented tradeoff (CREATE TABLE isn't in the exported array; the columns ARE tested non-vacuously). The `models.role` column remains (default `'model'`) but is **reserved/unused for auth** — `resolveLogin` ignores it.
+**ISOLATION MODEL = SOFT (human decision, 2026-07-07):** media routes (`/video`/`/thumb`/`/thumbnails`) are shared across all authenticated users; isolation is enforced only on private per-model data (`/me/saves`, `/me/ideas`, strictly session-keyed) and the feed is niche-scoped as a relevance filter. R1-#1 (`/video` niche-scope) and R1-#2 (`/me/saves` visibility guard) were implemented then REVERTED per this decision — the secure hard-boundary versions live in the review log if requirements ever change.
 
-**⚠️ HUMAN DECISION at the build gate:** the R1-#1/#2 fixes make **niche a HARD boundary** (a model can't stream or save reels outside their niche). This is the secure default. If the models are your trusted team and you'd rather they browse all niches, we drop the `/video` model branch + the `/me/saves` visibility guard before building — decide at the gate.
+**Round-1 findings — disposition (kept under SOFT):** R1-#3 (dialect-safe `IN()` not `= ANY()` + real sqlite execution test — Task 5, still used by the niche-scoped feed), R1-#4 (`archived` filter in `nicheVisibilityClause` — Task 5 feed), R1-#5 (login requires active+enabled; `requireModel` re-checks per request; delete disables login — Tasks 2/3/8), R1-#6 (unique email index + 409 — Tasks 1/8), R1-#7 (`role` never settable; `resolveLogin` always yields `'model'` — Tasks 2/8), R1-#8 (`MODEL_WRITE_FIELDS` allowlist SET — Task 8), R1-#9 (`GET /models` off `SELECT *` — Task 8), R1-#11 (curl cookie fix — Task 3). R1-#10 accepted as documented tradeoff. `models.role` column stays but is reserved/unused for auth.
+
+**Round-2 findings — disposition:** R2-#1 (unique-email index moved AFTER the migration loops so `email` exists; `throw` on real duplicate rather than silent skip — Task 1), R2-#2 (`parseNiches` defined/exported/tested in Task 5, not Task 6), R2-#3 (single consolidated `require('./me-feed')`; Task 6 does not re-declare — Tasks 5/6). R2-#4/#5/#6 (media-route revocation gaps + thumbnail leak + route-policy inconsistency) are **moot under SOFT** — media is intentionally shared; the Global Constraints route allowlist now lists `/video` as a shared media route.
 
 ## Execution Handoff
 
