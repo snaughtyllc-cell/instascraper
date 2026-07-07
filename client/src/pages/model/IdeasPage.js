@@ -1,5 +1,7 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import { getMyIdeas } from '../../api';
+import ContentCard from '../../components/ContentCard';
+import useActiveInView from '../../hooks/useActiveInView';
 
 function formatDate(d) {
   if (!d) return '';
@@ -25,6 +27,12 @@ export default function IdeasPage() {
   useEffect(() => {
     loadIdeas();
   }, [loadIdeas]);
+
+  // Shared autoplay-in-view observer across every source reel on the page
+  // (mirrors FeedPage), so at most one reel plays at a time as the model
+  // scrolls through idea cards.
+  const allReels = ideas.flatMap((i) => i.sourceReels || []);
+  const { autoplayInView, activeCardId, registerRef } = useActiveInView(allReels);
 
   return (
     <div className="px-3 py-4 space-y-3">
@@ -63,6 +71,24 @@ export default function IdeasPage() {
 
             {idea.stale_warning && (
               <p className="text-xs text-yellow-500">{idea.stale_warning}</p>
+            )}
+
+            {idea.sourceReels?.length > 0 && (
+              <div className="pt-1 space-y-1.5">
+                <p className="text-xs text-gray-500">Reels that inspired this</p>
+                <div className="grid grid-cols-3 gap-2">
+                  {idea.sourceReels.map((reel) => (
+                    <ContentCard
+                      key={`${idea.id}-${reel.id}`}
+                      post={reel}
+                      variant="feed"
+                      autoplayInView={autoplayInView}
+                      isActive={String(reel.id ?? reel.shortcode) === activeCardId}
+                      registerRef={registerRef}
+                    />
+                  ))}
+                </div>
+              </div>
             )}
 
             <div className="flex items-center justify-between pt-1">
