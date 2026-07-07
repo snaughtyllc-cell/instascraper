@@ -11,6 +11,12 @@ const DAYS = ['monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday'
 
 const NICHE_OPTIONS = ['talking', 'dance', 'skit', 'snapchat', 'omegle', 'osc'];
 
+const EMPTY_FORM = {
+  name: '', primary_niche: '', secondary_niches: '',
+  delivery_method: 'whatsapp', delivery_contact: '', delivery_day: 'monday',
+  email: '', password: '', login_enabled: false,
+};
+
 export default function ModelsTab() {
   const [models, setModels] = useState([]);
   const [niches, setNiches] = useState([]);
@@ -20,10 +26,7 @@ export default function ModelsTab() {
   const [ideas, setIdeas] = useState({});
   const [generating, setGenerating] = useState({});
   const [exportOpen, setExportOpen] = useState(null);
-  const [form, setForm] = useState({
-    name: '', primary_niche: '', secondary_niches: '',
-    delivery_method: 'whatsapp', delivery_contact: '', delivery_day: 'monday',
-  });
+  const [form, setForm] = useState({ ...EMPTY_FORM });
 
   const loadModels = useCallback(async () => {
     try {
@@ -51,7 +54,7 @@ export default function ModelsTab() {
       }
       setShowForm(false);
       setEditingId(null);
-      setForm({ name: '', primary_niche: '', secondary_niches: '', delivery_method: 'whatsapp', delivery_contact: '', delivery_day: 'monday' });
+      setForm({ ...EMPTY_FORM });
       loadModels();
     } catch (err) { alert('Error: ' + (err.response?.data?.error || err.message)); }
   };
@@ -63,6 +66,7 @@ export default function ModelsTab() {
       delivery_method: model.delivery_method || 'whatsapp',
       delivery_contact: model.delivery_contact || '',
       delivery_day: model.delivery_day || 'monday',
+      email: model.email || '', password: '', login_enabled: !!model.login_enabled,
     });
     setEditingId(model.id);
     setShowForm(true);
@@ -112,7 +116,7 @@ export default function ModelsTab() {
           <p className="text-gray-400 text-sm mt-1">AI-powered content idea generation per model</p>
         </div>
         <button
-          onClick={() => { setShowForm(!showForm); setEditingId(null); setForm({ name: '', primary_niche: '', secondary_niches: '', delivery_method: 'whatsapp', delivery_contact: '', delivery_day: 'monday' }); }}
+          onClick={() => { setShowForm(!showForm); setEditingId(null); setForm({ ...EMPTY_FORM }); }}
           className="px-4 py-2 bg-gold text-gray-950 rounded-lg font-medium hover:bg-gold/90 transition-colors"
         >
           + Add Model
@@ -183,6 +187,40 @@ export default function ModelsTab() {
               />
             </div>
           </div>
+
+          <div className="border-t border-gray-800 pt-4">
+            <h4 className="text-sm font-semibold text-gray-300 mb-3">Model App Login</h4>
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+              <div>
+                <label className="block text-sm text-gray-400 mb-1">Email</label>
+                <input
+                  type="email" value={form.email}
+                  onChange={e => setForm({ ...form, email: e.target.value })}
+                  className="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-white focus:border-gold focus:outline-none"
+                  placeholder="Email (for model login)"
+                />
+              </div>
+              <div>
+                <label className="block text-sm text-gray-400 mb-1">Password</label>
+                <input
+                  type="password" value={form.password}
+                  onChange={e => setForm({ ...form, password: e.target.value })}
+                  className="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-white focus:border-gold focus:outline-none"
+                  placeholder="Set / reset password — blank keeps current"
+                  autoComplete="new-password"
+                />
+              </div>
+            </div>
+            <label className="flex items-center gap-2 mt-3 text-sm text-gray-400">
+              <input
+                type="checkbox" checked={form.login_enabled}
+                onChange={e => setForm({ ...form, login_enabled: e.target.checked })}
+                className="w-4 h-4 rounded bg-gray-800 border-gray-700 text-gold focus:ring-gold focus:ring-offset-gray-900"
+              />
+              Enable login
+            </label>
+          </div>
+
           <div className="flex gap-3">
             <button type="submit" className="px-4 py-2 bg-gold text-gray-950 rounded-lg font-medium hover:bg-gold/90">
               {editingId ? 'Save Changes' : 'Create Model'}
@@ -217,6 +255,12 @@ export default function ModelsTab() {
                     {model.secondary_niches && model.secondary_niches.split(',').filter(Boolean).map(n => (
                       <span key={n.trim()} className="text-xs px-2 py-0.5 rounded-full bg-gray-800 text-gray-400">{n.trim()}</span>
                     ))}
+                    <span className={`text-xs px-2 py-0.5 rounded-full ${model.login_enabled ? 'bg-emerald-900/40 text-emerald-300' : 'bg-gray-800 text-gray-500'}`}>
+                      Login: {model.login_enabled ? 'on' : 'off'}
+                    </span>
+                    {model.email && (
+                      <span className="text-xs text-gray-500">{model.email}</span>
+                    )}
                   </div>
                 </div>
               </div>
