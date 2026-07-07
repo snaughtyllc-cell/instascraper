@@ -1027,6 +1027,33 @@ app.get('/me/feed', asyncHandler(async (req, res) => {
   res.json({ posts: r.rows, niches });
 }));
 
+const { saveParams } = require('./me-saves');
+
+app.post('/me/saves/:postId', asyncHandler(async (req, res) => {
+  const p = saveParams(req.session.user.modelId, req.params.postId);
+  if (!p) return res.status(400).json({ error: 'Invalid post id' });
+  await pool.query(
+    'INSERT INTO model_saved_posts (model_id, post_id, saved_at) VALUES ($1,$2,$3) ON CONFLICT (model_id, post_id) DO NOTHING',
+    [p.modelId, p.postId, new Date().toISOString()]);
+  res.json({ ok: true });
+}));
+
+app.delete('/me/saves/:postId', asyncHandler(async (req, res) => {
+  const p = saveParams(req.session.user.modelId, req.params.postId);
+  if (!p) return res.status(400).json({ error: 'Invalid post id' });
+  await pool.query('DELETE FROM model_saved_posts WHERE model_id = $1 AND post_id = $2', [p.modelId, p.postId]);
+  res.json({ ok: true });
+}));
+
+app.get('/me/saves', asyncHandler(async (req, res) => {
+  const r = await pool.query(
+    `SELECT posts.* FROM model_saved_posts s
+       JOIN posts ON posts.id = s.post_id
+     WHERE s.model_id = $1 AND (posts.soft_deleted = 0 OR posts.soft_deleted IS NULL)
+     ORDER BY s.saved_at DESC`, [req.session.user.modelId]);
+  res.json({ posts: r.rows });
+}));
+
 // ─── Static Files ───────────────────────────────────────────────
 
 const clientBuild = path.join(__dirname, '..', 'client', 'build');
