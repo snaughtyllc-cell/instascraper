@@ -1,7 +1,7 @@
 import React from 'react';
 import { daysAgoISO, DATE_PRESETS, presetForStartDate } from '../utils/date';
 
-export default function FilterBar({ filters, accounts, total, onChange, onExport }) {
+export default function FilterBar({ filters, accounts, contentTypes = [], total, onChange, onExport }) {
   const activePreset = presetForStartDate(filters.startDate);
 
   const [searchText, setSearchText] = React.useState(filters.search || '');
@@ -80,12 +80,9 @@ export default function FilterBar({ filters, accounts, total, onChange, onExport
           }`}
         >
           <option value="">All Types</option>
-          <option value="talking">Talking</option>
-          <option value="dance">Dance</option>
-          <option value="skit">Skit</option>
-          <option value="snapchat">Snapchat</option>
-          <option value="omegle">Omegle</option>
-          <option value="osc">OSC</option>
+          {contentTypes.map((ct) => (
+            <option key={ct.value} value={ct.value}>{ct.label}</option>
+          ))}
         </select>
 
         {/* Min Views */}

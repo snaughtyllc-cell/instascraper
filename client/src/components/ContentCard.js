@@ -9,15 +9,6 @@ const TAG_OPTIONS = [
   { value: 'skip', label: 'Skip', icon: '\u274C', color: 'bg-red-600' },
 ];
 
-const CONTENT_TYPES = [
-  { value: 'talking', label: 'Talking' },
-  { value: 'dance', label: 'Dance' },
-  { value: 'skit', label: 'Skit' },
-  { value: 'snapchat', label: 'Snapchat' },
-  { value: 'omegle', label: 'Omegle' },
-  { value: 'osc', label: 'OSC' },
-];
-
 function formatCount(n) {
   if (!n) return '0';
   if (n >= 1_000_000) return (n / 1_000_000).toFixed(1) + 'M';
@@ -57,6 +48,8 @@ const BADGE_POSITIONS = {
 export default function ContentCard({
   post,
   creatorTypes = {},
+  contentTypes = [],
+  onAddContentType,
   onUpdate,
   selected = false,
   onToggleSelect,
@@ -91,17 +84,19 @@ export default function ContentCard({
     }, 800);
   }, [post.id]);
 
-  const handleCreatorType = async (e) => {
-    const val = e.target.value || null;
-    await setCreatorType(post.account_handle, val);
-    onUpdate();
+  const maybeAdd = async (val, apply) => {
+    if (val === '__add__') {
+      const label = window.prompt('New type name:');
+      if (!label || !onAddContentType) return;
+      const created = await onAddContentType(label);
+      if (created && created.value) await apply(created.value);
+      return;
+    }
+    await apply(val || null);
   };
 
-  const handlePostType = async (e) => {
-    const val = e.target.value || null;
-    await setPostContentType(post.id, val);
-    onUpdate();
-  };
+  const handleCreatorType = (e) => maybeAdd(e.target.value, (v) => setCreatorType(post.account_handle, v).then(onUpdate));
+  const handlePostType = (e) => maybeAdd(e.target.value, (v) => setPostContentType(post.id, v).then(onUpdate));
 
   const handleArchive = async () => {
     await archivePost(post.id, !post.archived);
@@ -287,9 +282,10 @@ export default function ContentCard({
                 }`}
               >
                 <option value="">Creator...</option>
-                {CONTENT_TYPES.map((ct) => (
+                {contentTypes.map((ct) => (
                   <option key={ct.value} value={ct.value}>{ct.label}</option>
                 ))}
+                <option value="__add__">＋ Add new type…</option>
               </select>
               <select
                 value={post.content_type || ''}
@@ -302,9 +298,10 @@ export default function ContentCard({
                 }`}
               >
                 <option value="">Video...</option>
-                {CONTENT_TYPES.map((ct) => (
+                {contentTypes.map((ct) => (
                   <option key={ct.value} value={ct.value}>{ct.label}</option>
                 ))}
+                <option value="__add__">＋ Add new type…</option>
               </select>
             </div>
 

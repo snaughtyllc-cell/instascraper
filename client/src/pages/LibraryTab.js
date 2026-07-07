@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useCallback } from 'react';
-import { getContent, getCreators, exportContent, importUrls, bulkUpdateContent } from '../api';
+import { getContent, getCreators, exportContent, importUrls, bulkUpdateContent, getContentTypes, addContentType } from '../api';
 import BulkActionBar from '../components/BulkActionBar';
 import ContentCard from '../components/ContentCard';
 import FilterBar from '../components/FilterBar';
@@ -12,6 +12,7 @@ export default function LibraryTab() {
   const [page, setPage] = useState(1);
   const [accounts, setAccounts] = useState([]);
   const [creatorTypes, setCreatorTypes] = useState({});
+  const [contentTypes, setContentTypes] = useState([]);
   const [showImport, setShowImport] = useState(false);
   const [importText, setImportText] = useState('');
   const [importing, setImporting] = useState(false);
@@ -40,6 +41,19 @@ export default function LibraryTab() {
       setCreatorTypes(map);
     } catch {}
   }, []);
+
+  const loadContentTypes = useCallback(async () => {
+    try {
+      const { data } = await getContentTypes();
+      setContentTypes(data);
+    } catch {}
+  }, []);
+
+  const handleAddContentType = useCallback(async (label) => {
+    const { data } = await addContentType(label);
+    await loadContentTypes();
+    return data; // { value, label }
+  }, [loadContentTypes]);
 
   const loadContent = useCallback(async () => {
     setLoading(true);
@@ -71,7 +85,8 @@ export default function LibraryTab() {
   useEffect(() => {
     loadContent();
     loadCreatorTypes();
-  }, [loadContent, loadCreatorTypes]);
+    loadContentTypes();
+  }, [loadContent, loadCreatorTypes, loadContentTypes]);
 
   const handleFilterChange = (key, value) => {
     setFilters((f) => ({ ...f, [key]: value }));
@@ -172,6 +187,7 @@ export default function LibraryTab() {
       <FilterBar
         filters={filters}
         accounts={accounts}
+        contentTypes={contentTypes}
         total={total}
         onChange={handleFilterChange}
         onExport={() => exportContent('json')}
@@ -206,6 +222,8 @@ export default function LibraryTab() {
               key={post.id}
               post={post}
               creatorTypes={creatorTypes}
+              contentTypes={contentTypes}
+              onAddContentType={handleAddContentType}
               onUpdate={handleUpdate}
               selected={selected.has(post.id)}
               onToggleSelect={toggleSelect}
