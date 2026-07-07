@@ -413,10 +413,11 @@ Log `[Metric] video_prune deleted=N` (rows finalized to NULL). Add to exports.
 ```js
 const { videoFilePath, DEFAULT_VIDEO_DIR } = require('./videos');
 
-// [R2-1, R3-2, R3-3] Worth 302-ing the raw IG URL? Only if it was refreshed recently.
-// Reads video_url_refreshed_at — NOT status (pending is eternal) and NOT scraped_at
-// (stale on re-scrape). Self-expiring: a pending row refreshed 20d ago is NOT fresh.
+// [R2-1, R3-2, R3-3, R5-1] Worth 302-ing the raw IG URL? Only if refreshed recently AND
+// not mid-prune. Reads video_url_refreshed_at — NOT status-pending (eternal) and NOT
+// scraped_at (stale on re-scrape). Self-expiring: a pending row refreshed 20d ago is NOT fresh.
 function videoUrlIsFresh(post, freshnessDays = 14) {
+  if (post.video_cache_status === 'pruning') return false;   // [R5-1] mid-delete → poster, never 302
   if (!post.video_url_refreshed_at) return false;
   const cutoff = new Date(Date.now() - freshnessDays * 86400000).toISOString();
   return post.video_url_refreshed_at >= cutoff;
@@ -448,7 +449,7 @@ app.get('/video/:id', asyncHandler(async (req, res) => {
 
 (`fs`, `asyncHandler`, `pool` already exist in `index.js`; `res.sendFile` is already used at `index.js:911`.)
 
-- [ ] **Step 2: Write the extracted-handler test [CX-12, R2-1, R2-10, R3-6]** — export `videoUrlIsFresh` so it's unit-testable without booting Express, and test with **real row-shaped objects that use the actual field name `video_url_refreshed_at`** (the function reads that, not `status` — a test passing `{status:'pending'}` would test nothing): (a) `{ video_url_refreshed_at: new Date().toISOString() }` → true; (b) `{ video_url_refreshed_at: new Date(Date.now() - 30*86400000).toISOString() }` → false (aged out → poster, not a 302); (c) `{ video_url_refreshed_at: null }` → false; (d) a `pending` row whose `video_url_refreshed_at` is 20 days old → false (proves `pending` is NOT treated as eternally fresh, [R3-2]). Also unit-test id validation — `Number('abc')`/`0`/`-1` short-circuit to 404 before any `pool.query`. Factor the handler body into a small `serveVideo(post, { fs, videoDir, res })`-style function if that makes the sendFile/302/404 branches testable with fake `res`/`fs`; otherwise `videoUrlIsFresh` + id-validation units plus the Step-3 curls are the gate. (Auth is enforced by the `app.use('/video', requireAuth)` prefix, identical to `/thumb`, at `index.js:107`.)
+- [ ] **Step 2: Write the extracted-handler test [CX-12, R2-1, R2-10, R3-6]** — export `videoUrlIsFresh` so it's unit-testable without booting Express, and test with **real row-shaped objects that use the actual field name `video_url_refreshed_at`** (the function reads that, not `status` — a test passing `{status:'pending'}` would test nothing): (a) `{ video_url_refreshed_at: new Date().toISOString() }` → true; (b) `{ video_url_refreshed_at: new Date(Date.now() - 30*86400000).toISOString() }` → false (aged out → poster, not a 302); (c) `{ video_url_refreshed_at: null }` → false; (d) a `pending` row whose `video_url_refreshed_at` is 20 days old → false (proves `pending` is NOT treated as eternally fresh, [R3-2]). Add an explicit `'pruning'` case [R5-1]: `videoUrlIsFresh({ video_cache_status: 'pruning', video_url_refreshed_at: new Date().toISOString() })` → false (a pruning row never 302s even with a fresh refresh time). Also unit-test id validation — `Number('abc')`/`0`/`-1`/`3000000000` (over int4) short-circuit to 404 before any `pool.query`. **[R5-2]** Factor the handler body into a small `serveVideo(post, { fs, videoDir, res })`-style function so the sendFile/302/404 branches are testable with fake `res`/`fs`, and add a route test: a fake row with `video_cache_status='pruning'` AND a present file asserts `res.sendFile` is NOT called (it falls through to 302/404). (If factoring proves awkward, the `videoUrlIsFresh` + id-validation units plus the Step-3 curls are the minimum gate — but the pruning-not-served branch must be covered somewhere.) (Auth is enforced by the `app.use('/video', requireAuth)` prefix, identical to `/thumb`, at `index.js:107`.)
 
 - [ ] **Step 3: Manual verify** — cache one video (seed a post + run a sweep locally, or drop a small mp4 at `videos/<id>.mp4`), then:
   - `curl -s -D- -o /dev/null "localhost:4000/video/<id>" -H 'Range: bytes=0-99'` → `206 Partial Content`, `Content-Range: bytes 0-99/<size>`, `Accept-Ranges: bytes`.
