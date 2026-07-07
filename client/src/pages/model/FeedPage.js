@@ -6,6 +6,8 @@ import useActiveInView from '../../hooks/useActiveInView';
 export default function FeedPage() {
   const [posts, setPosts] = useState([]);
   const [niches, setNiches] = useState([]);
+  const [availableNiches, setAvailableNiches] = useState([]);
+  const [activeNiche, setActiveNiche] = useState(null);
   const [page, setPage] = useState(1);
   const [loading, setLoading] = useState(false);
   const [savedIds, setSavedIds] = useState(new Set());
@@ -16,15 +18,16 @@ export default function FeedPage() {
   const loadFeed = useCallback(async () => {
     setLoading(true);
     try {
-      const { data } = await getMyFeed(page);
+      const { data } = await getMyFeed(page, activeNiche || undefined);
       setPosts(data.posts || []);
       setNiches(data.niches || []);
+      setAvailableNiches(data.availableNiches || []);
     } catch (err) {
       console.error('Failed to load feed:', err);
     } finally {
       setLoading(false);
     }
-  }, [page]);
+  }, [page, activeNiche]);
 
   const loadSaves = useCallback(async () => {
     try {
@@ -64,17 +67,48 @@ export default function FeedPage() {
     }
   };
 
+  const selectNiche = (value) => {
+    setActiveNiche(value);
+    setPage(1);
+  };
+
   return (
     <div className="px-3 py-4 space-y-4">
-      {niches.length > 0 && (
-        <div className="flex flex-wrap gap-1.5 px-1">
-          {niches.map((n) => (
-            <span key={n} className="px-2 py-0.5 rounded-full text-xs font-medium bg-gray-800 text-gray-400 border border-gray-700">
-              {n}
-            </span>
-          ))}
-        </div>
-      )}
+      <div className="flex items-center gap-2 overflow-x-auto px-1 py-1 -mx-1">
+        <button
+          onClick={() => selectNiche(null)}
+          className={`shrink-0 px-4 py-2 rounded-full text-sm font-medium whitespace-nowrap transition-colors ${
+            activeNiche === null
+              ? 'bg-yellow-500 text-gray-900'
+              : 'bg-gray-800 text-gray-400 border border-gray-700 hover:text-gray-200'
+          }`}
+        >
+          My Feed
+        </button>
+        {availableNiches.map((n) => (
+          <button
+            key={n.value}
+            onClick={() => selectNiche(n.value)}
+            className={`shrink-0 px-4 py-2 rounded-full text-sm font-medium whitespace-nowrap transition-colors ${
+              activeNiche === n.value
+                ? 'bg-yellow-500 text-gray-900'
+                : 'bg-gray-800 text-gray-400 border border-gray-700 hover:text-gray-200'
+            }`}
+          >
+            {n.label}
+          </button>
+        ))}
+        <button
+          onClick={() => selectNiche('all')}
+          className={`shrink-0 px-4 py-2 rounded-full text-sm font-medium whitespace-nowrap transition-colors ${
+            activeNiche === 'all'
+              ? 'bg-yellow-500 text-gray-900'
+              : 'bg-gray-800 text-gray-400 border border-gray-700 hover:text-gray-200'
+          }`}
+        >
+          All
+        </button>
+      </div>
 
       {loading ? (
         <div className="flex items-center justify-center py-20 text-gray-500">
@@ -96,6 +130,7 @@ export default function FeedPage() {
               key={post.id}
               post={post}
               variant="feed"
+              adaptiveMedia
               autoplayInView={autoplayInView}
               isActive={String(post.id ?? post.shortcode) === activeCardId}
               soundOn={soundOn}
