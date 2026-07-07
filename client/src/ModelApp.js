@@ -38,22 +38,22 @@ export default function ModelApp({ onLogout }) {
 
   return (
     <div className="min-h-screen bg-gray-950 flex flex-col">
-      {/* Top bar */}
-      <header className="border-b border-gray-800 bg-gray-950/80 backdrop-blur sticky top-0 z-40">
-        <div className="px-4 py-3 flex items-center justify-between">
+      {/* Top bar — light, uncluttered: one accent mark, restrained title weight */}
+      <header className="border-b border-gray-800/60 bg-gray-950/80 backdrop-blur sticky top-0 z-40">
+        <div className="max-w-xl mx-auto px-5 py-4 flex items-center justify-between">
           <div className="flex items-center gap-2.5">
             <div className="w-8 h-8 rounded-lg bg-gold/20 flex items-center justify-center shrink-0">
               <svg className="w-5 h-5 text-gold" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
                 <path strokeLinecap="round" strokeLinejoin="round" d="M15 10l4.553-2.276A1 1 0 0121 8.618v6.764a1 1 0 01-1.447.894L15 14M5 18h8a2 2 0 002-2V8a2 2 0 00-2-2H5a2 2 0 00-2 2v8a2 2 0 002 2z" />
               </svg>
             </div>
-            <h1 className="text-lg font-bold text-white">
+            <h1 className="text-lg font-semibold text-white tracking-tight">
               Insta<span className="text-gold">Scraper</span>
             </h1>
           </div>
           <button
             onClick={onLogout}
-            className="px-3 py-2 rounded-lg text-sm text-gray-500 hover:text-gray-300 hover:bg-gray-800 transition-colors"
+            className="w-11 h-11 -mr-2 flex items-center justify-center rounded-full text-gray-500 hover:text-gray-300 hover:bg-gray-800/60 transition-colors"
             title="Sign out"
           >
             <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
@@ -63,28 +63,31 @@ export default function ModelApp({ onLogout }) {
         </div>
       </header>
 
-      {/* Active page — bottom padding clears the fixed nav */}
-      <main className="flex-1 pb-20">
-        {tab === 'feed' && <FeedPage />}
-        {tab === 'saved' && <SavedPage />}
-        {tab === 'ideas' && <IdeasPage />}
+      {/* Active page — a calm max-width so content doesn't stretch edge-to-edge
+          on larger phones; bottom padding clears the fixed nav */}
+      <main className="flex-1 pb-24">
+        <div className="max-w-xl mx-auto">
+          {tab === 'feed' && <FeedPage />}
+          {tab === 'saved' && <SavedPage />}
+          {tab === 'ideas' && <IdeasPage />}
+        </div>
       </main>
 
-      {/* Fixed bottom nav */}
-      <nav className="fixed bottom-0 left-0 right-0 z-40 bg-gray-950/95 backdrop-blur border-t border-gray-800 pb-[env(safe-area-inset-bottom)]">
-        <div className="flex items-stretch">
+      {/* Fixed bottom nav — muted inactive icons, one clear gold active state */}
+      <nav className="fixed bottom-0 left-0 right-0 z-40 bg-gray-950/95 backdrop-blur border-t border-gray-800/60 pb-[env(safe-area-inset-bottom)]">
+        <div className="max-w-xl mx-auto flex items-stretch">
           {TABS.map((t) => {
             const active = tab === t.id;
             return (
               <button
                 key={t.id}
                 onClick={() => setTab(t.id)}
-                className={`flex-1 flex flex-col items-center justify-center gap-1 py-3 min-h-[64px] transition-colors ${
+                className={`flex-1 flex flex-col items-center justify-center gap-1 py-3.5 min-h-[60px] transition-colors ${
                   active ? 'text-gold' : 'text-gray-500 hover:text-gray-300'
                 }`}
               >
                 {t.icon(active)}
-                <span className="text-xs font-medium">{t.label}</span>
+                <span className={`text-[11px] ${active ? 'font-medium' : 'font-normal'}`}>{t.label}</span>
               </button>
             );
           })}

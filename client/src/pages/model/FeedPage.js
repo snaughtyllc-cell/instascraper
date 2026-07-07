@@ -5,7 +5,6 @@ import useActiveInView from '../../hooks/useActiveInView';
 
 export default function FeedPage() {
   const [posts, setPosts] = useState([]);
-  const [niches, setNiches] = useState([]);
   const [availableNiches, setAvailableNiches] = useState([]);
   const [activeNiche, setActiveNiche] = useState(null);
   const [page, setPage] = useState(1);
@@ -20,7 +19,6 @@ export default function FeedPage() {
     try {
       const { data } = await getMyFeed(page, activeNiche || undefined);
       setPosts(data.posts || []);
-      setNiches(data.niches || []);
       setAvailableNiches(data.availableNiches || []);
     } catch (err) {
       console.error('Failed to load feed:', err);
@@ -73,8 +71,8 @@ export default function FeedPage() {
   };
 
   return (
-    <div className="px-3 py-4 space-y-4">
-      <div className="flex items-center gap-2 overflow-x-auto px-1 py-1 -mx-1">
+    <div className="px-4 py-5 space-y-6">
+      <div className="no-scrollbar flex items-center gap-2.5 overflow-x-auto px-1 py-1 -mx-1">
         <button
           onClick={() => selectNiche(null)}
           className={`shrink-0 px-4 py-2 rounded-full text-sm font-medium whitespace-nowrap transition-colors ${
@@ -120,11 +118,11 @@ export default function FeedPage() {
         </div>
       ) : posts.length === 0 ? (
         <div className="text-center py-20">
-          <p className="text-gray-500 text-lg">No content yet.</p>
-          <p className="text-gray-600 text-sm mt-1">Check back soon — new reels for your niche land here.</p>
+          <p className="text-gray-400 text-base">No content yet.</p>
+          <p className="text-gray-600 text-sm mt-1.5">Check back soon — new reels for your niche land here.</p>
         </div>
       ) : (
-        <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-5">
           {posts.map((post) => (
             <ContentCard
               key={post.id}
@@ -144,19 +142,19 @@ export default function FeedPage() {
       )}
 
       {posts.length > 0 && (
-        <div className="flex items-center justify-center gap-2 pt-2 pb-4">
+        <div className="flex items-center justify-center gap-3 pt-3 pb-4">
           <button
             onClick={() => setPage((p) => Math.max(1, p - 1))}
             disabled={page === 1}
-            className="px-4 py-2 rounded-lg text-sm bg-gray-800 text-gray-300 hover:bg-gray-700 disabled:opacity-30"
+            className="min-h-[44px] px-5 flex items-center justify-center rounded-lg text-sm text-gray-300 bg-gray-800 hover:bg-gray-700 disabled:opacity-30"
           >
             Previous
           </button>
-          <span className="text-sm text-gray-400">Page {page}</span>
+          <span className="text-sm text-gray-500">Page {page}</span>
           <button
             onClick={() => setPage((p) => p + 1)}
             disabled={posts.length < 24}
-            className="px-4 py-2 rounded-lg text-sm bg-gray-800 text-gray-300 hover:bg-gray-700 disabled:opacity-30"
+            className="min-h-[44px] px-5 flex items-center justify-center rounded-lg text-sm text-gray-300 bg-gray-800 hover:bg-gray-700 disabled:opacity-30"
           >
             Next
           </button>
