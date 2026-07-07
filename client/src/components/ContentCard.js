@@ -1,4 +1,4 @@
-import React, { useState, useRef, useCallback } from 'react';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { tagPost, saveNotes, archivePost, setCreatorType, setPostContentType } from '../api';
 
 const API_URL = process.env.REACT_APP_API_URL || 'http://localhost:4000';
@@ -56,6 +56,11 @@ export default function ContentCard({
   variant = 'library',
   thumbnailBadges = [],
   actionSlot = null,
+  autoplayInView = false,
+  isActive = false,
+  soundOn = false,
+  onToggleSound,
+  registerRef,
 }) {
   const [expanded, setExpanded] = useState(false);
   const [notes, setNotes] = useState(post.notes || '');
@@ -106,8 +111,13 @@ export default function ContentCard({
 
   const tagBadge = TAG_OPTIONS.find((t) => t.value === post.tag);
 
+  const cardRef = useRef(null);
+  useEffect(() => {
+    if (autoplayInView && registerRef && cardRef.current) registerRef(cardId, cardRef.current);
+  }, [autoplayInView, registerRef, cardId]);
+
   return (
-    <div className={`bg-gray-900 rounded-xl border overflow-hidden group transition-colors ${selected ? 'border-gold ring-1 ring-gold/50' : 'border-gray-800 hover:border-gray-700'}`}>
+    <div ref={cardRef} className={`bg-gray-900 rounded-xl border overflow-hidden group transition-colors ${selected ? 'border-gold ring-1 ring-gold/50' : 'border-gray-800 hover:border-gray-700'}`}>
       {/* Thumbnail */}
       <div className="relative aspect-[4/5] bg-gray-800 overflow-hidden">
         {onToggleSelect && (
@@ -120,13 +130,28 @@ export default function ContentCard({
             />
           </label>
         )}
-        {showVideo && post.video_url ? (
-          <video
-            src={post.video_url}
-            controls
-            autoPlay
-            className="w-full h-full object-cover"
-          />
+        {(showVideo || (autoplayInView && isActive)) && post.video_url ? (
+          <>
+            <video
+              src={post.video_url}
+              autoPlay
+              playsInline
+              muted={autoplayInView ? !soundOn : false}
+              loop
+              controls={!autoplayInView}
+              className="w-full h-full object-cover"
+              onError={() => { /* Plan 3 wires re-resolve here */ }}
+            />
+            {autoplayInView && (
+              <button
+                onClick={(e) => { e.stopPropagation(); onToggleSound && onToggleSound(); }}
+                className="absolute bottom-2 right-2 z-10 w-9 h-9 rounded-full bg-black/60 text-white flex items-center justify-center"
+                title={soundOn ? 'Mute' : 'Unmute'}
+              >
+                {soundOn ? '🔊' : '🔇'}
+              </button>
+            )}
+          </>
         ) : (
           <>
             <img

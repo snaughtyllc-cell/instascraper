@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { getContent, getCreators, exportContent, importUrls, bulkUpdateContent, getContentTypes, addContentType } from '../api';
 import BulkActionBar from '../components/BulkActionBar';
 import ContentCard from '../components/ContentCard';
@@ -30,6 +30,39 @@ export default function LibraryTab() {
   });
   const [selected, setSelected] = useState(new Set());
   const [loading, setLoading] = useState(false);
+
+  const autoplayInView = typeof window !== 'undefined'
+    && window.matchMedia && window.matchMedia('(pointer: coarse)').matches;
+  const [activeCardId, setActiveCardId] = useState(null);
+  const [soundOn, setSoundOn] = useState(false);
+  const nodeMap = useRef(new Map());       // id -> DOM node
+  const ratioMap = useRef(new Map());      // id -> intersectionRatio
+  const observerRef = useRef(null);
+
+  const registerRef = useCallback((id, node) => {
+    if (!autoplayInView || !node) return;
+    nodeMap.current.set(id, node);
+    node.dataset.cardId = String(id);
+    if (observerRef.current) observerRef.current.observe(node);
+  }, [autoplayInView]);
+
+  useEffect(() => {
+    if (!autoplayInView) return;
+    const obs = new IntersectionObserver((entries) => {
+      for (const e of entries) {
+        const id = e.target.dataset.cardId;
+        ratioMap.current.set(id, e.isIntersecting ? e.intersectionRatio : 0);
+      }
+      let bestId = null, best = 0;
+      for (const [id, r] of ratioMap.current.entries()) {
+        if (r > best) { best = r; bestId = id; }
+      }
+      setActiveCardId(best >= 0.6 ? (isNaN(Number(bestId)) ? bestId : Number(bestId)) : null);
+    }, { threshold: [0, 0.6, 1] });
+    observerRef.current = obs;
+    for (const node of nodeMap.current.values()) obs.observe(node);
+    return () => obs.disconnect();
+  }, [autoplayInView, posts]);
 
   const loadCreatorTypes = useCallback(async () => {
     try {
@@ -227,6 +260,11 @@ export default function LibraryTab() {
               onUpdate={handleUpdate}
               selected={selected.has(post.id)}
               onToggleSelect={toggleSelect}
+              autoplayInView={autoplayInView}
+              isActive={post.id === activeCardId}
+              soundOn={soundOn}
+              onToggleSound={() => setSoundOn((s) => !s)}
+              registerRef={registerRef}
             />
           ))}
         </div>
