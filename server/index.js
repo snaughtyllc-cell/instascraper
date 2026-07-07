@@ -1113,11 +1113,27 @@ app.get('/me/saves', asyncHandler(async (req, res) => {
   res.json({ posts: r.rows });
 }));
 
+const { parseSourceShortcodes } = require('./idea-reels');
 app.get('/me/ideas', asyncHandler(async (req, res) => {
   const r = await pool.query(
     'SELECT * FROM idea_cards WHERE model_id = $1 ORDER BY created_at DESC LIMIT 50',
     [req.session.user.modelId]);
-  res.json({ ideas: r.rows });
+  const ideas = r.rows;
+  const perIdea = ideas.map(i => parseSourceShortcodes(i.source_post_ids));
+  const all = [...new Set(perIdea.flat())];
+  let byCode = {};
+  if (all.length) {
+    const ph = all.map((_, i) => `$${i + 1}`).join(', ');
+    const pr = await pool.query(
+      `SELECT id, shortcode, video_url, thumbnail_url, view_count, caption, post_url, content_type, account_handle, posted_at
+       FROM posts WHERE shortcode IN (${ph})`, all);
+    byCode = Object.fromEntries(pr.rows.map(p => [p.shortcode, p]));
+  }
+  const enriched = ideas.map((idea, k) => ({
+    ...idea,
+    sourceReels: perIdea[k].map(code => byCode[code]).filter(Boolean),
+  }));
+  res.json({ ideas: enriched });
 }));
 
 // ─── Static Files ───────────────────────────────────────────────
