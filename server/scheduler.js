@@ -369,6 +369,24 @@ async function runThumbnailSweep() {
   jobStatus.thumbnailSweep.status = 'idle';
 }
 
+// Periodic catch-up sweep: the post-scrape sweep only fires right after a scrape
+// and drains up to batchLimit rows, so pending stragglers and legacy catch-up rows
+// (pre-Plan-3 posts, never enqueued) can sit uncached. This runs every 30 min to
+// fill the cache continuously. sweepVideos downloads from the already-scraped IG
+// video_url (no Apify cost) — only CDN bandwidth — so a frequent, larger batch is safe.
+async function runVideoSweep() {
+  const { sweepVideos } = require('./videos');
+  jobStatus.videoSweep = jobStatus.videoSweep || {};
+  jobStatus.videoSweep.status = 'running';
+  try {
+    const t = await sweepVideos({ batchLimit: 100 });
+    jobStatus.videoSweep.message = `Swept: ${t.cached} cached, ${t.expired} expired, ${t.skipped} skipped, ${t.errored} errored`;
+  } catch (err) {
+    jobStatus.videoSweep.message = `Failed: ${err.message}`;
+  }
+  jobStatus.videoSweep.status = 'idle';
+}
+
 function startScheduler(scraper) {
   scraperInstance = scraper;
   cron.schedule('0 3 * * *', () => runAutoScrape()); // daily; cadence interval + per-cycle cap control actual spend
@@ -384,9 +402,14 @@ function startScheduler(scraper) {
   });
   cron.schedule('0 8 * * *', () => runIdeaGeneration()); // Daily 8am, checks delivery_day
   cron.schedule('0 5 * * *', () => runThumbnailSweep());
+  cron.schedule('*/30 * * * *', () => runVideoSweep()); // catch-up: fill the video cache continuously
+  // Kick one catch-up sweep ~20s after boot so the cache starts filling right after a
+  // deploy instead of waiting up to 30 min for the first cron tick. Delayed so it
+  // doesn't compete with cold-start request handling; runVideoSweep swallows its own errors.
+  setTimeout(() => runVideoSweep(), 20000);
   console.log('[Scheduler] All cron jobs registered');
 }
 
 function getSchedulerStatus() { return jobStatus; }
 
-module.exports = { startScheduler, getSchedulerStatus, runAutoScrape, runEngagementRollup, runAutoCleanup, runDiscovery, runIdeaGeneration, runThumbnailSweep, cadenceConfig, computeInterval, backoffDays, daysSince, isDue, selectDueAccounts, buildCadenceAccounts, discoveryConfig, selectDiscoverySources, qualifiesByReelShare };
+module.exports = { startScheduler, getSchedulerStatus, runAutoScrape, runEngagementRollup, runAutoCleanup, runDiscovery, runIdeaGeneration, runThumbnailSweep, runVideoSweep, cadenceConfig, computeInterval, backoffDays, daysSince, isDue, selectDueAccounts, buildCadenceAccounts, discoveryConfig, selectDiscoverySources, qualifiesByReelShare };
