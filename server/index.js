@@ -1054,6 +1054,13 @@ app.get('/me/saves', asyncHandler(async (req, res) => {
   res.json({ posts: r.rows });
 }));
 
+app.get('/me/ideas', asyncHandler(async (req, res) => {
+  const r = await pool.query(
+    'SELECT * FROM idea_cards WHERE model_id = $1 ORDER BY created_at DESC LIMIT 50',
+    [req.session.user.modelId]);
+  res.json({ ideas: r.rows });
+}));
+
 // ─── Static Files ───────────────────────────────────────────────
 
 const clientBuild = path.join(__dirname, '..', 'client', 'build');
