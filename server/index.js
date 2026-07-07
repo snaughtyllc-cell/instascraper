@@ -1068,11 +1068,22 @@ app.get('/me/feed', asyncHandler(async (req, res) => {
   const modelId = req.session.user.modelId; // requireModel guarantees this
   const m = await pool.query('SELECT primary_niche, secondary_niches FROM models WHERE id = $1', [modelId]);
   if (m.rows.length === 0) return res.status(404).json({ error: 'Model not found' });
-  const niches = parseNiches(m.rows[0]);
-  const { sql, params } = buildMeFeedQuery(niches, { page: Number(req.query.page) || 1, limit: 24 });
-  if (!sql) return res.json({ posts: [], niches });
-  const r = await pool.query(sql, params);
-  res.json({ posts: r.rows, niches });
+  const myNiches = parseNiches(m.rows[0]);
+  const page = Number(req.query.page) || 1;
+  const sel = (req.query.niche || '').trim();
+
+  let build, activeNiche;
+  if (sel === 'all') { build = buildMeFeedQuery([], { page, limit: 24, all: true }); activeNiche = 'all'; }
+  else if (sel)      { build = buildMeFeedQuery([sel], { page, limit: 24 }); activeNiche = sel; }
+  else               { build = buildMeFeedQuery(myNiches, { page, limit: 24 }); activeNiche = null; }
+
+  // The content-type vocabulary powers the switcher (models can't hit the admin /content-types route).
+  const av = await pool.query('SELECT value, label FROM content_types ORDER BY sort_order, label');
+  const availableNiches = av.rows;
+
+  if (!build.sql) return res.json({ posts: [], niches: myNiches, availableNiches, activeNiche });
+  const r = await pool.query(build.sql, build.params);
+  res.json({ posts: r.rows, niches: myNiches, availableNiches, activeNiche });
 }));
 
 const { saveParams } = require('./me-saves');
