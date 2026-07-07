@@ -89,3 +89,22 @@ No new rejections this round. Standing rejections remain R1-#4 (DB lease) and R1
 - R3-6 → Task 6 test: `videoUrlIsFresh` is exercised with real `video_url_refreshed_at`-shaped rows (not a phantom `status` field), including a 20-day-old pending row → false (proves pending isn't eternal).
 
 Standing rejections unchanged: R1-#4 (DB lease), R1-#7 removal (302 kept, gated).
+
+## Round 4 — Codex
+
+Convergence-stage internal-consistency findings (all valid):
+1. Task 5 pruning flow inconsistent: SELECT reselects `IS NOT NULL` (incl. 'pruning') but Phase 1 excludes 'pruning' → an already-'pruning' orphan is selected forever, never reclaimed. Fix: if status already 'pruning', skip Phase 1, go straight to unlink + finalize.
+2. Task 6 handler doesn't select `video_cache_status`, so a 'pruning' file can still be streamed mid-delete. Fix: select it, don't sendFile when 'pruning'.
+3. Task 4 stale prose/test from pre-R3: heading "freshness on scraped_at" + test "NULL-status row with scraped_at older…". Fix: assert on `video_url_refreshed_at`.
+4. Task 6 id validation `Number.isInteger && >0` lets huge values overflow PG int4. Fix: `Number.isSafeInteger(id) && id>0 && id<=2147483647`.
+5. Task 3 says "PASS (6 tests)" but now defines 7. Fix the count.
+
+VERDICT: REVISE
+
+### Claude's response (Round 4 → revised plan)
+All 5 incorporated (pure consistency/correctness, none rejected):
+- R4-1 → Task 5: select current status; if already 'pruning' skip Phase-1 claim and go straight to unlink+finalize (reclaims interrupted-run orphans); concrete implementation code added + a reclaim test.
+- R4-2 → Task 6: SELECT now includes `video_cache_status`; `sendFile` is skipped when status='pruning' (mid-delete → poster).
+- R4-3 → Task 4: selector heading + test #3 now reference `video_url_refreshed_at`, not `scraped_at`.
+- R4-4 → Task 6 + Global Constraints: id validation is `Number.isSafeInteger(id) && id>0 && id<=2147483647` (int4 ceiling).
+- R4-5 → Task 3: "PASS (6 tests)" → "(7 tests)".

@@ -23,7 +23,7 @@
 - **Size guard streams, never buffers unbounded [CX-6]:** `downloadVideo` streams the response body to a temp file while counting bytes and aborts + unlinks the moment the running total exceeds `VIDEO_MAX_MB` (default 60). This enforces the cap even when `content-length` is absent or lies, and never loads a whole MP4 into memory. (Thumbnails buffer because images are tiny; videos must not.)
 - **Serve via `res.sendFile`, not hand-rolled streaming [CX-8, CX-9, CX-15]:** the cached-file response uses `res.sendFile(file, { acceptRanges: true }, errCb)`. Express's `send` handles `Range` (206 + `Content-Range`/`Accept-Ranges`), unsatisfiable ranges (`416 bytes */size`), `Content-Type` from the `.mp4` extension, and passes any stream error (including a TOCTOU unlink between stat and open) to `errCb` so a missing file becomes a clean `404` instead of an uncaught crash. No custom `createReadStream` or range parser.
 - **Auth:** `GET /video/:id` sits behind `requireAuth` via `app.use('/video', requireAuth)` (exactly like `/thumb` at `index.js:107`), so both admin and — once Plan 2 lands — model sessions can stream. Not `requireAdmin`. **Cookie flow [CX-12, R2-9]:** the client calls `${API_URL}/video/:id`, and in production the Docker build bakes `REACT_APP_API_URL=https://instascraper-production-7281.up.railway.app` — the **same host that serves the SPA** (`express.static(clientBuild)`, `index.js:928`). So the request is first-party/same-site and the session cookie flows automatically, exactly as it already does for the working `${API_URL}/thumb/:id` reference (`ContentCard.js:76`). No CORS/`crossorigin` needed. `<video>` sends cookies for same-origin `src` by default. (Locally, `API_URL` is `http://localhost:4000` = the dev API, so it works there too.)
-- **Input validation [R2-10]:** `GET /video/:id` validates `id` with `Number.isInteger(id) && id > 0` before querying; a non-numeric `/video/abc` returns `404`, never a DB error.
+- **Input validation [R2-10, R4-4]:** `GET /video/:id` validates `id` with `Number.isSafeInteger(id) && id > 0 && id <= 2147483647` before querying — rejecting both non-numeric (`/video/abc`) and out-of-int4-range values (which would overflow Postgres's integer comparison) with a `404`, never a DB error.
 - **Migrations:** idempotent `ADD COLUMN IF NOT EXISTS`, per `server/db.js` (with its SQLite fallback branch).
 - **Base branch:** `video-cache` off `main` (the deploy branch). Commits: one per task.
 
@@ -291,7 +291,7 @@ try {
 
 Wrap the whole thing in the in-flight-dedup IIFE from `downloadThumbnail` keyed on `inflightKey`, with `finally { inflight.delete(inflightKey); }`. Add `downloadVideo` to `module.exports`.
 
-- [ ] **Step 4: Run → PASS** (6 tests). **Step 5: Commit** — `git commit -am "feat(video-cache): downloadVideo (pipeline byte-cap, url-scoped in-flight dedup)"`
+- [ ] **Step 4: Run → PASS** (7 tests). **Step 5: Commit** — `git commit -am "feat(video-cache): downloadVideo (pipeline byte-cap, url-scoped in-flight dedup)"`
 
 ---
 
@@ -305,7 +305,7 @@ Wrap the whole thing in the in-flight-dedup IIFE from `downloadThumbnail` keyed 
 - Consumes: `downloadVideo`.
 - Produces: `sweepVideos(opts?, deps?) : Promise<{attempted,cached,expired,skipped,errored}>` — mirrors `sweepThumbnails` (`thumbnails.js:50-106`) with the corrected selector and a URL-guarded update.
 
-**Selector [CX-1, CX-2, R2-3] — retention on `posted_at` (non-null), freshness on `scraped_at`:**
+**Selector [CX-1, CX-2, R2-3, R3-3] — retention on `posted_at` (non-null), freshness on `video_url_refreshed_at`:**
 
 ```sql
 SELECT id, shortcode, video_url FROM posts
@@ -334,7 +334,7 @@ If `video_url` changed since selection, 0 rows update and the row stays `'pendin
 - [ ] **Step 1: Write the failing test (in-memory adapter + fake download)** [CX-14] — assert:
   1. a `'pending'` row within retention gets downloaded and its status set to `'cached'` with `video_cached_at` populated;
   2. an already-`'cached'` row is not reselected;
-  3. a `NULL`-status row with a `scraped_at` older than `freshnessDays` is NOT selected;
+  3. a `NULL`-status row with a `video_url_refreshed_at` older than `freshnessDays` (or NULL) is NOT selected;
   4. a `'pending'` row whose `posted_at` is older than `maxAgeDays` is NOT selected (retention gate);
   5. **[R2-3]** a `'pending'` row whose `posted_at IS NULL` is NOT selected (never cache the unprunable);
   6. **stale-URL race [CX-3]:** when the row's `video_url` is changed between selection and the status write (simulate by having the fake `download` mutate the row's URL, or by asserting the UPDATE carries `WHERE ... AND video_url = <selected>`), the status write does NOT overwrite — the row remains `'pending'`.
@@ -368,12 +368,29 @@ UPDATE posts SET video_cache_status = NULL WHERE id = $1 AND video_cache_status 
 ```
 
 - A `'pruning'` row is served as **not cached** by `/video/:id` and is **not fresh** (`videoUrlIsFresh` returns false), so it shows the poster during deletion. The sweep never reselects it (it's neither `pending` nor `NULL`).
-- If the process dies between phases, the row stays `'pruning'` with `video_cache_status IS NOT NULL`, so the **next** prune reselects it (its SELECT filter is `posted_at < cutoff AND video_cache_status IS NOT NULL`), retries the unlink → ENOENT → Phase 3 clears it. No orphaned file, no zombie-cached row.
-- On a non-ENOENT unlink error, skip Phase 3 (leave it `'pruning'`) and log — the next run retries.
+- **[R4-1] Reclaiming an already-`'pruning'` orphan.** The SELECT reselects `video_cache_status IS NOT NULL`, which INCLUDES a row stuck at `'pruning'` from an interrupted prior run. But Phase 1 excludes `<> 'pruning'`, so it would change 0 rows for such an orphan → without special handling it's reselected forever, never reclaimed. Fix: **select the current status; if it is already `'pruning'`, SKIP Phase 1 and go straight to unlink + Phase 3.** Only rows that are NOT yet `'pruning'` need the Phase-1 claim (and must skip on 0 changes = raced).
+- On a non-ENOENT unlink error, skip Phase 3 (leave it `'pruning'`) and log — the next run reselects and retries. No orphaned file, no zombie-cached row.
 
-- [ ] **Step 1: Write the failing test** [CX-14, R2-2, R3-5] — seed two posts (one 40 days old with a cached file present, one 5 days old); run `pruneOldVideos({maxAgeDays:30})`; assert the old file was `unlinkSync`'d and its status ended `NULL`, the recent one untouched; assert a missing file (ENOENT) still finalizes to `NULL` and does not throw; assert an already-`'pruning'` orphan (file present, no unlink error) is reclaimed to `NULL`; assert a simulated non-ENOENT unlink error leaves status `'pruning'` (retryable), not `NULL`.
+- [ ] **Step 1: Write the failing test** [CX-14, R2-2, R3-5, R4-1] — seed two posts (one 40 days old with a cached file present, one 5 days old); run `pruneOldVideos({maxAgeDays:30})`; assert the old file was `unlinkSync`'d and its status ended `NULL`, the recent one untouched; assert a missing file (ENOENT) still finalizes to `NULL` and does not throw; **assert an already-`'pruning'` orphan (status `'pruning'`, file present) IS reclaimed to `NULL` and its file unlinked** (this is the R4-1 case — it must not require a fresh Phase-1 claim); assert a simulated non-ENOENT unlink error leaves status `'pruning'` (retryable), not `NULL`.
 
-- [ ] **Step 2: Run → FAIL. Step 3: implement** — SELECT `id` of posts with `posted_at < cutoff AND video_cache_status IS NOT NULL`; for each: run Phase-1 UPDATE; if it changed a row (`changes`/`rowCount` > 0), `try { fs.unlinkSync(videoFilePath(post, videoDir)); } catch (e) { if (e.code !== 'ENOENT') { console.error('[Prune] unlink failed', e.code); continue; } }` then Phase-3 UPDATE. Log `[Metric] video_prune deleted=N` (rows finalized to NULL). Add to exports.
+- [ ] **Step 2: Run → FAIL. Step 3: implement** — `SELECT id, video_cache_status FROM posts WHERE posted_at < cutoff AND video_cache_status IS NOT NULL`; for each row:
+
+```js
+if (row.video_cache_status !== 'pruning') {
+  const claim = await db.query(
+    `UPDATE posts SET video_cache_status='pruning', video_cached_at=NULL
+     WHERE id=$1 AND posted_at < $2 AND video_cache_status IS NOT NULL AND video_cache_status <> 'pruning'`,
+    [row.id, cutoff]);
+  if ((claim.rowCount || claim.changes || 0) === 0) continue;   // raced / already handled
+}
+// row is now 'pruning' (freshly claimed OR pre-existing orphan) → delete + finalize
+try { fs.unlinkSync(videoFilePath(row, videoDir)); }
+catch (e) { if (e.code !== 'ENOENT') { console.error('[Prune] unlink failed', e.code); continue; } }
+await db.query(`UPDATE posts SET video_cache_status=NULL WHERE id=$1 AND video_cache_status='pruning'`, [row.id]);
+deleted++;
+```
+
+Log `[Metric] video_prune deleted=N` (rows finalized to NULL). Add to exports.
 
 - [ ] **Step 4: Run → PASS. Step 5: Commit** — `git commit -am "feat(video-cache): pruneOldVideos rolling recycle (guarded clear)"`
 
@@ -387,7 +404,7 @@ UPDATE posts SET video_cache_status = NULL WHERE id = $1 AND video_cache_status 
 
 **Interfaces:**
 - Consumes: `videoFilePath`, `DEFAULT_VIDEO_DIR`.
-- Produces: `GET /video/:id` — validates `id` [R2-10]; if the cached file exists → `res.sendFile` (Express handles `Range`→206/416, `Content-Type`, `Accept-Ranges`, and stream errors via the callback). If not cached, `302` to `video_url` **only when the URL is plausibly still fresh** [R2-1] (`status='pending'` OR `status IS NULL AND scraped_at >= freshnessCutoff`); for a known-dead URL (`status` in `expired`/`error`/`skipped`, or an old `scraped_at`) return `404` so the shipped poster wins immediately with no wasted `302→403` round-trip. Else `404`.
+- Produces: `GET /video/:id` — validates `id` [R2-10, R4-4]; serves the cached file with `res.sendFile` (Express handles `Range`→206/416, `Content-Type`, `Accept-Ranges`, stream errors via the callback) UNLESS the row is `'pruning'` [R4-2] (mid-delete → treat as uncached). If not served, `302` to `video_url` **only when `video_url_refreshed_at` is within the freshness window** [R2-1, R3-2]; for a stale/absent refresh time return `404` so the shipped poster wins immediately with no wasted `302→403`. Else `404`.
 
 > **[CX-9] TOCTOU is handled by `res.sendFile`'s error callback.** If prune unlinks the file between the `statSync` check and the send, `sendFile` invokes `errCb(err)`; we translate any post-headers error to a best-effort `404` (guarded by `res.headersSent`). No uncaught stream crash.
 
@@ -407,14 +424,18 @@ function videoUrlIsFresh(post, freshnessDays = 14) {
 
 app.get('/video/:id', asyncHandler(async (req, res) => {
   const id = Number(req.params.id);
-  if (!Number.isInteger(id) || id <= 0) return res.status(404).send('not found');   // [R2-10]
+  // [R2-10, R4-4] reject non-ids AND values past Postgres int4 max (would overflow the comparison)
+  if (!Number.isSafeInteger(id) || id <= 0 || id > 2147483647) return res.status(404).send('not found');
   const r = await pool.query(
-    'SELECT id, video_url, video_url_refreshed_at FROM posts WHERE id = $1', [id]);
+    'SELECT id, video_url, video_url_refreshed_at, video_cache_status FROM posts WHERE id = $1', [id]);
   const post = r.rows[0];
   if (!post) return res.status(404).send('not found');
   const file = videoFilePath(post, DEFAULT_VIDEO_DIR);
   let cached = false;
-  try { cached = fs.statSync(file).size > 0; } catch { cached = false; }
+  // [R4-2] a 'pruning' row's file is mid-delete — do not serve it; fall through to poster.
+  if (post.video_cache_status !== 'pruning') {
+    try { cached = fs.statSync(file).size > 0; } catch { cached = false; }
+  }
   if (cached) {
     return res.sendFile(file, { acceptRanges: true }, (err) => {
       if (err && !res.headersSent) res.status(404).end();      // TOCTOU / vanished file
