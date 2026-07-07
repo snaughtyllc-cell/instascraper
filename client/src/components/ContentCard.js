@@ -1,4 +1,4 @@
-import React, { useState, useRef, useCallback } from 'react';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { tagPost, saveNotes, archivePost, setCreatorType, setPostContentType } from '../api';
 
 const API_URL = process.env.REACT_APP_API_URL || 'http://localhost:4000';
@@ -7,15 +7,6 @@ const TAG_OPTIONS = [
   { value: 'recreate', label: 'Recreate', icon: '\u2705', color: 'bg-green-600' },
   { value: 'reference', label: 'Reference', icon: '\uD83D\uDCCC', color: 'bg-blue-600' },
   { value: 'skip', label: 'Skip', icon: '\u274C', color: 'bg-red-600' },
-];
-
-const CONTENT_TYPES = [
-  { value: 'talking', label: 'Talking' },
-  { value: 'dance', label: 'Dance' },
-  { value: 'skit', label: 'Skit' },
-  { value: 'snapchat', label: 'Snapchat' },
-  { value: 'omegle', label: 'Omegle' },
-  { value: 'osc', label: 'OSC' },
 ];
 
 function formatCount(n) {
@@ -57,12 +48,19 @@ const BADGE_POSITIONS = {
 export default function ContentCard({
   post,
   creatorTypes = {},
+  contentTypes = [],
+  onAddContentType,
   onUpdate,
   selected = false,
   onToggleSelect,
   variant = 'library',
   thumbnailBadges = [],
   actionSlot = null,
+  autoplayInView = false,
+  isActive = false,
+  soundOn = false,
+  onToggleSound,
+  registerRef,
 }) {
   const [expanded, setExpanded] = useState(false);
   const [notes, setNotes] = useState(post.notes || '');
@@ -70,6 +68,7 @@ export default function ContentCard({
   const saveTimer = useRef(null);
   const cardId = post.id ?? post.shortcode;
   const isLibrary = variant === 'library';
+  const reelUrl = post.post_url || (post.shortcode ? `https://www.instagram.com/reel/${post.shortcode}/` : null);
   const thumbnailSrc = !isLibrary && post.thumbnail_url
     ? post.thumbnail_url
     : cardId
@@ -91,17 +90,27 @@ export default function ContentCard({
     }, 800);
   }, [post.id]);
 
-  const handleCreatorType = async (e) => {
-    const val = e.target.value || null;
-    await setCreatorType(post.account_handle, val);
-    onUpdate();
+  const maybeAdd = async (val, apply) => {
+    if (val === '__add__') {
+      const label = window.prompt('New type name:');
+      if (!label || !onAddContentType) return;
+      const created = await onAddContentType(label);
+      if (created && created.value) await apply(created.value);
+      return;
+    }
+    await apply(val || null);
   };
 
-  const handlePostType = async (e) => {
-    const val = e.target.value || null;
-    await setPostContentType(post.id, val);
-    onUpdate();
-  };
+  const handleCreatorType = (e) => maybeAdd(e.target.value, (v) =>
+    setCreatorType(post.account_handle, v).then(onUpdate).catch((err) => {
+      window.alert('Could not set creator type: ' + (err.response?.data?.error || err.message));
+      onUpdate();
+    }));
+  const handlePostType = (e) => maybeAdd(e.target.value, (v) =>
+    setPostContentType(post.id, v).then(onUpdate).catch((err) => {
+      window.alert('Could not set video type: ' + (err.response?.data?.error || err.message));
+      onUpdate();
+    }));
 
   const handleArchive = async () => {
     await archivePost(post.id, !post.archived);
@@ -110,8 +119,16 @@ export default function ContentCard({
 
   const tagBadge = TAG_OPTIONS.find((t) => t.value === post.tag);
 
+  const cardRef = useRef(null);
+  useEffect(() => {
+    if (!autoplayInView || !registerRef || !cardRef.current) return;
+    const el = cardRef.current;
+    registerRef(cardId, el);
+    return () => registerRef(cardId, null);
+  }, [autoplayInView, registerRef, cardId]);
+
   return (
-    <div className={`bg-gray-900 rounded-xl border overflow-hidden group transition-colors ${selected ? 'border-gold ring-1 ring-gold/50' : 'border-gray-800 hover:border-gray-700'}`}>
+    <div ref={cardRef} className={`bg-gray-900 rounded-xl border overflow-hidden group transition-colors ${selected ? 'border-gold ring-1 ring-gold/50' : 'border-gray-800 hover:border-gray-700'}`}>
       {/* Thumbnail */}
       <div className="relative aspect-[4/5] bg-gray-800 overflow-hidden">
         {onToggleSelect && (
@@ -124,13 +141,28 @@ export default function ContentCard({
             />
           </label>
         )}
-        {showVideo && post.video_url ? (
-          <video
-            src={post.video_url}
-            controls
-            autoPlay
-            className="w-full h-full object-cover"
-          />
+        {(showVideo || (autoplayInView && isActive)) && post.video_url ? (
+          <>
+            <video
+              src={post.video_url}
+              autoPlay
+              playsInline
+              muted={autoplayInView ? !soundOn : false}
+              loop={autoplayInView}
+              controls={!autoplayInView}
+              className="w-full h-full object-cover"
+              onError={() => { /* Plan 3 wires re-resolve here */ }}
+            />
+            {autoplayInView && (
+              <button
+                onClick={(e) => { e.stopPropagation(); onToggleSound && onToggleSound(); }}
+                className="absolute bottom-2 right-2 z-10 w-9 h-9 rounded-full bg-black/60 text-white flex items-center justify-center"
+                title={soundOn ? 'Mute' : 'Unmute'}
+              >
+                {soundOn ? '🔊' : '🔇'}
+              </button>
+            )}
+          </>
         ) : (
           <>
             <img
@@ -144,7 +176,7 @@ export default function ContentCard({
                 }
               }}
             />
-            {post.video_url && (
+            {!autoplayInView && post.video_url && (
               <button
                 onClick={() => setShowVideo(true)}
                 className="absolute inset-0 flex items-center justify-center bg-black/30 opacity-0 group-hover:opacity-100 transition-opacity"
@@ -287,9 +319,10 @@ export default function ContentCard({
                 }`}
               >
                 <option value="">Creator...</option>
-                {CONTENT_TYPES.map((ct) => (
+                {contentTypes.map((ct) => (
                   <option key={ct.value} value={ct.value}>{ct.label}</option>
                 ))}
+                <option value="__add__">＋ Add new type…</option>
               </select>
               <select
                 value={post.content_type || ''}
@@ -302,9 +335,10 @@ export default function ContentCard({
                 }`}
               >
                 <option value="">Video...</option>
-                {CONTENT_TYPES.map((ct) => (
+                {contentTypes.map((ct) => (
                   <option key={ct.value} value={ct.value}>{ct.label}</option>
                 ))}
+                <option value="__add__">＋ Add new type…</option>
               </select>
             </div>
 
@@ -329,6 +363,18 @@ export default function ContentCard({
               {post.archived ? '📦 Unarchive' : '📦 Archive'}
             </button>
           </>
+        )}
+
+        {reelUrl && (
+          <a
+            href={reelUrl}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="w-full flex items-center justify-center gap-1.5 px-2 py-1.5 rounded-lg text-xs font-medium border border-gray-700 bg-gray-800 text-gray-300 hover:text-white hover:border-gray-600"
+          >
+            <svg className="w-3.5 h-3.5" fill="currentColor" viewBox="0 0 24 24"><path d="M12 2.2c3.2 0 3.6 0 4.9.1 1.2.1 1.8.3 2.2.4.6.2 1 .5 1.4.9.4.4.7.8.9 1.4.1.4.3 1 .4 2.2.1 1.3.1 1.7.1 4.9s0 3.6-.1 4.9c-.1 1.2-.3 1.8-.4 2.2-.2.6-.5 1-.9 1.4-.4.4-.8.7-1.4.9-.4.1-1 .3-2.2.4-1.3.1-1.7.1-4.9.1s-3.6 0-4.9-.1c-1.2-.1-1.8-.3-2.2-.4a3.9 3.9 0 0 1-1.4-.9 3.9 3.9 0 0 1-.9-1.4c-.1-.4-.3-1-.4-2.2C2.2 15.6 2.2 15.2 2.2 12s0-3.6.1-4.9c.1-1.2.3-1.8.4-2.2.2-.6.5-1 .9-1.4.4-.4.8-.7 1.4-.9.4-.1 1-.3 2.2-.4C8.4 2.2 8.8 2.2 12 2.2Zm0 3.2A6.6 6.6 0 1 0 18.6 12 6.6 6.6 0 0 0 12 5.4Zm0 10.9A4.3 4.3 0 1 1 16.3 12 4.3 4.3 0 0 1 12 16.3Zm6.9-11.1a1.5 1.5 0 1 0 1.5 1.5 1.5 1.5 0 0 0-1.5-1.5Z"/></svg>
+            Open on Instagram
+          </a>
         )}
 
         {actionSlot}

@@ -17,6 +17,9 @@ export const archivePost = (id, archived) => api.post(`/content/${id}/archive`, 
 export const setCreatorType = (handle, contentType) => api.post(`/creators/${handle}/type`, { contentType });
 export const setPostContentType = (id, contentType) => api.post(`/content/${id}/content-type`, { contentType });
 export const bulkUpdateContent = (ids, action, value) => api.post('/content/bulk', { ids, action, value });
+export const getContentTypes = () => api.get('/content-types');
+export const addContentType = (label) => api.post('/content-types', { label });
+export const deleteContentType = (id) => api.delete(`/content-types/${id}`);
 export const getCreators = () => api.get('/creators');
 
 export const exportContent = (format = 'json') => {
