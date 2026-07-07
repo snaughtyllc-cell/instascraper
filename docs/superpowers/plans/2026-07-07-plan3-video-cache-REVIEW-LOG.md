@@ -42,3 +42,37 @@ VERDICT: REVISE
 **Rejected (2 findings), with reasons:**
 - #4 (cross-process `pending→downloading` DB lease): rejected. The app runs single-instance on Railway; the URL-guarded UPDATE (#3) + unique-temp atomic rename + url-scoped in-flight map (#5) eliminate the actual harms (stale overwrite, temp collision, stale-promise reuse). Worst residual = one redundant download to an idempotent atomic path (wasted bandwidth, bounded by batchLimit×concurrency). A lease adds a `downloading` state + stuck-lease reclamation for zero benefit at one instance. Noted as a future item if we ever scale horizontally.
 - #7 (remove the 302 fallback because it "leaks" the signed URL and doesn't fix expired URLs): the *removal* is rejected; the 302 is kept but narrowed to the uncached branch. It lets a freshly-scraped-but-not-yet-swept video play immediately from its still-fresh URL; for an expired URL it degrades to `302→403→onError→poster`, identical to the already-shipped behavior, so it never does worse than a 404. No new exposure: the request is authenticated and same-origin, and the client already held that exact signed URL as its direct `<video src>` before Plan 3. (Codex's cleaner 404-and-poster was seriously considered; the fresh-play win tipped it.)
+
+## Round 2 — Codex
+
+Materially improved; not blocking on the rejected DB lease. Remaining:
+1. Fresh-only 302 is still UNCONDITIONAL in Task 6 (redirects any uncached row with a video_url regardless of status/scraped_at). Fix: select `video_cache_status, scraped_at`; redirect only when `status='pending'` OR `scraped_at >= freshnessCutoff`, else 404 (poster wins).
+2. Prune's race guard happens AFTER unlinkSync → a row that becomes in-window between SELECT and UPDATE keeps DB state but loses its file. Fix: guarded claim (UPDATE ... only when stale) FIRST, unlink only when the claim succeeds.
+3. `(posted_at >= retentionCutoff OR posted_at IS NULL)` in Task 4 is unbounded: Task 5 never prunes `posted_at IS NULL`. Fix: exclude null posted_at from caching, or use scraped_at as retention fallback and prune the same way.
+4. Reusing thumbnail's SQLite cutoff format for BOTH scraped_at and posted_at is wrong: scraper `posted_at` is ISO `T...Z`, SQLite `scraped_at` is space-formatted → boundary comparisons wrong. Fix: format the posted_at cutoff as full ISO, scraped_at cutoff in the backend-specific format.
+5. Task 1 "real migration" test mutates server/instascraper.db, contradicting the in-memory constraint + order-dependent. Fix: temp SQLite path/env override, or export a migration helper runnable against an in-memory adapter.
+6. Task 3's fake stream may rename before the write stream flushes and doesn't test write errors/backpressure. Fix: require stream.pipeline/finished() with a byte-counting transform; test against a real temp dir for success + over-cap.
+7. tempVideoPath uses only pid+Date.now(); with url-scoped in-flight keys, two same-id/different-url downloads can collide in one ms. Fix: add crypto.randomUUID()/counter.
+8. importByUrls (returns scraper.js:1132) never kicks a video sweep; the sweep call is only in the main flow (scraper.js:719). Fix: fire sweepVideos after URL imports too.
+9. Same-origin auth claim conflicts with Task 9's `${API_URL}/video/${cardId}` — API_URL defaults to http://localhost:4000 (ContentCard.js:4), not relative. Fix: use `/video/${cardId}` when Express serves the build, or make API base same-origin in prod.
+10. `Number(req.params.id)` unvalidated → `/video/abc` → DB error not 400/404. Fix: validate `Number.isSafeInteger(id)` before querying.
+
+VERDICT: REVISE
+
+### Claude's response (Round 2 → revised plan)
+
+**Verified before revising:** `posted_at` is written via `.toISOString()` (scraper.js:62,632,1098) → ISO `…T…Z` in both backends; `scraped_at` is a DB default (space-formatted in SQLite) — R2-4 confirmed. `importByUrls` returns at scraper.js:1132 with no sweep; main sweep is at scraper.js:720 — R2-8 confirmed. SQLite path is hardcoded `path.join(__dirname,'instascraper.db')` (db.js:23), migration arrays inline in initDB — R2-5 confirmed. Prod bakes `REACT_APP_API_URL=https://instascraper-production-7281.up.railway.app` (Dockerfile:11) = the SPA's own host, and `${API_URL}/thumb/:id` already works authed → R2-9 is a same-host first-party request, not cross-origin.
+
+**All 10 incorporated:**
+- R2-1 → Task 6: added `videoUrlIsFresh(post)`; 302 only when `status='pending'` OR (`status IS NULL` AND `scraped_at >= freshnessCutoff`); expired/error/skipped/stale → 404 so the poster wins with no wasted 302→403.
+- R2-2 → Task 5: reversed to claim-then-unlink — guarded UPDATE first, `unlinkSync` only when `changes`/`rowCount` > 0. File never outlives-loses its DB claim.
+- R2-3 → Task 4: selector is now `posted_at IS NOT NULL AND posted_at >= retentionCutoff` (dropped `OR posted_at IS NULL`). Null-posted_at is unprunable (prune keys off `posted_at < cutoff`), so caching it would leak forever; those rare rows play via 302/poster instead. Cached set == prunable set. Added a test.
+- R2-4 → Task 4 + Global Constraints: two cutoffs — `retentionCutoff = new Date(...).toISOString()` (ISO-Z for posted_at, same in both backends); `freshnessCutoff` in the existing backend-specific scraped_at format. Never share one string.
+- R2-5 → Task 1 + db.js: hoist the SQLite posts-migration array to a module-level `SQLITE_POSTS_MIGRATIONS` export; the test runs those exact statements against a `:memory:` DB and asserts the video columns — non-vacuous AND zero disk side-effect (no more mutating instascraper.db).
+- R2-6 → Task 3: `stream.pipeline(res.body, byteCountTransform, createWriteStream(tmp))` with rename AFTER the pipeline resolves (flush-safe); Transform errors past the cap → skipped. Tests use a real `os.tmpdir()` subdir + real `Readable.from([...])` body and assert real on-disk bytes (the one sanctioned fake-fs exception, documented in Global Constraints).
+- R2-7 → Task 2: `tempVideoPath` includes `crypto.randomBytes(6).toString('hex')` so two same-id/different-url concurrent writers can't collide.
+- R2-8 → Task 7: fire `sweepVideos({batchLimit:60})` after the main scrape (scraper.js:720) AND before importByUrls' return (scraper.js:1132).
+- R2-9 → Task 9 + Global Constraints: reworded — cookie flow is grounded in the baked prod origin (same host as SPA), mirroring the already-working `${API_URL}/thumb/:id`; not a "relative" claim.
+- R2-10 → Task 6: `if (!Number.isInteger(id) || id <= 0) return 404` before any query.
+
+No new rejections this round. Standing rejections remain R1-#4 (DB lease) and R1-#7's removal (302 kept, now gated).
