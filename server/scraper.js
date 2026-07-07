@@ -621,6 +621,10 @@ class InstagramScraper {
     let count = 0;
     let matched = 0;
     let accountHandle = '';
+    // [R3-2, R3-3] One ISO-Z timestamp per scrape, bound as a param — not a SQL
+    // NOW()/CURRENT_TIMESTAMP default, which renders differently per backend and
+    // would break sweepVideos' ISO-Z freshness comparison against this column.
+    const nowIso = new Date().toISOString();
 
     for (const item of items) {
       const likes = (item.likesCount != null && item.likesCount >= 0) ? item.likesCount : (item.likes || 0);
@@ -666,8 +670,9 @@ class InstagramScraper {
       try {
         const insertResult = await pool.query(`
           INSERT INTO posts (shortcode, video_url, thumbnail_url, caption, like_count, comment_count,
-            view_count, posted_at, account_handle, post_url, source_query, followers_at_scrape, er_percent, er_label, tagged_users)
-          VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)
+            view_count, posted_at, account_handle, post_url, source_query, followers_at_scrape, er_percent, er_label, tagged_users,
+            video_cache_status, video_url_refreshed_at)
+          VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17)
           ON CONFLICT (shortcode) DO UPDATE SET
             thumbnail_url = EXCLUDED.thumbnail_url,
             video_url = EXCLUDED.video_url,
@@ -678,12 +683,15 @@ class InstagramScraper {
             er_percent = EXCLUDED.er_percent,
             er_label = EXCLUDED.er_label,
             tagged_users = EXCLUDED.tagged_users,
-            thumbnail_cache_status = 'pending'
+            thumbnail_cache_status = 'pending',
+            video_cache_status = 'pending',
+            video_url_refreshed_at = EXCLUDED.video_url_refreshed_at
         `, [
           post.shortcode, post.videoUrl, post.thumbnailUrl, post.caption,
           post.likeCount, post.commentCount, post.viewCount, post.postedAt,
           post.accountHandle, post.postUrl, post.sourceQuery,
           post.followersAtScrape, post.erPercent, post.erLabel, taggedJson,
+          'pending', nowIso,
         ]);
         if (insertResult.rowCount > 0) count++; // counts both new inserts and refreshed rows
       } catch (e) {
@@ -718,6 +726,7 @@ class InstagramScraper {
 
     // Fire-and-forget: cache thumbnails for the just-scraped posts while URLs are fresh.
     sweepThumbnails({ batchLimit: 80 }).catch(err => console.error('[Sweep] post-scrape sweep failed:', err.message));
+    require('./videos').sweepVideos({ batchLimit: 60 }).catch(err => console.error('[Sweep] post-scrape video sweep failed:', err.message));
   }
 
   _passesFilters(post, filters) {
@@ -1088,6 +1097,9 @@ class InstagramScraper {
     }
 
     let count = 0;
+    // [R3-2, R3-3] One ISO-Z timestamp per import call, bound as a param — see the
+    // matching note in _handleScrapeResults above.
+    const nowIso = new Date().toISOString();
     for (const item of items) {
       const likes = (item.likesCount != null && item.likesCount >= 0) ? item.likesCount : (item.likes || 0);
       const comments = (item.commentsCount != null && item.commentsCount >= 0) ? item.commentsCount : (item.comments || 0);
@@ -1111,8 +1123,9 @@ class InstagramScraper {
       try {
         const insertResult = await pool.query(`
           INSERT INTO posts (shortcode, video_url, thumbnail_url, caption, like_count, comment_count,
-            view_count, posted_at, account_handle, post_url, source_query, followers_at_scrape, er_percent, er_label, tagged_users)
-          VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)
+            view_count, posted_at, account_handle, post_url, source_query, followers_at_scrape, er_percent, er_label, tagged_users,
+            video_cache_status, video_url_refreshed_at)
+          VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17)
           ON CONFLICT (shortcode) DO NOTHING
         `, [
           shortcode,
@@ -1124,10 +1137,15 @@ class InstagramScraper {
           item.url || (item.shortCode ? `https://www.instagram.com/p/${item.shortCode}/` : ''),
           'manual_import',
           itemFollowers, er_percent, er_label, taggedJson,
+          'pending', nowIso,
         ]);
         if (insertResult.rowCount > 0) count++;
       } catch (e) { /* skip duplicates */ }
     }
+
+    // Fire-and-forget: same drain as the main scrape path, so URL-imported videos
+    // aren't stranded 'pending' until some unrelated future scrape sweeps them.
+    require('./videos').sweepVideos({ batchLimit: 60 }).catch(err => console.error('[Sweep] post-scrape video sweep failed:', err.message));
 
     return { imported: count, total: cleanUrls.length, scraped: items.length };
   }

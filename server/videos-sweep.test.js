@@ -81,6 +81,26 @@ test('sweepVideos: an already-cached row is not reselected', async () => {
   assert.deepStrictEqual(seen, []);
 });
 
+test('sweepVideos: a NULL-status row with a FRESH video_url_refreshed_at IS selected (legacy pre-column-backfill branch)', async () => {
+  const { sqlite, query } = makeDb();
+  // NULL status (row predates the video_cache_status column / scrape enqueue), but
+  // video_url_refreshed_at is within freshnessDays (14) -> the legacy branch must still
+  // pick it up so pre-existing rows aren't stranded uncached forever.
+  insertPost(sqlite, { id: 9, shortcode: 'legacy-fresh', video_url: 'http://x/9.mp4', video_cache_status: null, video_url_refreshed_at: isoDaysAgo(5), posted_at: isoDaysAgo(5) });
+
+  const res = await sweepVideos({}, {
+    db: { query },
+    download: async () => ({ status: 'cached' }),
+    delay: () => Promise.resolve(),
+    now: () => NOW,
+  });
+
+  assert.equal(res.attempted, 1);
+  assert.equal(res.cached, 1);
+  const row = sqlite.prepare(`SELECT * FROM posts WHERE id = 9`).get();
+  assert.equal(row.video_cache_status, 'cached');
+});
+
 test('sweepVideos: a NULL-status row with a stale/NULL video_url_refreshed_at is NOT selected', async () => {
   const { sqlite, query } = makeDb();
   // NULL status, video_url_refreshed_at older than freshnessDays (14) -> excluded
