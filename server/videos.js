@@ -93,30 +93,48 @@ async function downloadVideo(post, deps = {}) {
 }
 
 async function sweepVideos(opts = {}, deps = {}) {
-  const { maxAgeDays = 30, freshnessDays = 14, batchLimit = 60, concurrency = 3 } = opts;
+  const {
+    maxAgeDays = 30,
+    freshnessDays = Number(process.env.VIDEO_FRESHNESS_DAYS || 2),
+    legacyDays = Number(process.env.VIDEO_LEGACY_CATCHUP_DAYS || 3),
+    batchLimit = 60,
+    concurrency = 3,
+  } = opts;
   const db = deps.db || require('./db');
   const download = deps.download || ((p) => downloadVideo(p, { videoDir: deps.videoDir }));
   const delay = deps.delay || ((ms) => new Promise(r => setTimeout(r, ms)));
   const started = Date.now();
 
-  // [R2-4, R3-3] Both cutoffs are JS-computed ISO-Z strings: posted_at and
-  // video_url_refreshed_at are both stored via .toISOString() in both Postgres
-  // and SQLite (scraper.js:632), so a single ISO-Z cutoff is correct for both
-  // backends — unlike sweepThumbnails' scraped_at compare, no PG/SQLite format
-  // split is needed here.
+  // [R2-4, R3-3] retention + refreshed-at cutoffs are JS-computed ISO-Z strings:
+  // posted_at and video_url_refreshed_at are both stored via .toISOString() in
+  // both Postgres and SQLite (scraper.js:632), so a single ISO-Z cutoff is correct.
   const now = deps.now ? deps.now() : Date.now();
   const nowIso = new Date(now).toISOString();
   const retentionCutoff = new Date(now - maxAgeDays * 86400000).toISOString();
   const freshnessCutoff = new Date(now - freshnessDays * 86400000).toISOString();
+
+  // Legacy catch-up: pre-Plan-3 rows have video_cache_status IS NULL and
+  // video_url_refreshed_at IS NULL — they were never enqueued, so the two
+  // branches above never select them and their videos never cache. Grab the
+  // recently-scraped ones (whose IG URL is likely still alive) using scraped_at
+  // as a one-time freshness proxy; once swept they become cached/expired and
+  // leave the NULL pool. scraped_at is a DB-default timestamp (unlike the ISO-Z
+  // app columns): Postgres renders "...T...Z", SQLite "YYYY-MM-DD HH:MM:SS"
+  // (space, no Z) — so this cutoff needs the same per-backend format that
+  // sweepThumbnails uses (thumbnails.js:65-69).
+  const usePg = !!process.env.DATABASE_URL;
+  const legacyIsoSec = new Date(now - legacyDays * 86400000).toISOString().slice(0, 19);
+  const scrapedCutoff = usePg ? legacyIsoSec + 'Z' : legacyIsoSec.replace('T', ' ');
 
   const sel = await db.query(
     `SELECT id, shortcode, video_url FROM posts
      WHERE video_url IS NOT NULL
        AND posted_at IS NOT NULL AND posted_at >= $1
        AND ( video_cache_status = 'pending'
-             OR (video_cache_status IS NULL AND video_url_refreshed_at >= $2) )
-     ORDER BY id DESC LIMIT $3`,
-    [retentionCutoff, freshnessCutoff, batchLimit]
+             OR (video_cache_status IS NULL AND video_url_refreshed_at >= $2)
+             OR (video_cache_status IS NULL AND video_url_refreshed_at IS NULL AND scraped_at >= $3) )
+     ORDER BY id DESC LIMIT $4`,
+    [retentionCutoff, freshnessCutoff, scrapedCutoff, batchLimit]
   );
   const posts = sel.rows || [];
   const tally = { attempted: 0, cached: 0, expired: 0, skipped: 0, errored: 0 };

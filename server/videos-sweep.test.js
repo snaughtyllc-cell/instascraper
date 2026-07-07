@@ -17,7 +17,8 @@ function makeDb() {
     video_cache_error TEXT,
     video_cached_at TEXT,
     video_url_refreshed_at TEXT,
-    posted_at TEXT
+    posted_at TEXT,
+    scraped_at TEXT
   )`);
   // Adapter matching the `db.query(sql, params)` shape used in db.js (see content-types-seed.test.js)
   const query = async (sql, params = []) => {
@@ -31,20 +32,28 @@ function makeDb() {
 
 function insertPost(sqlite, row) {
   sqlite.prepare(`INSERT INTO posts
-    (id, shortcode, video_url, video_cache_status, video_cache_error, video_cached_at, video_url_refreshed_at, posted_at)
-    VALUES (@id, @shortcode, @video_url, @video_cache_status, @video_cache_error, @video_cached_at, @video_url_refreshed_at, @posted_at)`
+    (id, shortcode, video_url, video_cache_status, video_cache_error, video_cached_at, video_url_refreshed_at, posted_at, scraped_at)
+    VALUES (@id, @shortcode, @video_url, @video_cache_status, @video_cache_error, @video_cached_at, @video_url_refreshed_at, @posted_at, @scraped_at)`
   ).run({
     video_cache_status: null,
     video_cache_error: null,
     video_cached_at: null,
     video_url_refreshed_at: null,
     posted_at: null,
+    scraped_at: null,
     ...row,
   });
 }
 
 function isoDaysAgo(days) {
   return new Date(NOW - days * DAY).toISOString();
+}
+
+// scraped_at is a DB-default column: SQLite renders it space-formatted (no T/Z),
+// which is the format sweepVideos' legacy-catch-up cutoff uses when DATABASE_URL
+// is unset (the test environment). Seed scraped_at in that same format.
+function spaceDaysAgo(days) {
+  return new Date(NOW - days * DAY).toISOString().slice(0, 19).replace('T', ' ');
 }
 
 test('sweepVideos: a pending in-retention row is downloaded and marked cached with video_cached_at set', async () => {
@@ -84,9 +93,9 @@ test('sweepVideos: an already-cached row is not reselected', async () => {
 test('sweepVideos: a NULL-status row with a FRESH video_url_refreshed_at IS selected (legacy pre-column-backfill branch)', async () => {
   const { sqlite, query } = makeDb();
   // NULL status (row predates the video_cache_status column / scrape enqueue), but
-  // video_url_refreshed_at is within freshnessDays (14) -> the legacy branch must still
-  // pick it up so pre-existing rows aren't stranded uncached forever.
-  insertPost(sqlite, { id: 9, shortcode: 'legacy-fresh', video_url: 'http://x/9.mp4', video_cache_status: null, video_url_refreshed_at: isoDaysAgo(5), posted_at: isoDaysAgo(5) });
+  // video_url_refreshed_at is within freshnessDays (default 2) -> the refreshed-at
+  // branch must still pick it up so pre-existing rows aren't stranded uncached.
+  insertPost(sqlite, { id: 9, shortcode: 'legacy-fresh', video_url: 'http://x/9.mp4', video_cache_status: null, video_url_refreshed_at: isoDaysAgo(1), posted_at: isoDaysAgo(5) });
 
   const res = await sweepVideos({}, {
     db: { query },
@@ -103,10 +112,50 @@ test('sweepVideos: a NULL-status row with a FRESH video_url_refreshed_at IS sele
 
 test('sweepVideos: a NULL-status row with a stale/NULL video_url_refreshed_at is NOT selected', async () => {
   const { sqlite, query } = makeDb();
-  // NULL status, video_url_refreshed_at older than freshnessDays (14) -> excluded
+  // NULL status, video_url_refreshed_at older than freshnessDays (default 2) AND
+  // scraped_at NULL (no legacy-catch-up either) -> excluded
   insertPost(sqlite, { id: 3, shortcode: 'stale', video_url: 'http://x/3.mp4', video_cache_status: null, video_url_refreshed_at: isoDaysAgo(20), posted_at: isoDaysAgo(5) });
   // NULL status, video_url_refreshed_at IS NULL -> excluded
   insertPost(sqlite, { id: 4, shortcode: 'nullrefresh', video_url: 'http://x/4.mp4', video_cache_status: null, video_url_refreshed_at: null, posted_at: isoDaysAgo(5) });
+
+  const seen = [];
+  const res = await sweepVideos({}, {
+    db: { query },
+    download: async (p) => { seen.push(p.shortcode); return { status: 'cached' }; },
+    delay: () => Promise.resolve(),
+    now: () => NOW,
+  });
+
+  assert.equal(res.attempted, 0);
+  assert.deepStrictEqual(seen, []);
+});
+
+test('sweepVideos: legacy catch-up — a NULL/NULL row with a RECENT scraped_at IS selected (fills the cache for pre-Plan-3 posts)', async () => {
+  const { sqlite, query } = makeDb();
+  // The real-world "none of my videos play" case: a pre-Plan-3 post — never
+  // enqueued (status NULL), video_url_refreshed_at NULL — but scraped recently,
+  // so its IG video_url is likely still alive. The scraped_at legacy branch must
+  // pick it up so the cache fills without re-scraping (no Apify cost).
+  insertPost(sqlite, { id: 10, shortcode: 'legacy-scraped', video_url: 'http://x/10.mp4', video_cache_status: null, video_url_refreshed_at: null, posted_at: isoDaysAgo(5), scraped_at: spaceDaysAgo(1) });
+
+  const res = await sweepVideos({}, {
+    db: { query },
+    download: async () => ({ status: 'cached' }),
+    delay: () => Promise.resolve(),
+    now: () => NOW,
+  });
+
+  assert.equal(res.attempted, 1);
+  assert.equal(res.cached, 1);
+  const row = sqlite.prepare(`SELECT * FROM posts WHERE id = 10`).get();
+  assert.equal(row.video_cache_status, 'cached');
+});
+
+test('sweepVideos: legacy catch-up — a NULL/NULL row with an OLD scraped_at is NOT selected (URL almost certainly dead)', async () => {
+  const { sqlite, query } = makeDb();
+  // scraped 5 days ago, older than legacyDays (3) — its signed URL is stale, so
+  // don't waste a download; it will re-cache when its account is next re-scraped.
+  insertPost(sqlite, { id: 11, shortcode: 'legacy-old', video_url: 'http://x/11.mp4', video_cache_status: null, video_url_refreshed_at: null, posted_at: isoDaysAgo(5), scraped_at: spaceDaysAgo(5) });
 
   const seen = [];
   const res = await sweepVideos({}, {

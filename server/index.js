@@ -919,7 +919,7 @@ app.get('/thumb/:postId', asyncHandler(async (req, res) => {
 // [R2-1, R3-2, R3-3, R5-1] Worth 302-ing the raw IG URL? Only if refreshed recently AND
 // not mid-prune. Reads video_url_refreshed_at — NOT status-pending (eternal) and NOT
 // scraped_at (stale on re-scrape). Self-expiring: a pending row refreshed 20d ago is NOT fresh.
-function videoUrlIsFresh(post, freshnessDays = 14) {
+function videoUrlIsFresh(post, freshnessDays = Number(process.env.VIDEO_FRESHNESS_DAYS || 2)) {
   if (post.video_cache_status === 'pruning') return false;   // [R5-1] mid-delete → poster, never 302
   if (!post.video_url_refreshed_at) return false;
   const cutoff = new Date(Date.now() - freshnessDays * 86400000).toISOString();
