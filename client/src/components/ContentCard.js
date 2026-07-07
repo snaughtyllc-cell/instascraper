@@ -72,11 +72,12 @@ export default function ContentCard({
   const cardId = post.id ?? post.shortcode;
   const isLibrary = variant === 'library';
   const reelUrl = post.post_url || (post.shortcode ? `https://www.instagram.com/reel/${post.shortcode}/` : null);
-  const thumbnailSrc = !isLibrary && post.thumbnail_url
-    ? post.thumbnail_url
-    : cardId
-      ? `${API_URL}/thumb/${cardId}`
-      : post.thumbnail_url;
+  // Always prefer the cached /thumb/:id proxy when the post has an id — IG's raw
+  // thumbnail_url expires (Plan 3). This is independent of `variant`: the model
+  // feed/saved surfaces need the reliable cache just like the admin Library, while
+  // `isLibrary` still gates the admin-only controls block below. /thumb is
+  // requireAuth (not requireAdmin), so model sessions can fetch it.
+  const thumbnailSrc = cardId ? `${API_URL}/thumb/${cardId}` : post.thumbnail_url;
   const videoSrc = cardId ? `${API_URL}/video/${cardId}` : post.video_url;
 
   // If the video URL fails to load (Instagram's signed URLs expire within
