@@ -163,3 +163,19 @@ test('serveVideo: sendFile error callback is a no-op once headers are already se
   errCb(new Error('stream error after headers sent'));
   assert.strictEqual(res._status, null, 'must not call res.status once headers are already sent');
 });
+
+test('[CX-fix] serveVideo: sendFile errCb preserves err.status=416 for an out-of-range Range request (must NOT be forced to 404)', () => {
+  const res = fakeRes();
+  serveVideo({ id: 8 }, { fs: { statSync: statSyncOk() }, videoDir: '/videos', res });
+  const [, , errCb] = res._sendFileArgs;
+  errCb({ status: 416 });
+  assert.strictEqual(res._status, 416);
+});
+
+test('[CX-fix] serveVideo: sendFile errCb still returns 404 for a genuine vanished-file (ENOENT) error', () => {
+  const res = fakeRes();
+  serveVideo({ id: 9 }, { fs: { statSync: statSyncOk() }, videoDir: '/videos', res });
+  const [, , errCb] = res._sendFileArgs;
+  errCb({ status: 404, code: 'ENOENT' });
+  assert.strictEqual(res._status, 404);
+});

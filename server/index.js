@@ -943,7 +943,12 @@ function serveVideo(post, { fs: fsDep = fs, videoDir = DEFAULT_VIDEO_DIR, res })
   }
   if (cached) {
     return res.sendFile(file, { acceptRanges: true }, (err) => {
-      if (err && !res.headersSent) res.status(404).end();      // TOCTOU / vanished file
+      // [CX-fix] Express's `send` EMITS errors to this callback instead of writing the
+      // response — a beyond-EOF Range request lands here with err.status === 416, which
+      // must stay 416 (Task 6 acceptance criteria), not be forced to 404. A genuine
+      // vanished-file (TOCTOU/ENOENT) error carries err.status === 404, so preserving the
+      // error's own status handles both correctly.
+      if (err && !res.headersSent) res.status(err.status || err.statusCode || 404).end();
     });
   }
   if (post.video_url && videoUrlIsFresh(post)) return res.redirect(302, post.video_url);  // [R2-1] gated
