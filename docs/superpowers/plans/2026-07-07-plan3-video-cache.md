@@ -439,7 +439,8 @@ app.get('/video/:id', asyncHandler(async (req, res) => {
   }
   if (cached) {
     return res.sendFile(file, { acceptRanges: true }, (err) => {
-      if (err && !res.headersSent) res.status(404).end();      // TOCTOU / vanished file
+      // preserve err.status (416 for out-of-range Range; 404 for TOCTOU/ENOENT) — a bare 404 swallows 416
+      if (err && !res.headersSent) res.status(err.status || err.statusCode || 404).end();
     });
   }
   if (post.video_url && videoUrlIsFresh(post)) return res.redirect(302, post.video_url);  // [R2-1] gated
