@@ -65,6 +65,7 @@ export default function ContentCard({
   const [expanded, setExpanded] = useState(false);
   const [notes, setNotes] = useState(post.notes || '');
   const [showVideo, setShowVideo] = useState(false);
+  const [videoFailed, setVideoFailed] = useState(false);
   const saveTimer = useRef(null);
   const cardId = post.id ?? post.shortcode;
   const isLibrary = variant === 'library';
@@ -74,6 +75,12 @@ export default function ContentCard({
     : cardId
       ? `${API_URL}/thumb/${cardId}`
       : post.thumbnail_url;
+
+  // If the video URL fails to load (Instagram's signed URLs expire within
+  // hours/days of a scrape), fall back to the cached thumbnail instead of a
+  // gray screen. Reset the flag when the URL changes so a re-scraped/refreshed
+  // URL gets another attempt.
+  useEffect(() => { setVideoFailed(false); }, [post.video_url]);
 
   const handleTag = async (tag) => {
     const newTag = post.tag === tag ? null : tag;
@@ -141,17 +148,18 @@ export default function ContentCard({
             />
           </label>
         )}
-        {(showVideo || (autoplayInView && isActive)) && post.video_url ? (
+        {(showVideo || (autoplayInView && isActive)) && post.video_url && !videoFailed ? (
           <>
             <video
               src={post.video_url}
+              poster={thumbnailSrc}
               autoPlay
               playsInline
               muted={autoplayInView ? !soundOn : false}
               loop={autoplayInView}
               controls={!autoplayInView}
               className="w-full h-full object-cover"
-              onError={() => { /* Plan 3 wires re-resolve here */ }}
+              onError={() => setVideoFailed(true)}
             />
             {autoplayInView && (
               <button
