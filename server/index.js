@@ -14,6 +14,7 @@ const radar = require('./radar');
 const { asyncHandler, dbErrorMiddleware, initWithRetry, wrapAsyncRoutes } = require('./db-health');
 const health = require('./health');
 const { downloadThumbnail, DEFAULT_THUMB_DIR } = require('./thumbnails');
+const { videoFilePath, DEFAULT_VIDEO_DIR } = require('./videos');
 const { buildBulkUpdate } = require('./content-bulk');
 const { calcViewER, engagementLabel, enrichViewsVsMedian, medianViewsByAccount } = require('./engagement-metrics');
 const { validateTypeLabel } = require('./content-types');
@@ -106,6 +107,7 @@ app.use('/engagement', requireAuth);
 app.use('/export', requireAuth);
 app.use('/thumb', requireAuth);
 app.use('/thumbnails', requireAuth);
+app.use('/video', requireAuth);
 app.use('/tracked', requireAuth);
 app.use('/suggested', requireAuth);
 app.use('/delete-log', requireAuth);
@@ -912,6 +914,52 @@ app.get('/thumb/:postId', asyncHandler(async (req, res) => {
   return res.status(502).json({ error: `thumbnail ${r.status}: ${r.error || ''}` });
 }));
 
+// ─── Video Cache Route ──────────────────────────────────────────
+
+// [R2-1, R3-2, R3-3, R5-1] Worth 302-ing the raw IG URL? Only if refreshed recently AND
+// not mid-prune. Reads video_url_refreshed_at — NOT status-pending (eternal) and NOT
+// scraped_at (stale on re-scrape). Self-expiring: a pending row refreshed 20d ago is NOT fresh.
+function videoUrlIsFresh(post, freshnessDays = 14) {
+  if (post.video_cache_status === 'pruning') return false;   // [R5-1] mid-delete → poster, never 302
+  if (!post.video_url_refreshed_at) return false;
+  const cutoff = new Date(Date.now() - freshnessDays * 86400000).toISOString();
+  return post.video_url_refreshed_at >= cutoff;
+}
+
+// [R2-10, R4-4] reject non-ids AND values past Postgres int4 max (would overflow the comparison)
+function isValidVideoId(id) {
+  return Number.isSafeInteger(id) && id > 0 && id <= 2147483647;
+}
+
+// [R5-2] Extracted so the sendFile/302/404 branches are unit-testable with a fake
+// fs/res, without booting Express or touching the DB. `fs`/`videoDir` are injectable
+// for tests; production calls use the module-level `fs` and `DEFAULT_VIDEO_DIR`.
+function serveVideo(post, { fs: fsDep = fs, videoDir = DEFAULT_VIDEO_DIR, res }) {
+  const file = videoFilePath(post, videoDir);
+  let cached = false;
+  // [R4-2] a 'pruning' row's file is mid-delete — do not serve it; fall through to poster.
+  if (post.video_cache_status !== 'pruning') {
+    try { cached = fsDep.statSync(file).size > 0; } catch { cached = false; }
+  }
+  if (cached) {
+    return res.sendFile(file, { acceptRanges: true }, (err) => {
+      if (err && !res.headersSent) res.status(404).end();      // TOCTOU / vanished file
+    });
+  }
+  if (post.video_url && videoUrlIsFresh(post)) return res.redirect(302, post.video_url);  // [R2-1] gated
+  return res.status(404).send('no video');    // known-dead or absent → client shows poster
+}
+
+app.get('/video/:id', asyncHandler(async (req, res) => {
+  const id = Number(req.params.id);
+  if (!isValidVideoId(id)) return res.status(404).send('not found');
+  const r = await pool.query(
+    'SELECT id, video_url, video_url_refreshed_at, video_cache_status FROM posts WHERE id = $1', [id]);
+  const post = r.rows[0];
+  if (!post) return res.status(404).send('not found');
+  return serveVideo(post, { res });
+}));
+
 app.get('/suggested/reels/:id/thumb', asyncHandler(async (req, res) => {
   const result = await pool.query('SELECT thumbnail_url, shortcode FROM suggested_reels WHERE id = $1', [Number(req.params.id)]);
   const reel = result.rows[0];
@@ -967,3 +1015,6 @@ if (require.main === module) {
 
 module.exports = app;
 module.exports.checkProdSecrets = checkProdSecrets;
+module.exports.videoUrlIsFresh = videoUrlIsFresh;
+module.exports.isValidVideoId = isValidVideoId;
+module.exports.serveVideo = serveVideo;
