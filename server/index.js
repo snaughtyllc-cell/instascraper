@@ -15,6 +15,7 @@ const health = require('./health');
 const { downloadThumbnail, DEFAULT_THUMB_DIR } = require('./thumbnails');
 const { buildBulkUpdate } = require('./content-bulk');
 const { calcViewER, engagementLabel, enrichViewsVsMedian, medianViewsByAccount } = require('./engagement-metrics');
+const { validateTypeLabel } = require('./content-types');
 
 const app = express();
 wrapAsyncRoutes(app);
@@ -98,6 +99,7 @@ function requireAuth(req, res, next) {
 
 app.use('/scrape', requireAuth);
 app.use('/content', requireAuth);
+app.use('/content-types', requireAuth);
 app.use('/creators', requireAuth);
 app.use('/engagement', requireAuth);
 app.use('/export', requireAuth);
@@ -249,6 +251,29 @@ app.post('/creators/:handle/type', async (req, res) => {
   }
   res.json({ success: true });
 });
+
+app.get('/content-types', asyncHandler(async (req, res) => {
+  const result = await pool.query('SELECT id, value, label, sort_order FROM content_types ORDER BY sort_order, label');
+  res.json(result.rows);
+}));
+
+app.post('/content-types', asyncHandler(async (req, res) => {
+  const v = validateTypeLabel(req.body && req.body.label);
+  if (!v.ok) return res.status(400).json({ error: v.error });
+  const existing = await pool.query('SELECT id, value, label FROM content_types WHERE value = $1', [v.value]);
+  if (existing.rows.length) return res.status(200).json(existing.rows[0]); // idempotent add
+  const max = await pool.query('SELECT COALESCE(MAX(sort_order), -1) + 1 AS next FROM content_types');
+  const ins = await pool.query(
+    'INSERT INTO content_types (value, label, sort_order, created_at) VALUES ($1,$2,$3,$4) RETURNING id, value, label',
+    [v.value, v.label, Number(max.rows[0].next) || 0, new Date().toISOString()]
+  );
+  res.status(201).json(ins.rows[0]);
+}));
+
+app.delete('/content-types/:id', asyncHandler(async (req, res) => {
+  await pool.query('DELETE FROM content_types WHERE id = $1', [Number(req.params.id)]);
+  res.json({ ok: true });
+}));
 
 app.get('/creators', async (req, res) => {
   const result = await pool.query(`SELECT p.account_handle, ct.content_type, COUNT(*) as post_count FROM posts p LEFT JOIN creator_types ct ON p.account_handle = ct.account_handle WHERE p.account_handle != '' GROUP BY p.account_handle, ct.content_type ORDER BY post_count DESC`);

@@ -39,7 +39,6 @@ if (USE_PG) {
       convertedSql = convertedSql.replace(/TO_CHAR\(NOW\(\)\s*\+\s*INTERVAL\s*'(\d+)\s*days',\s*'[^']*'\)/gi, "datetime('now', '+$1 days')");
       convertedSql = convertedSql.replace(/ILIKE/gi, 'LIKE');
       convertedSql = convertedSql.replace(/::numeric/gi, '');
-      convertedSql = convertedSql.replace(/RETURNING id/gi, '');
       convertedSql = convertedSql.replace(/IF NOT EXISTS/gi, 'IF NOT EXISTS');
       convertedSql = convertedSql.replace(/ADD COLUMN IF NOT EXISTS/gi, 'ADD COLUMN');
       // FILTER (WHERE ...) → not supported in SQLite, handled per-query
@@ -55,7 +54,15 @@ if (USE_PG) {
           const rows = sqlite.prepare(convertedSql).all(...convertedParams);
           return { rows, rowCount: rows.length };
         } else if (isInsert) {
-          const info = sqlite.prepare(convertedSql).run(...convertedParams);
+          const stmt = sqlite.prepare(convertedSql);
+          if (/RETURNING\s+/i.test(convertedSql)) {
+            // INSERT ... RETURNING col1, col2 — a "reader" statement in
+            // better-sqlite3; use get() to fetch the actual returned row
+            // (mirrors what `pg` gives back for RETURNING on Postgres).
+            const row = stmt.get(...convertedParams);
+            return { rows: row ? [row] : [], rowCount: row ? 1 : 0 };
+          }
+          const info = stmt.run(...convertedParams);
           return { rows: [{ id: info.lastInsertRowid }], rowCount: info.changes };
         } else if (isCreate) {
           sqlite.exec(convertedSql);
