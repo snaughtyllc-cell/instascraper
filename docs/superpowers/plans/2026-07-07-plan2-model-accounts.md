@@ -260,7 +260,7 @@ module.exports = { hashPassword, verifyPassword, resolveLogin, LoginThrottle };
 
 - [ ] **Step 4: Run test to verify it passes**
 
-Run: `cd server && node --test auth.test.js` → PASS (5 tests).
+Run: `cd server && node --test auth.test.js` → PASS (all tests, incl. the active/enabled + role-escalation cases).
 
 - [ ] **Step 5: Commit**
 
@@ -424,7 +424,7 @@ git commit -m "feat(auth): requireAdmin on admin routes, /me behind requireModel
 
 **Interfaces:**
 - Produces (in `server/me-feed.js`):
-  - `nicheVisibilityClause(niches, startIdx)` → `{ clause, params }` — the SHARED model-visibility SQL fragment (reused by `/me/feed`, `/me/saves`, and the `/video/:id` model check). `clause` = `COALESCE(posts.content_type, ct.content_type) IN ($k,$k+1,...) AND (posts.soft_deleted = 0 OR posts.soft_deleted IS NULL) AND (posts.archived = 0 OR posts.archived IS NULL)`, with one `$` placeholder per niche starting at `startIdx`; `params` = the niche list. Returns `{ clause: null, params: [] }` for empty niches.
+  - `nicheVisibilityClause(niches, startIdx)` → `{ clause, params }` — the niche-scoping SQL fragment for the FEED ONLY (under SOFT isolation it is not used by `/me/saves` or `/video`). `clause` = `COALESCE(posts.content_type, ct.content_type) IN ($k,$k+1,...) AND (posts.soft_deleted = 0 OR posts.soft_deleted IS NULL) AND (posts.archived = 0 OR posts.archived IS NULL)`, with one `$` placeholder per niche starting at `startIdx`; `params` = the niche list. Returns `{ clause: null, params: [] }` for empty niches.
   - `buildMeFeedQuery(niches, { page=1, limit=24 })` → `{ sql, params }` selecting visible posts (via `nicheVisibilityClause`), newest first, paginated.
 - Mirrors the niche match in `ai-agent.js:117,120` (`_queryTopContent`, aliases posts as `p`) and the `/content` route at `index.js:182,192` (unaliased `posts.content_type` + `LEFT JOIN creator_types ct ON posts.account_handle = ct.account_handle` — the style `me-feed.js` mirrors). `posts.archived` exists (`db.js:130`); `duplicate_of` does NOT exist on `main` — do NOT reference it.
 
@@ -438,7 +438,7 @@ git commit -m "feat(auth): requireAdmin on admin routes, /me behind requireModel
 const { test } = require('node:test');
 const assert = require('node:assert');
 const Database = require('better-sqlite3');
-const { buildMeFeedQuery, nicheVisibilityClause } = require('./me-feed');
+const { buildMeFeedQuery, nicheVisibilityClause, parseNiches } = require('./me-feed');
 
 test('empty niches → sql null (nothing to show)', () => {
   assert.deepStrictEqual(buildMeFeedQuery([], {}), { sql: null, params: [] });
@@ -808,7 +808,7 @@ export const getMyIdeas = () => api.get('/me/ideas');
 
 **Placeholder scan:** none — every step carries real code or a concrete, observable manual check.
 
-**Type consistency:** `req.session.user = {id, role, modelId}` used identically across Tasks 3–7; `resolveLogin` returns that exact shape (Task 2) and `/login` stores it (Task 3); `/auth/check` surfaces `role`/`modelId` (Task 3) which `App.js` branches on (Task 10); `buildCredentialFields` keys (`email`, `password_hash`, `role`, `login_enabled`) match the Task 1 columns.
+**Type consistency:** `req.session.user = {id, role, modelId}` used identically across Tasks 3–7; `resolveLogin` returns that exact shape (Task 2) and `/login` stores it (Task 3); `/auth/check` surfaces `role`/`modelId` (Task 3) which `App.js` branches on (Task 10); `buildCredentialFields` keys (`email`, `password_hash`, `login_enabled` — NOT `role`, which is never settable [R1-#7]) match the Task 1 columns.
 
 **Security self-check:** every `/me/*` handler reads `req.session.user.modelId` and never a param; `requireModel` guarantees a modelId AND re-checks active+enabled per request; admin routes are `requireAdmin`; passwords are bcrypt-only and `password_hash` is never returned (`GET /models` narrowed off `SELECT *`); login is throttled and requires active+enabled; the prod fail-fast and API-key bypass are preserved.
 

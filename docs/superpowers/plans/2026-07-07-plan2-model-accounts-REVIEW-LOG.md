@@ -62,3 +62,19 @@ SOFT reverts:
 - Global Constraints route allowlist now lists `/video` as a shared media route (reconciles R2-#6).
 
 Kept (real security regardless of isolation): dialect-safe IN() feed + sqlite exec test (R1-#3), archived filter in feed (R1-#4), active+enabled login + per-request requireModel re-check + disable-on-delete (R1-#5), unique email + 409 (R1-#6), no role escalation (R1-#7), allowlist SET (R1-#8), GET /models off SELECT* (R1-#9), curl fix (R1-#11).
+
+## Round 3 — Codex
+
+"No material security blockers under the stated SOFT isolation model." Private data paths session-keyed, role separation preserved, login hardening intact, index-order + parseNiches + import bugs fixed. Four NON-BLOCKING consistency nits:
+1. Task 5 interface still said nicheVisibilityClause is reused by /me/saves + /video (contradicts SOFT). Fix: feed-only.
+2. Task 5 test import omitted parseNiches though the prose requires a parseNiches test. Fix: add it.
+3. Task 2 "PASS (5 tests)" after adding a 6th test. Fix count.
+4. Self-review type-consistency still listed `role` in buildCredentialFields keys. Fix: remove.
+
+VERDICT: APPROVED
+
+### Claude's response (Round 3 → final)
+All 4 nits folded in (feed-only wording; parseNiches in the test import; test-count wording; role removed from the type-consistency line).
+
+## OUTCOME: APPROVED after 3 rounds
+R1: 11 security findings (all incorporated). R2: 6 findings — 3 real bugs fixed, 3 mooted by the SOFT-isolation human decision. R3: APPROVED + 4 consistency nits (folded in). Plan is ready for subagent-driven implementation on branch `model-accounts` off main. Isolation = SOFT (media shared; private data + feed scoped).
