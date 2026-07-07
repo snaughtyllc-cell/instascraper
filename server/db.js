@@ -134,6 +134,16 @@ async function initDB() {
   `);
 
   await db.query(`
+    CREATE TABLE IF NOT EXISTS content_types (
+      id ${SERIAL},
+      value TEXT UNIQUE NOT NULL,
+      label TEXT NOT NULL,
+      sort_order INTEGER DEFAULT 0,
+      created_at TEXT DEFAULT ${NOW_DEFAULT}
+    )
+  `);
+
+  await db.query(`
     CREATE TABLE IF NOT EXISTS tracked_accounts (
       id ${SERIAL},
       username TEXT UNIQUE NOT NULL,
@@ -337,6 +347,9 @@ async function initDB() {
       try { await db.query(sql); } catch (e) { /* column already exists */ }
     }
   }
+
+  const { seedContentTypes } = require('./content-types');
+  await seedContentTypes(db);
 
   console.log(`Database initialized (${USE_PG ? 'PostgreSQL' : 'SQLite'})`);
 }

@@ -24,4 +24,15 @@ function validateTypeLabel(label) {
   return { ok: true, value, label: trimmed };
 }
 
-module.exports = { DEFAULT_CONTENT_TYPES, slugifyTypeLabel, validateTypeLabel };
+async function seedContentTypes(db) {
+  for (let i = 0; i < DEFAULT_CONTENT_TYPES.length; i++) {
+    const t = DEFAULT_CONTENT_TYPES[i];
+    // ON CONFLICT keeps this idempotent on both Postgres and the sqlite test adapter
+    await db.query(
+      'INSERT INTO content_types (value, label, sort_order, created_at) VALUES ($1,$2,$3,$4) ON CONFLICT (value) DO NOTHING',
+      [t.value, t.label, i, new Date(0).toISOString()]
+    );
+  }
+}
+
+module.exports = { DEFAULT_CONTENT_TYPES, slugifyTypeLabel, validateTypeLabel, seedContentTypes };
