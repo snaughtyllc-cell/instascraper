@@ -403,6 +403,10 @@ function startScheduler(scraper) {
   cron.schedule('0 8 * * *', () => runIdeaGeneration()); // Daily 8am, checks delivery_day
   cron.schedule('0 5 * * *', () => runThumbnailSweep());
   cron.schedule('*/30 * * * *', () => runVideoSweep()); // catch-up: fill the video cache continuously
+  // Kick one catch-up sweep ~20s after boot so the cache starts filling right after a
+  // deploy instead of waiting up to 30 min for the first cron tick. Delayed so it
+  // doesn't compete with cold-start request handling; runVideoSweep swallows its own errors.
+  setTimeout(() => runVideoSweep(), 20000);
   console.log('[Scheduler] All cron jobs registered');
 }
 
