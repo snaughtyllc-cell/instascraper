@@ -171,4 +171,48 @@ async function sweepVideos(opts = {}, deps = {}) {
   return tally;
 }
 
-module.exports = { DEFAULT_VIDEO_DIR, VIDEO_MAX_MB, videoFilePath, tempVideoPath, downloadVideo, sweepVideos };
+async function pruneOldVideos(opts = {}, deps = {}) {
+  const { maxAgeDays = 30 } = opts;
+  const fs = deps.fs || realFs;
+  const db = deps.db || require('./db');
+  const videoDir = deps.videoDir || DEFAULT_VIDEO_DIR;
+  const now = deps.now ? deps.now() : Date.now();
+  const cutoff = new Date(now - maxAgeDays * 86400000).toISOString();
+
+  const sel = await db.query(
+    `SELECT id, video_cache_status FROM posts WHERE posted_at < $1 AND video_cache_status IS NOT NULL`,
+    [cutoff]
+  );
+  const rows = sel.rows || [];
+  let deleted = 0;
+
+  // [R4-1] Self-healing two-phase claim. A row already at 'pruning' (an
+  // orphan left by an interrupted prior run) skips straight to unlink +
+  // finalize — Phase 1's `<> 'pruning'` guard would otherwise match 0 rows
+  // for it and strand it forever. A fresh row must win the Phase-1 claim
+  // (0 rows changed = raced by a concurrent run, or already handled) before
+  // its file is touched.
+  for (const row of rows) {
+    if (row.video_cache_status !== 'pruning') {
+      const claim = await db.query(
+        `UPDATE posts SET video_cache_status='pruning', video_cached_at=NULL
+         WHERE id=$1 AND posted_at < $2 AND video_cache_status IS NOT NULL AND video_cache_status <> 'pruning'`,
+        [row.id, cutoff]
+      );
+      if ((claim.rowCount || claim.changes || 0) === 0) continue; // raced / already handled
+    }
+    // row is now 'pruning' (freshly claimed OR a pre-existing orphan) -> delete file + finalize
+    try {
+      fs.unlinkSync(videoFilePath(row, videoDir));
+    } catch (e) {
+      if (e.code !== 'ENOENT') { console.error('[Prune] unlink failed', e.code); continue; }
+    }
+    await db.query(`UPDATE posts SET video_cache_status=NULL WHERE id=$1 AND video_cache_status='pruning'`, [row.id]);
+    deleted++;
+  }
+
+  console.log(`[Metric] video_prune deleted=${deleted}`);
+  return { deleted };
+}
+
+module.exports = { DEFAULT_VIDEO_DIR, VIDEO_MAX_MB, videoFilePath, tempVideoPath, downloadVideo, sweepVideos, pruneOldVideos };
