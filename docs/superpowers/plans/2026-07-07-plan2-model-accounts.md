@@ -100,7 +100,7 @@ and to the inline Postgres `migrations` array (`db.js:339-355`):
 `ALTER TABLE models ADD COLUMN IF NOT EXISTS login_enabled INTEGER DEFAULT 0`,
 ```
 
-and add the `model_saved_posts` CREATE directly in `initDB` after the `models` CREATE (~`db.js:272`):
+and add the `model_saved_posts` CREATE + a unique-email index directly in `initDB` after the `models` CREATE (~`db.js:272`):
 
 ```js
   await db.query(`
@@ -111,6 +111,13 @@ and add the `model_saved_posts` CREATE directly in `initDB` after the `models` C
       PRIMARY KEY (model_id, post_id)
     )
   `);
+  // [R1-#6] case-insensitive unique email for non-empty emails. Partial + expression index
+  // works on BOTH Postgres and SQLite. Wrap in try/catch like the migration loops so a
+  // pre-existing duplicate (from before the constraint) doesn't crash boot — log and continue.
+  try {
+    await db.query(`CREATE UNIQUE INDEX IF NOT EXISTS models_email_lower_uk
+      ON models (LOWER(email)) WHERE email IS NOT NULL AND email <> ''`);
+  } catch (e) { console.error('[db] models_email_lower_uk index not created:', e.message); }
 ```
 
 - [ ] **Step 4: Run → PASS**, then boot check: `cd server && node -e "delete process.env.DATABASE_URL; require('./db').initDB().then(()=>console.log('ok')).catch(e=>{console.error(e);process.exit(1)})"` → prints `ok`.
@@ -133,7 +140,7 @@ git commit -m "feat(auth): model login columns (both migration arrays) + model_s
 **Interfaces:**
 - Produces:
   - `hashPassword(plain): string` and `verifyPassword(plain, hash): boolean` (bcrypt cost 10).
-  - `resolveLogin({ email, password }, ctx): { ok, user } | { ok:false, error }` — pure resolution given `ctx = { adminPasswordHash, models: [{id,email,password_hash,role,login_enabled}] }`. Rules: if no `email` → admin path (verify `password` against `adminPasswordHash`, yield `{id:0, role:'admin', modelId:null}`); if `email` → find a model with that email AND `login_enabled` AND matching `password_hash`, yield `{id: m.id, role: m.role||'model', modelId: m.id}`; else `{ok:false, error:'Invalid credentials'}`.
+  - `resolveLogin({ email, password }, ctx): { ok, user } | { ok:false, error }` — pure resolution given `ctx = { adminPasswordHash, models: [{id,email,password_hash,role,login_enabled,status}] }`. Rules: if no `email` → admin path (verify `password` against `adminPasswordHash`, yield `{id:0, role:'admin', modelId:null}`); if `email` → find a model with that email AND `login_enabled` AND **`status === 'active'`** [R1-#5] AND matching `password_hash`, yield `{id: m.id, role: 'model', modelId: m.id}` (**always `'model'` — never trust a `role` column for privilege escalation** [R1-#7]); else `{ok:false, error:'Invalid credentials'}`.
   - `LoginThrottle` — `new LoginThrottle({max=5, windowMs=15*60000})` with `check(key)`, `fail(key)`, `reset(key)`; `check` returns `{blocked, retryInSec}`.
 
 - [ ] **Step 1: Write the failing test**
@@ -161,14 +168,21 @@ test('resolveLogin: wrong admin password rejected', () => {
   assert.strictEqual(r.ok, false);
 });
 
-test('resolveLogin: model email+password, login_enabled required', () => {
-  const models = [{ id: 7, email: 'mia@x.com', password_hash: hashPassword('pw'), role: 'model', login_enabled: 1 }];
+test('resolveLogin: model email+password requires login_enabled AND status=active', () => {
+  const models = [{ id: 7, email: 'mia@x.com', password_hash: hashPassword('pw'), role: 'model', login_enabled: 1, status: 'active' }];
   const ok = resolveLogin({ email: 'mia@x.com', password: 'pw' }, { adminPasswordHash: null, models });
   assert.deepStrictEqual(ok, { ok: true, user: { id: 7, role: 'model', modelId: 7 } });
   const disabled = resolveLogin({ email: 'mia@x.com', password: 'pw' }, { adminPasswordHash: null, models: [{ ...models[0], login_enabled: 0 }] });
   assert.strictEqual(disabled.ok, false);
+  const inactive = resolveLogin({ email: 'mia@x.com', password: 'pw' }, { adminPasswordHash: null, models: [{ ...models[0], status: 'inactive' }] });
+  assert.strictEqual(inactive.ok, false, 'deleted/deactivated model cannot log in [R1-#5]');
   const wrong = resolveLogin({ email: 'mia@x.com', password: 'bad' }, { adminPasswordHash: null, models });
   assert.strictEqual(wrong.ok, false);
+});
+test('resolveLogin: a stored role=admin on a model row does NOT grant admin [R1-#7]', () => {
+  const models = [{ id: 9, email: 'x@x.com', password_hash: hashPassword('pw'), role: 'admin', login_enabled: 1, status: 'active' }];
+  const r = resolveLogin({ email: 'x@x.com', password: 'pw' }, { adminPasswordHash: null, models });
+  assert.deepStrictEqual(r, { ok: true, user: { id: 9, role: 'model', modelId: 9 } });
 });
 
 test('LoginThrottle blocks after max failures and resets', () => {
@@ -202,8 +216,9 @@ function resolveLogin({ email, password } = {}, ctx = {}) {
     return { ok: false, error: 'Invalid credentials' };
   }
   const m = models.find(x => x.email && x.email.toLowerCase() === String(email).toLowerCase());
-  if (m && m.login_enabled && verifyPassword(password, m.password_hash)) {
-    return { ok: true, user: { id: m.id, role: m.role || 'model', modelId: m.id } };
+  // [R1-#5] active + enabled required; [R1-#7] role is ALWAYS 'model' here, never from the row
+  if (m && m.login_enabled && m.status === 'active' && verifyPassword(password, m.password_hash)) {
+    return { ok: true, user: { id: m.id, role: 'model', modelId: m.id } };
   }
   return { ok: false, error: 'Invalid credentials' };
 }
@@ -252,7 +267,7 @@ git commit -m "feat(auth): auth helper — hashing, login resolution, throttle"
 
 **Interfaces:**
 - Consumes: `resolveLogin`, `LoginThrottle`, `hashPassword` from Task 2.
-- Produces: `req.session.user = { id, role, modelId }`; `/auth/check` → `{ authenticated, authRequired, role, modelId }`; middlewares `requireAuth` (any valid user or API key), `requireAdmin` (role==='admin' or API key), `requireModel` (role==='model' with a modelId).
+- Produces: `req.session.user = { id, role, modelId }`; `/auth/check` → `{ authenticated, authRequired, role, modelId }`; middlewares `requireAuth` (any valid user or API key), `requireAdmin` (role==='admin' or API key), `requireModel` (**async** — role==='model' with a modelId AND a per-request DB re-check that the model is still `status='active'` + `login_enabled`, [R1-#5]).
 
 - [ ] **Step 1: Rewrite `/login`, `/auth/check`, `/logout`, and add middleware**
 
@@ -280,7 +295,7 @@ app.post('/login', async (req, res) => {
 
   let models = [];
   if (email) {
-    const r = await pool.query('SELECT id, email, password_hash, role, login_enabled FROM models WHERE LOWER(email) = LOWER($1)', [email]);
+    const r = await pool.query('SELECT id, email, password_hash, role, login_enabled, status FROM models WHERE LOWER(email) = LOWER($1)', [email]);
     models = r.rows;
   }
   const out = resolveLogin({ email, password }, { adminPasswordHash: passwordHash, models });
@@ -304,10 +319,23 @@ function requireAdmin(req, res, next) {
   if (req.session && req.session.user && req.session.user.role === 'admin') return next();
   res.status(403).json({ error: 'Admin only' });
 }
-function requireModel(req, res, next) {
-  if (req.session && req.session.user && req.session.user.role === 'model' && req.session.user.modelId) return next();
-  // In no-auth dev mode there is no model context; 403 is correct.
-  res.status(403).json({ error: 'Model account required' });
+async function requireModel(req, res, next) {
+  const u = req.session && req.session.user;
+  if (!u || u.role !== 'model' || !u.modelId) {
+    // In no-auth dev mode there is no model context; 403 is correct.
+    return res.status(403).json({ error: 'Model account required' });
+  }
+  // [R1-#5] Re-verify the model is still active + login-enabled on EVERY request, so an
+  // admin disabling/deleting a model revokes access promptly despite the 7-day session
+  // cookie. One indexed PK lookup per /me/* request.
+  try {
+    const r = await pool.query('SELECT status, login_enabled FROM models WHERE id = $1', [u.modelId]);
+    const m = r.rows[0];
+    if (!m || m.status !== 'active' || !m.login_enabled) {
+      return req.session.destroy(() => res.status(403).json({ error: 'Account disabled' }));
+    }
+  } catch (e) { return res.status(503).json({ error: 'auth check failed' }); }
+  next();
 }
 ```
 
@@ -315,7 +343,7 @@ function requireModel(req, res, next) {
 
 - [ ] **Step 2: Verify the server boots and admin login still works (back-compat)**
 
-Run: `cd server && AUTH_PASSWORD=teampw node -e "require('./index')" &` then `curl -s -XPOST localhost:4000/login -H 'Content-Type: application/json' -d '{"password":"teampw"}'` → `{"success":true,"role":"admin"}`; `curl -s localhost:4000/auth/check --cookie-jar /tmp/j --cookie /tmp/j` shows `role:"admin"`. (Kill the server after.) Document the exact commands/outputs in the report.
+Run: `cd server && AUTH_PASSWORD=teampw SESSION_SECRET=dev node index.js &` then **save the login cookie** [R1-#11]: `curl -s -c /tmp/j -XPOST localhost:4000/login -H 'Content-Type: application/json' -d '{"password":"teampw"}'` → `{"success":true,"role":"admin"}`; then `curl -s -b /tmp/j localhost:4000/auth/check` shows `"role":"admin"`. (Kill the server after.) Document the exact commands/outputs in the report.
 
 - [ ] **Step 3: Commit**
 
@@ -364,7 +392,9 @@ test('model gate: admin (no modelId) denied, model allowed', () => {
 
 In `server/index.js:102-118`, change these prefixes from `requireAuth` to `requireAdmin`: `/scrape`, `/content`, `/content-types`, `/creators`, `/engagement`, `/export`, `/tracked`, `/suggested`, `/delete-log`, `/scheduler`, `/models`, `/ideas`, `/admin`, `/radar`. **Leave `/thumb`, `/thumbnails`, AND `/video` (`index.js:110`, added by Plan 3) on `requireAuth`** — models need thumbnails AND videos for their niche feed. Add `app.use('/me', requireModel);` (routes added in Tasks 5–7).
 
-> **[RETARGET — accepted risk, `/video/:id` IDOR]** `GET /video/:id` (`index.js:958`) streams by post id with no per-owner/per-niche check, so any authenticated model could fetch any post's video by guessing an id. This is an **accepted risk for this plan**: post ids are only surfaced to a model through their own scoped `/me/feed` and `/me/saves` responses, the library is shared org content (not per-model-secret), and adding a per-request ownership join to `/video/:id` is out of scope here. State this explicitly for the Codex review rather than silently gating `/video` further. (If future requirements demand niche-level video privacy, revisit with a scoped check.)
+> **[R1-#1 — `/video/:id` is niche-scoped for models, NOT an accepted IDOR]** Codex round 1 rejected the accept-the-risk stance: sequential ids are guessable and a model could stream any reel outside their niche. So `/video/:id` (`index.js:958`) gains a **role branch**: an **admin** session (or `x-api-key`) keeps full access; a **model** session may only stream a post that passes the same `nicheVisibilityClause` (niche + not archived + not soft-deleted) — otherwise `404`. This is added as a step in Task 6 (where the visibility helper + `sessionModelNiches` live), since `/video/:id` is a Plan-3 handler that must now consult model context.
+>
+> **DECISION FOR THE HUMAN (build gate):** this makes niche a HARD boundary — a model literally cannot stream/save content outside their niche. That's the secure default and matches "personalized account." If you instead want models to browse ALL niches (they're your own trusted team; reels are public content), we relax it by dropping the model branch on `/video` and the visibility guard on `/me/saves` — say so at the build gate and I'll adjust before implementing.
 
 - [ ] **Step 4: Manual verify** a model session is 403 on `/content` and 200 on `/thumb`. Start server with `AUTH_PASSWORD` set, create a model login (Task 8 or a direct DB insert), log in as the model, `curl` `/content` → 403, `/me/feed` → 200. Document in report. (If Task 8's admin UI isn't built yet, insert a model row with a bcrypt hash via a one-off `node -e`.)
 
@@ -384,26 +414,43 @@ git commit -m "feat(auth): requireAdmin on admin routes, /me behind requireModel
 - Modify: `server/index.js` (add `GET /me/feed`)
 
 **Interfaces:**
-- Produces: `buildMeFeedQuery(niches, { page=1, limit=24 })` → `{ sql, params }` selecting non-soft-deleted posts where `COALESCE(posts.content_type, ct.content_type) = ANY(niches)`, newest first, paginated. Mirrors the niche match in `ai-agent.js:117,120` (method `_queryTopContent`, line 109 — note it aliases posts as `p`; the `/content` route at `index.js:182,192` uses the unaliased `posts.content_type` + `LEFT JOIN creator_types ct ON posts.account_handle = ct.account_handle`, which is the style `me-feed.js` mirrors). No `duplicate_of` column exists on `main` (that was a deferred Plan-3 dedup idea, never shipped), so do NOT reference it.
+- Produces (in `server/me-feed.js`):
+  - `nicheVisibilityClause(niches, startIdx)` → `{ clause, params }` — the SHARED model-visibility SQL fragment (reused by `/me/feed`, `/me/saves`, and the `/video/:id` model check). `clause` = `COALESCE(posts.content_type, ct.content_type) IN ($k,$k+1,...) AND (posts.soft_deleted = 0 OR posts.soft_deleted IS NULL) AND (posts.archived = 0 OR posts.archived IS NULL)`, with one `$` placeholder per niche starting at `startIdx`; `params` = the niche list. Returns `{ clause: null, params: [] }` for empty niches.
+  - `buildMeFeedQuery(niches, { page=1, limit=24 })` → `{ sql, params }` selecting visible posts (via `nicheVisibilityClause`), newest first, paginated.
+- Mirrors the niche match in `ai-agent.js:117,120` (`_queryTopContent`, aliases posts as `p`) and the `/content` route at `index.js:182,192` (unaliased `posts.content_type` + `LEFT JOIN creator_types ct ON posts.account_handle = ct.account_handle` — the style `me-feed.js` mirrors). `posts.archived` exists (`db.js:130`); `duplicate_of` does NOT exist on `main` — do NOT reference it.
 
-- [ ] **Step 1: Write the failing test**
+> **[R1-#3 CRITICAL — no `= ANY($1)`].** The SQLite dev adapter (`db.js:49`) only rewrites `$n`→`?` and does NOT support Postgres `= ANY(array)` binding — the plan's original `= ANY($1)` would throw in dev/tests. Use `IN ($k, $k+1, ...)` with ONE `$` placeholder per niche (works on both Postgres and SQLite). The test MUST execute against a real in-memory `better-sqlite3` (via the `db.query`→sqlite adapter), not just regex-match the SQL string.
+> **[R1-#4].** Every model-visible query filters `archived` AND `soft_deleted` (idea selection already hides archived at `ai-agent.js:120`).
+
+- [ ] **Step 1: Write the failing test — with a REAL sqlite execution (not just regex) [R1-#3]**
 
 ```js
 // server/me-feed.test.js
 const { test } = require('node:test');
 const assert = require('node:assert');
-const { buildMeFeedQuery } = require('./me-feed');
+const Database = require('better-sqlite3');
+const { buildMeFeedQuery, nicheVisibilityClause } = require('./me-feed');
 
 test('empty niches → sql null (nothing to show)', () => {
   assert.deepStrictEqual(buildMeFeedQuery([], {}), { sql: null, params: [] });
 });
-test('scopes by niche via COALESCE(content_type, ct.content_type) and paginates', () => {
-  const { sql, params } = buildMeFeedQuery(['talking', 'dance'], { page: 2, limit: 10 });
-  assert.match(sql, /COALESCE\(posts\.content_type, ct\.content_type\)/);
-  assert.match(sql, /LEFT JOIN creator_types ct/);
-  assert.match(sql, /ORDER BY/i);
-  // page 2, limit 10 → OFFSET 10
-  assert.ok(params.includes(10));
+test('nicheVisibilityClause uses IN() placeholders (not ANY) + archived + soft_deleted', () => {
+  const { clause, params } = nicheVisibilityClause(['talking', 'dance'], 5);
+  assert.match(clause, /COALESCE\(posts\.content_type, ct\.content_type\) IN \(\$5, \$6\)/);
+  assert.match(clause, /archived/);
+  assert.match(clause, /soft_deleted/);
+  assert.doesNotMatch(clause, /ANY/);
+  assert.deepStrictEqual(params, ['talking', 'dance']);
+});
+test('buildMeFeedQuery actually EXECUTES against sqlite and scopes by niche + archived', () => {
+  const sqlite = new Database(':memory:');
+  sqlite.exec(`CREATE TABLE posts (id INTEGER PRIMARY KEY, content_type TEXT, account_handle TEXT, posted_at TEXT, soft_deleted INTEGER DEFAULT 0, archived INTEGER DEFAULT 0)`);
+  sqlite.exec(`CREATE TABLE creator_types (account_handle TEXT, content_type TEXT)`);
+  sqlite.prepare(`INSERT INTO posts (id, content_type, posted_at, archived) VALUES (1,'talking','2026-07-01',0),(2,'dance','2026-07-02',0),(3,'skit','2026-07-03',0),(4,'talking','2026-07-04',1)`).run();
+  const { sql, params } = buildMeFeedQuery(['talking', 'dance'], { page: 1, limit: 24 });
+  const rows = sqlite.prepare(sql.replace(/\$\d+/g, '?')).all(...params);
+  const ids = rows.map(r => r.id).sort();
+  assert.deepStrictEqual(ids, [1, 2], 'only non-archived talking/dance posts; skit + archived excluded');
 });
 ```
 
@@ -412,34 +459,45 @@ test('scopes by niche via COALESCE(content_type, ct.content_type) and paginates'
 - [ ] **Step 3: Implement `server/me-feed.js`**
 
 ```js
-function buildMeFeedQuery(niches, { page = 1, limit = 24 } = {}) {
+function nicheVisibilityClause(niches, startIdx = 1) {
   const list = (Array.isArray(niches) ? niches : []).filter(Boolean);
-  if (list.length === 0) return { sql: null, params: [] };
+  if (list.length === 0) return { clause: null, params: [] };
+  const ph = list.map((_, i) => `$${startIdx + i}`).join(', ');
+  const clause =
+    `COALESCE(posts.content_type, ct.content_type) IN (${ph})` +
+    ` AND (posts.soft_deleted = 0 OR posts.soft_deleted IS NULL)` +
+    ` AND (posts.archived = 0 OR posts.archived IS NULL)`;
+  return { clause, params: list };
+}
+
+function buildMeFeedQuery(niches, { page = 1, limit = 24 } = {}) {
+  const { clause, params } = nicheVisibilityClause(niches, 1);
+  if (!clause) return { sql: null, params: [] };
   const offset = (Math.max(1, Number(page)) - 1) * limit;
-  // $1 = niches array (pg ANY); $2 = limit; $3 = offset
+  const limIdx = params.length + 1, offIdx = params.length + 2;
   const sql = `
     SELECT posts.*, COALESCE(posts.content_type, ct.content_type) AS niche
     FROM posts
     LEFT JOIN creator_types ct ON posts.account_handle = ct.account_handle
-    WHERE (posts.soft_deleted = 0 OR posts.soft_deleted IS NULL)
-      AND COALESCE(posts.content_type, ct.content_type) = ANY($1)
-    ORDER BY posts.posted_at DESC NULLS LAST
-    LIMIT $2 OFFSET $3`;
-  return { sql, params: [list, limit, offset] };
+    WHERE ${clause}
+    ORDER BY posts.posted_at DESC
+    LIMIT $${limIdx} OFFSET $${offIdx}`;
+  return { sql, params: [...params, limit, offset] };
 }
-module.exports = { buildMeFeedQuery };
+module.exports = { buildMeFeedQuery, nicheVisibilityClause };
 ```
+
+> `ORDER BY posts.posted_at DESC` (no `NULLS LAST` — SQLite doesn't support that syntax; Postgres defaults NULLs first on DESC, acceptable here since scraped reels always have `posted_at`).
 
 - [ ] **Step 4: Run → PASS.** Then add the route to `server/index.js`:
 
 ```js
-const { buildMeFeedQuery } = require('./me-feed');
+const { buildMeFeedQuery, parseNiches } = require('./me-feed');
 app.get('/me/feed', asyncHandler(async (req, res) => {
   const modelId = req.session.user.modelId; // requireModel guarantees this
   const m = await pool.query('SELECT primary_niche, secondary_niches FROM models WHERE id = $1', [modelId]);
   if (m.rows.length === 0) return res.status(404).json({ error: 'Model not found' });
-  const niches = [m.rows[0].primary_niche, ...String(m.rows[0].secondary_niches || '').split(',')]
-    .map(s => (s || '').trim()).filter(Boolean);
+  const niches = parseNiches(m.rows[0]);
   const { sql, params } = buildMeFeedQuery(niches, { page: Number(req.query.page) || 1, limit: 24 });
   if (!sql) return res.json({ posts: [], niches });
   const r = await pool.query(sql, params);
@@ -465,9 +523,12 @@ git commit -m "feat(me): GET /me/feed — niche-scoped, session-derived modelId"
 - Test: `server/me-saves.test.js` (guard logic)
 
 **Interfaces:**
-- Produces: saves keyed by `(session modelId, postId)`. `GET /me/saves` returns the model's saved posts joined to `posts`. The `:postId` is the SAVED item, but the OWNER is always `req.session.user.modelId` — never a client value.
+- Produces: saves keyed by `(session modelId, postId)`. The OWNER is always `req.session.user.modelId` — never a client value. A model may ONLY save a post that is **visible to them** (in their niche, not archived, not soft-deleted) — this blocks the "save a guessed id to read arbitrary post metadata" leak [R1-#2]. `GET /me/saves` joins saves to `posts` AND re-applies the visibility clause, so a save that later becomes hidden (archived / niche removed) drops out.
+- New in `server/me-saves.js`: `saveParams(modelId, postId)` (pure id coercion). Consumes `nicheVisibilityClause` + `parseNiches` from `me-feed.js`.
 
-- [ ] **Step 1: Write the failing test (the save-target builder is pure)**
+> **[RETARGET] add `parseNiches(modelRow)` to `me-feed.js`** (pure): `[modelRow.primary_niche, ...String(modelRow.secondary_niches||'').split(',')].map(s=>(s||'').trim()).filter(Boolean)`. Used by `/me/feed`, `/me/saves`, and the `/video/:id` check so niche parsing lives in one place. Update Task 5's `/me/feed` handler to use it too.
+
+- [ ] **Step 1: Write the failing test (pure id coercion)**
 
 ```js
 // server/me-saves.test.js
@@ -477,8 +538,9 @@ const { saveParams } = require('./me-saves');
 test('saveParams uses the session modelId, coerces postId to int', () => {
   assert.deepStrictEqual(saveParams(7, '42'), { modelId: 7, postId: 42 });
 });
-test('saveParams rejects a non-numeric postId', () => {
+test('saveParams rejects a non-numeric or out-of-int4 postId', () => {
   assert.strictEqual(saveParams(7, 'abc'), null);
+  assert.strictEqual(saveParams(7, '3000000000'), null); // > int4 max
 });
 ```
 
@@ -487,45 +549,85 @@ test('saveParams rejects a non-numeric postId', () => {
 ```js
 function saveParams(modelId, postId) {
   const pid = Number(postId);
-  if (!Number.isInteger(pid) || pid <= 0) return null;
+  if (!Number.isSafeInteger(pid) || pid <= 0 || pid > 2147483647) return null;
   return { modelId: Number(modelId), postId: pid };
 }
 module.exports = { saveParams };
 ```
 
-- [ ] **Step 3: Run → PASS.** Add routes to `server/index.js`:
+- [ ] **Step 3: Run → PASS.** Add routes to `server/index.js` — the POST is **visibility-guarded**, the GET **re-filters by visibility**:
 
 ```js
 const { saveParams } = require('./me-saves');
+const { nicheVisibilityClause, parseNiches } = require('./me-feed');
+
+// Load the session model's niches (used by saves + /video). Returns [] if none.
+async function sessionModelNiches(req) {
+  const m = await pool.query('SELECT primary_niche, secondary_niches FROM models WHERE id = $1', [req.session.user.modelId]);
+  return m.rows[0] ? parseNiches(m.rows[0]) : [];
+}
+
 app.post('/me/saves/:postId', asyncHandler(async (req, res) => {
   const p = saveParams(req.session.user.modelId, req.params.postId);
   if (!p) return res.status(400).json({ error: 'Invalid post id' });
+  // [R1-#2] only save a post the model can actually see (niche + not archived/soft-deleted)
+  const { clause, params } = nicheVisibilityClause(await sessionModelNiches(req), 2);
+  if (!clause) return res.status(404).json({ error: 'Not found' });
+  const vis = await pool.query(
+    `SELECT 1 FROM posts LEFT JOIN creator_types ct ON posts.account_handle = ct.account_handle
+     WHERE posts.id = $1 AND ${clause} LIMIT 1`, [p.postId, ...params]);
+  if (vis.rows.length === 0) return res.status(404).json({ error: 'Not found' });
   await pool.query(
     'INSERT INTO model_saved_posts (model_id, post_id, saved_at) VALUES ($1,$2,$3) ON CONFLICT (model_id, post_id) DO NOTHING',
     [p.modelId, p.postId, new Date().toISOString()]);
   res.json({ ok: true });
 }));
+
 app.delete('/me/saves/:postId', asyncHandler(async (req, res) => {
   const p = saveParams(req.session.user.modelId, req.params.postId);
   if (!p) return res.status(400).json({ error: 'Invalid post id' });
   await pool.query('DELETE FROM model_saved_posts WHERE model_id = $1 AND post_id = $2', [p.modelId, p.postId]);
   res.json({ ok: true });
 }));
+
 app.get('/me/saves', asyncHandler(async (req, res) => {
+  const { clause, params } = nicheVisibilityClause(await sessionModelNiches(req), 2);
+  if (!clause) return res.json({ posts: [] });
   const r = await pool.query(
-    `SELECT posts.* FROM model_saved_posts s JOIN posts ON posts.id = s.post_id
-     WHERE s.model_id = $1 ORDER BY s.saved_at DESC`, [req.session.user.modelId]);
+    `SELECT posts.* FROM model_saved_posts s
+       JOIN posts ON posts.id = s.post_id
+       LEFT JOIN creator_types ct ON posts.account_handle = ct.account_handle
+     WHERE s.model_id = $1 AND ${clause}
+     ORDER BY s.saved_at DESC`, [req.session.user.modelId, ...params]);
   res.json({ posts: r.rows });
 }));
 ```
 
-- [ ] **Step 4: Manual verify isolation** — as model A save post X; as model B, `GET /me/saves` does NOT include X. Document (the key security check).
+- [ ] **Step 4: Manual verify isolation (TWO checks)** — (a) model A saves post X; model B `GET /me/saves` does NOT include X (per-model isolation). (b) A model tries `POST /me/saves/<id of a post OUTSIDE their niche>` → `404`, and it does NOT appear in their saves (the R1-#2 IDOR fix). Document both.
 
-- [ ] **Step 5: Commit**
+- [ ] **Step 5: Niche-scope `/video/:id` for model sessions [R1-#1].** In the existing Plan-3 `GET /video/:id` handler (`index.js:958`), before serving, branch on role: admin or `x-api-key` → unchanged (full access); a **model** session → verify the post passes `nicheVisibilityClause` for the model's niches, else `404` (so the poster shows, exactly like an uncached video). Concretely, near the top of the handler after loading the row:
+
+```js
+// [R1-#1] models may only stream reels in their own niche
+const u = req.session && req.session.user;
+const isApiKey = API_KEY && req.headers['x-api-key'] === API_KEY;
+if (!isApiKey && u && u.role === 'model') {
+  const { clause, params } = nicheVisibilityClause(await sessionModelNiches(req), 2);
+  if (!clause) return res.status(404).send('not found');
+  const vis = await pool.query(
+    `SELECT 1 FROM posts LEFT JOIN creator_types ct ON posts.account_handle = ct.account_handle
+     WHERE posts.id = $1 AND ${clause} LIMIT 1`, [id, ...params]);
+  if (vis.rows.length === 0) return res.status(404).send('not found');
+}
+```
+
+(`sessionModelNiches` + `nicheVisibilityClause` are already in scope from this task. `id` is the validated numeric id from the Plan-3 handler.) Manual verify: as a model, `GET /video/<in-niche id>` streams; `GET /video/<out-of-niche id>` → 404.
+
+- [ ] **Step 6: Commit**
 
 ```bash
 git add server/me-saves.js server/me-saves.test.js server/index.js
-git commit -m "feat(me): per-model saves, owner always from session"
+git commit -m "feat(me): per-model saves + niche-scoped /video, owner/visibility always from session"
 ```
 
 ---
@@ -591,24 +693,38 @@ test('no password → no password_hash key (leave existing untouched)', () => {
   const f = buildCredentialFields({ email: 'a@b.com' });
   assert.ok(!('password_hash' in f));
 });
+test('role is NEVER settable from the model form [R1-#7]', () => {
+  const f = buildCredentialFields({ email: 'a@b.com', role: 'admin', password: 'pw' });
+  assert.ok(!('role' in f), 'role must not appear in the credential fields');
+});
 ```
 
 - [ ] **Step 2: Run → FAIL.** Implement `server/model-credentials.js`:
 
 ```js
 const { hashPassword } = require('./auth');
+// [R1-#8] the ONLY columns model provisioning may write. SQL is built from THIS constant,
+// never from Object.keys(req.body). Note: 'role' is deliberately absent [R1-#7].
+const MODEL_WRITE_FIELDS = ['email', 'login_enabled', 'password_hash'];
 function buildCredentialFields(body = {}) {
   const f = {};
-  if (body.email !== undefined) f.email = body.email ? String(body.email).trim() : null;
+  if (body.email !== undefined) f.email = body.email ? String(body.email).trim().toLowerCase() : null;
   if (body.login_enabled !== undefined) f.login_enabled = body.login_enabled ? 1 : 0;
-  if (body.role !== undefined) f.role = body.role === 'admin' ? 'admin' : 'model';
   if (body.password) f.password_hash = hashPassword(body.password);
-  return f;
+  return f; // role is intentionally never included
 }
-module.exports = { buildCredentialFields };
+module.exports = { buildCredentialFields, MODEL_WRITE_FIELDS };
 ```
 
-- [ ] **Step 3: Run → PASS.** Wire into `POST /models` and `PUT /models/:id`: after building the base insert/update, merge `buildCredentialFields(req.body)` into the columns set (dynamic SET clause). Ensure the SELECT that returns the model to the client excludes `password_hash` (select explicit columns, not `*`, or delete the key before `res.json`).
+- [ ] **Step 3: Run → PASS.** Wire into `POST /models` and `PUT /models/:id` — build the dynamic SET/INSERT from the **allowlist**, never from request keys [R1-#8]:
+  - Merge the existing base fields (`name`, `primary_niche`, `secondary_niches`, `delivery_*`) with `buildCredentialFields(req.body)`.
+  - Build columns/placeholders by iterating a CONSTANT field list (the base fields + `MODEL_WRITE_FIELDS`), taking values from the merged object — NEVER `Object.keys(req.body)`. A rogue key like `role` or `id` in the body is impossible to write because it isn't in the allowlist.
+  - **`GET /models` (`index.js:659`) must stop using `SELECT *`** — select an explicit column list that includes `email, role, login_enabled` but EXCLUDES `password_hash` [R1-#9]. Audit every other `SELECT * FROM models` in the codebase (admin export helpers) and narrow them defensively so `password_hash` can never reach a response body.
+  - Add a test asserting a malicious body key (e.g. `role`, `password_hash`, `status`, `id`) is ignored by the column builder.
+
+- [ ] **Step 3b: Disable login on model delete [R1-#5].** The current `DELETE /models/:id` (`index.js:683`) only sets `status='inactive'`. Also set `login_enabled = 0` in that UPDATE, so a deleted model both fails `resolveLogin` (status check) AND is rejected by the per-request `requireModel` check — belt and suspenders for prompt revocation.
+
+- [ ] **Step 3c: Handle the unique-email violation gracefully [R1-#6].** `POST`/`PUT /models` with an email already used by another model will hit the `models_email_lower_uk` constraint — catch the DB error and return `409 { error: 'Email already in use' }` rather than a 500.
 
 - [ ] **Step 4: Manual verify** — create a model with email+password via `POST /models`, then log in as that model (`/login` with the email+password) → `role:"model"`; confirm `password_hash` never appears in any `/models` response. Document.
 
@@ -710,7 +826,12 @@ export const getMyIdeas = () => api.get('/me/ideas');
 
 **Type consistency:** `req.session.user = {id, role, modelId}` used identically across Tasks 3–7; `resolveLogin` returns that exact shape (Task 2) and `/login` stores it (Task 3); `/auth/check` surfaces `role`/`modelId` (Task 3) which `App.js` branches on (Task 10); `buildCredentialFields` keys (`email`, `password_hash`, `role`, `login_enabled`) match the Task 1 columns.
 
-**Security self-check:** every `/me/*` handler reads `req.session.user.modelId` and never a param; `requireModel` guarantees a modelId exists; admin routes are `requireAdmin`; passwords are bcrypt-only and `password_hash` is never returned; login is throttled; the prod fail-fast and API-key bypass are preserved.
+**Security self-check:** every `/me/*` handler reads `req.session.user.modelId` and never a param; `requireModel` guarantees a modelId AND re-checks active+enabled per request; admin routes are `requireAdmin`; passwords are bcrypt-only and `password_hash` is never returned (`GET /models` narrowed off `SELECT *`); login is throttled and requires active+enabled; the prod fail-fast and API-key bypass are preserved.
+
+**Round-1 Codex findings — disposition (all incorporated):**
+- R1-#1 (`/video/:id` niche-scoped for model sessions, not an accepted IDOR — Task 6 Step 5; flagged as a relaxable human decision at the build gate), R1-#2 (`/me/saves` insert visibility-guarded + list re-filtered — Task 6), R1-#3 (dialect-safe `IN()` not `= ANY()` + real sqlite execution test — Task 5), R1-#4 (`archived` filter in the shared visibility clause — Task 5), R1-#5 (login requires active+enabled; `requireModel` re-checks per request; delete disables login — Tasks 2/3/8), R1-#6 (case-insensitive unique email index + 409 on conflict — Tasks 1/8), R1-#7 (`role` never settable from the model form; `resolveLogin` always yields `'model'` — Tasks 2/8), R1-#8 (dynamic SET built from the `MODEL_WRITE_FIELDS` allowlist, never request keys — Task 8), R1-#9 (`GET /models` explicit columns + audit other `SELECT * FROM models` — Task 8), R1-#11 (curl cookie `-c`/`-b` fix — Task 3). R1-#10 (weak `model_saved_posts` test) accepted as a documented tradeoff (CREATE TABLE isn't in the exported array; the columns ARE tested non-vacuously). The `models.role` column remains (default `'model'`) but is **reserved/unused for auth** — `resolveLogin` ignores it.
+
+**⚠️ HUMAN DECISION at the build gate:** the R1-#1/#2 fixes make **niche a HARD boundary** (a model can't stream or save reels outside their niche). This is the secure default. If the models are your trusted team and you'd rather they browse all niches, we drop the `/video` model branch + the `/me/saves` visibility guard before building — decide at the gate.
 
 ## Execution Handoff
 
