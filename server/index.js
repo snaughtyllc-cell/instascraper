@@ -21,6 +21,12 @@ const { validateTypeLabel } = require('./content-types');
 const { buildCredentialFields, MODEL_WRITE_FIELDS, buildModelWriteColumns, buildModelInsert, buildModelUpdate, isDuplicateEmailError } = require('./model-credentials');
 
 const app = express();
+// Trust the first proxy hop (Railway) so req.ip is the real client IP, not the
+// proxy's. The login throttle keys on req.ip; without this, all clients collapse
+// to one bucket and the admin-login key degrades to a single global bucket an
+// anonymous actor could lock out for 15 min (DoS). Also lets express-session see
+// X-Forwarded-Proto for correct secure-cookie handling behind the proxy.
+app.set('trust proxy', 1);
 wrapAsyncRoutes(app);
 const PORT = process.env.PORT || 4000;
 const IS_PROD = process.env.NODE_ENV === 'production';
