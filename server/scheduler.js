@@ -372,6 +372,9 @@ async function runThumbnailSweep() {
 function startScheduler(scraper) {
   scraperInstance = scraper;
   cron.schedule('0 3 * * *', () => runAutoScrape()); // daily; cadence interval + per-cycle cap control actual spend
+  cron.schedule('30 3 * * *', () =>
+    require('./videos').pruneOldVideos({ maxAgeDays: 30 })
+      .catch(e => console.error('[Cron] video prune failed:', e.message)));
   cron.schedule('0 0 * * 0', () => runEngagementRollup());
   cron.schedule('0 2 * * *', () => runAutoCleanup());
   cron.schedule('0 4 * * 1', () => runDiscovery());

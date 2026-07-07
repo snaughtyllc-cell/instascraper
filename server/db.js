@@ -2,6 +2,27 @@ const path = require('path');
 
 const USE_PG = !!process.env.DATABASE_URL;
 
+// SQLite-branch migrations for existing tables (mixed-table: posts, scrape_jobs,
+// suggested_accounts, tracked_accounts). Exported so it can be exercised directly
+// against an in-memory DB in tests without touching the on-disk dev DB.
+const SQLITE_MIGRATIONS = [
+  `ALTER TABLE posts ADD COLUMN soft_deleted INTEGER DEFAULT 0`,
+  `ALTER TABLE posts ADD COLUMN soft_deleted_at TEXT DEFAULT NULL`,
+  `ALTER TABLE scrape_jobs ADD COLUMN source TEXT DEFAULT 'manual'`,
+  `ALTER TABLE posts ADD COLUMN thumbnail_cache_status TEXT`,
+  `ALTER TABLE posts ADD COLUMN thumbnail_cache_error TEXT`,
+  `ALTER TABLE suggested_accounts ADD COLUMN gender TEXT DEFAULT 'unknown'`,
+  `ALTER TABLE posts ADD COLUMN tagged_users TEXT DEFAULT NULL`,
+  `ALTER TABLE tracked_accounts ADD COLUMN last_attempt_at TEXT DEFAULT NULL`,
+  `ALTER TABLE tracked_accounts ADD COLUMN consecutive_failures INTEGER DEFAULT 0`,
+  `ALTER TABLE tracked_accounts ADD COLUMN last_discovery_at TEXT DEFAULT NULL`,
+  `ALTER TABLE suggested_accounts ADD COLUMN reel_share REAL DEFAULT NULL`,
+  `ALTER TABLE posts ADD COLUMN video_cache_status TEXT`,
+  `ALTER TABLE posts ADD COLUMN video_cache_error TEXT`,
+  `ALTER TABLE posts ADD COLUMN video_cached_at TEXT`,
+  `ALTER TABLE posts ADD COLUMN video_url_refreshed_at TEXT`,
+];
+
 // ─── Unified DB interface: .query(sql, params) → { rows } ──────
 let db;
 
@@ -327,25 +348,16 @@ async function initDB() {
       `ALTER TABLE tracked_accounts ADD COLUMN IF NOT EXISTS consecutive_failures INTEGER DEFAULT 0`,
       `ALTER TABLE tracked_accounts ADD COLUMN IF NOT EXISTS last_discovery_at TEXT DEFAULT NULL`,
       `ALTER TABLE suggested_accounts ADD COLUMN IF NOT EXISTS reel_share REAL DEFAULT NULL`,
+      `ALTER TABLE posts ADD COLUMN IF NOT EXISTS video_cache_status TEXT`,
+      `ALTER TABLE posts ADD COLUMN IF NOT EXISTS video_cache_error TEXT`,
+      `ALTER TABLE posts ADD COLUMN IF NOT EXISTS video_cached_at TEXT`,
+      `ALTER TABLE posts ADD COLUMN IF NOT EXISTS video_url_refreshed_at TEXT`,
     ];
     for (const sql of migrations) {
       try { await db.query(sql); } catch (e) { /* ignore */ }
     }
   } else {
-    const migrations = [
-      `ALTER TABLE posts ADD COLUMN soft_deleted INTEGER DEFAULT 0`,
-      `ALTER TABLE posts ADD COLUMN soft_deleted_at TEXT DEFAULT NULL`,
-      `ALTER TABLE scrape_jobs ADD COLUMN source TEXT DEFAULT 'manual'`,
-      `ALTER TABLE posts ADD COLUMN thumbnail_cache_status TEXT`,
-      `ALTER TABLE posts ADD COLUMN thumbnail_cache_error TEXT`,
-      `ALTER TABLE suggested_accounts ADD COLUMN gender TEXT DEFAULT 'unknown'`,
-      `ALTER TABLE posts ADD COLUMN tagged_users TEXT DEFAULT NULL`,
-      `ALTER TABLE tracked_accounts ADD COLUMN last_attempt_at TEXT DEFAULT NULL`,
-      `ALTER TABLE tracked_accounts ADD COLUMN consecutive_failures INTEGER DEFAULT 0`,
-      `ALTER TABLE tracked_accounts ADD COLUMN last_discovery_at TEXT DEFAULT NULL`,
-      `ALTER TABLE suggested_accounts ADD COLUMN reel_share REAL DEFAULT NULL`,
-    ];
-    for (const sql of migrations) {
+    for (const sql of SQLITE_MIGRATIONS) {
       try { await db.query(sql); } catch (e) { /* column already exists */ }
     }
   }
@@ -358,3 +370,4 @@ async function initDB() {
 
 module.exports = db;
 module.exports.initDB = initDB;
+module.exports.SQLITE_MIGRATIONS = SQLITE_MIGRATIONS;
