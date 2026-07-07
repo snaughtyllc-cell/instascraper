@@ -18,8 +18,15 @@ const { videoFilePath, DEFAULT_VIDEO_DIR } = require('./videos');
 const { buildBulkUpdate } = require('./content-bulk');
 const { calcViewER, engagementLabel, enrichViewsVsMedian, medianViewsByAccount } = require('./engagement-metrics');
 const { validateTypeLabel } = require('./content-types');
+const { buildCredentialFields, MODEL_WRITE_FIELDS, buildModelWriteColumns, buildModelInsert, buildModelUpdate, isDuplicateEmailError } = require('./model-credentials');
 
 const app = express();
+// Trust the first proxy hop (Railway) so req.ip is the real client IP, not the
+// proxy's. The login throttle keys on req.ip; without this, all clients collapse
+// to one bucket and the admin-login key degrades to a single global bucket an
+// anonymous actor could lock out for 15 min (DoS). Also lets express-session see
+// X-Forwarded-Proto for correct secure-cookie handling behind the proxy.
+app.set('trust proxy', 1);
 wrapAsyncRoutes(app);
 const PORT = process.env.PORT || 4000;
 const IS_PROD = process.env.NODE_ENV === 'production';
@@ -72,50 +79,88 @@ app.use(session({
 app.get('/live', health.liveHandler);
 app.get('/ready', health.readyHandler());
 
+const { resolveLogin, LoginThrottle } = require('./auth');
+const loginThrottle = new LoginThrottle({ max: 5, windowMs: 15 * 60000 });
+
 app.get('/auth/check', (req, res) => {
-  if (!passwordHash) return res.json({ authenticated: true, authRequired: false });
-  res.json({ authenticated: !!req.session.authenticated, authRequired: true });
+  if (!passwordHash) return res.json({ authenticated: true, authRequired: false, role: 'admin', modelId: null });
+  const u = req.session.user;
+  res.json({ authenticated: !!u, authRequired: true, role: u ? u.role : null, modelId: u ? u.modelId : null });
 });
 
-app.post('/login', (req, res) => {
-  const { password } = req.body;
-  if (!passwordHash) return res.json({ success: true });
-  if (bcrypt.compareSync(password || '', passwordHash)) {
-    req.session.authenticated = true;
-    return res.json({ success: true });
+app.post('/login', async (req, res) => {
+  const { email, password } = req.body || {};
+  if (!passwordHash) { // auth disabled (dev) → admin
+    req.session.user = { id: 0, role: 'admin', modelId: null };
+    return res.json({ success: true, role: 'admin' });
   }
-  res.status(401).json({ error: 'Wrong password' });
+  const key = (email ? String(email).toLowerCase() : 'admin') + '|' + (req.ip || '');
+  const gate = loginThrottle.check(key);
+  if (gate.blocked) return res.status(429).json({ error: `Too many attempts. Try again in ${gate.retryInSec}s.` });
+
+  let models = [];
+  if (email) {
+    const r = await pool.query('SELECT id, email, password_hash, role, login_enabled, status FROM models WHERE LOWER(email) = LOWER($1)', [email]);
+    models = r.rows;
+  }
+  const out = resolveLogin({ email, password }, { adminPasswordHash: passwordHash, models });
+  if (!out.ok) { loginThrottle.fail(key); return res.status(401).json({ error: 'Invalid credentials' }); }
+  loginThrottle.reset(key);
+  req.session.user = out.user;
+  res.json({ success: true, role: out.user.role });
 });
 
-app.post('/logout', (req, res) => {
-  req.session.destroy();
-  res.json({ success: true });
-});
+app.post('/logout', (req, res) => { req.session.destroy(() => res.json({ success: true })); });
 
 function requireAuth(req, res, next) {
   if (!passwordHash) return next();
   if (API_KEY && req.headers['x-api-key'] === API_KEY) return next();
-  if (req.session && req.session.authenticated) return next();
+  if (req.session && req.session.user) return next();
   res.status(401).json({ error: 'Not authenticated' });
 }
+function requireAdmin(req, res, next) {
+  if (!passwordHash) return next();
+  if (API_KEY && req.headers['x-api-key'] === API_KEY) return next();
+  if (req.session && req.session.user && req.session.user.role === 'admin') return next();
+  res.status(403).json({ error: 'Admin only' });
+}
+async function requireModel(req, res, next) {
+  const u = req.session && req.session.user;
+  if (!u || u.role !== 'model' || !u.modelId) {
+    // In no-auth dev mode there is no model context; 403 is correct.
+    return res.status(403).json({ error: 'Model account required' });
+  }
+  // [R1-#5] Re-verify the model is still active + login-enabled on EVERY request, so an
+  // admin disabling/deleting a model revokes access promptly despite the 7-day session
+  // cookie. One indexed PK lookup per /me/* request.
+  try {
+    const r = await pool.query('SELECT status, login_enabled FROM models WHERE id = $1', [u.modelId]);
+    const m = r.rows[0];
+    if (!m || m.status !== 'active' || !m.login_enabled) {
+      return req.session.destroy(() => res.status(403).json({ error: 'Account disabled' }));
+    }
+  } catch (e) { return res.status(503).json({ error: 'auth check failed' }); }
+  next();
+}
 
-app.use('/scrape', requireAuth);
-app.use('/content', requireAuth);
-app.use('/content-types', requireAuth);
-app.use('/creators', requireAuth);
-app.use('/engagement', requireAuth);
-app.use('/export', requireAuth);
+app.use('/scrape', requireAdmin);
+app.use('/content', requireAdmin);
+app.use('/content-types', requireAdmin);
+app.use('/creators', requireAdmin);
+app.use('/engagement', requireAdmin);
+app.use('/export', requireAdmin);
 app.use('/thumb', requireAuth);
 app.use('/thumbnails', requireAuth);
 app.use('/video', requireAuth);
-app.use('/tracked', requireAuth);
-app.use('/suggested', requireAuth);
-app.use('/delete-log', requireAuth);
-app.use('/scheduler', requireAuth);
-app.use('/models', requireAuth);
-app.use('/ideas', requireAuth);
-app.use('/admin', requireAuth);
-app.use('/radar', requireAuth);
+app.use('/tracked', requireAdmin);
+app.use('/suggested', requireAdmin);
+app.use('/delete-log', requireAdmin);
+app.use('/scheduler', requireAdmin);
+app.use('/models', requireAdmin);
+app.use('/ideas', requireAdmin);
+app.use('/admin', requireAdmin);
+app.use('/radar', requireAdmin);
+app.use('/me', requireModel);
 
 const ContentIdeaAgent = require('./ai-agent');
 const { deliverBatch } = require('./delivery');
@@ -656,32 +701,73 @@ app.get('/models/niches/available', async (req, res) => {
   res.json(result.rows.map(r => r.content_type));
 });
 
+// [R1-#8] The only columns POST/PUT /models may ever write. Base fields have always
+// been positional; MODEL_WRITE_FIELDS (email/login_enabled/password_hash) are the new
+// credential columns from model-credentials.js. 'role' is deliberately excluded — see
+// buildCredentialFields. Both handlers below build columns/placeholders/params by
+// iterating THIS constant against a hand-built `merged` object — never Object.keys(req.body).
+const MODEL_BASE_FIELDS = ['name', 'primary_niche', 'secondary_niches', 'delivery_method', 'delivery_contact', 'delivery_day'];
+const MODEL_ALL_WRITE_FIELDS = [...MODEL_BASE_FIELDS, ...MODEL_WRITE_FIELDS];
+
+// [R1-#9] Explicit column list — deliberately excludes password_hash so it can never
+// reach the admin client. Includes email/role/login_enabled so the admin UI can show
+// login status. This is the ONLY `SELECT * FROM models` that serialized a raw row
+// straight to an HTTP response; the other SELECT * FROM models call sites (PDF/Notion
+// export, ai-agent.js, delivery.js, scheduler.js) read named fields only and never echo
+// the row, so they were left as-is.
 app.get('/models', async (req, res) => {
-  const result = await pool.query("SELECT * FROM models WHERE status = 'active' ORDER BY created_at DESC");
+  const result = await pool.query(
+    `SELECT id, name, primary_niche, secondary_niches, delivery_method, delivery_contact, delivery_day, status, email, role, login_enabled, created_at, updated_at
+     FROM models WHERE status = 'active' ORDER BY created_at DESC`
+  );
   res.json(result.rows);
 });
 
 app.post('/models', async (req, res) => {
   const { name, primary_niche, secondary_niches, delivery_method, delivery_contact, delivery_day } = req.body;
   if (!name || !primary_niche) return res.status(400).json({ error: 'name and primary_niche required' });
-  const result = await pool.query(
-    `INSERT INTO models (name, primary_niche, secondary_niches, delivery_method, delivery_contact, delivery_day) VALUES ($1, $2, $3, $4, $5, $6)`,
-    [name, primary_niche, secondary_niches || '', delivery_method || 'whatsapp', delivery_contact || '', delivery_day || 'monday']
-  );
-  res.json({ success: true, id: result.rows[0]?.id });
+  const merged = {
+    name, primary_niche,
+    secondary_niches: secondary_niches || '',
+    delivery_method: delivery_method || 'whatsapp',
+    delivery_contact: delivery_contact || '',
+    delivery_day: delivery_day || 'monday',
+    ...buildCredentialFields(req.body),
+  };
+  const { sql, params } = buildModelInsert(merged, MODEL_ALL_WRITE_FIELDS);
+  try {
+    const result = await pool.query(sql, params);
+    res.json({ success: true, id: result.rows[0]?.id });
+  } catch (err) {
+    if (isDuplicateEmailError(err)) return res.status(409).json({ error: 'Email already in use' });
+    throw err;
+  }
 });
 
 app.put('/models/:id', async (req, res) => {
   const { name, primary_niche, secondary_niches, delivery_method, delivery_contact, delivery_day } = req.body;
-  await pool.query(
-    `UPDATE models SET name=$1, primary_niche=$2, secondary_niches=$3, delivery_method=$4, delivery_contact=$5, delivery_day=$6, updated_at=TO_CHAR(NOW(), 'YYYY-MM-DD"T"HH24:MI:SS"Z"') WHERE id=$7`,
-    [name, primary_niche, secondary_niches || '', delivery_method || 'whatsapp', delivery_contact || '', delivery_day || 'monday', Number(req.params.id)]
-  );
-  res.json({ success: true });
+  const merged = {
+    name, primary_niche,
+    secondary_niches: secondary_niches || '',
+    delivery_method: delivery_method || 'whatsapp',
+    delivery_contact: delivery_contact || '',
+    delivery_day: delivery_day || 'monday',
+    ...buildCredentialFields(req.body),
+  };
+  const { sql, params } = buildModelUpdate(merged, MODEL_ALL_WRITE_FIELDS, req.params.id);
+  try {
+    await pool.query(sql, params);
+    res.json({ success: true });
+  } catch (err) {
+    if (isDuplicateEmailError(err)) return res.status(409).json({ error: 'Email already in use' });
+    throw err;
+  }
 });
 
 app.delete('/models/:id', async (req, res) => {
-  await pool.query("UPDATE models SET status = 'inactive' WHERE id = $1", [Number(req.params.id)]);
+  // [R1-#5] Also disable login so a deleted model fails BOTH resolveLogin (status check)
+  // AND the per-request requireModel re-check — belt and suspenders for prompt revocation.
+  await pool.query("UPDATE models SET status = 'inactive', login_enabled = 0 WHERE id = $1", [Number(req.params.id)]);
   res.json({ success: true });
 });
 
@@ -972,6 +1058,55 @@ app.get('/suggested/reels/:id/thumb', asyncHandler(async (req, res) => {
   const r = await downloadThumbnail(reel);
   if (r.status === 'cached') return res.sendFile(r.path);
   return res.status(502).json({ error: `thumbnail ${r.status}: ${r.error || ''}` });
+}));
+
+// ─── Model (Me) Routes ──────────────────────────────────────────
+
+// [R2-#3] THE single top-level me-feed import — Task 6 reuses these, never re-requires.
+const { buildMeFeedQuery, nicheVisibilityClause, parseNiches } = require('./me-feed');
+app.get('/me/feed', asyncHandler(async (req, res) => {
+  const modelId = req.session.user.modelId; // requireModel guarantees this
+  const m = await pool.query('SELECT primary_niche, secondary_niches FROM models WHERE id = $1', [modelId]);
+  if (m.rows.length === 0) return res.status(404).json({ error: 'Model not found' });
+  const niches = parseNiches(m.rows[0]);
+  const { sql, params } = buildMeFeedQuery(niches, { page: Number(req.query.page) || 1, limit: 24 });
+  if (!sql) return res.json({ posts: [], niches });
+  const r = await pool.query(sql, params);
+  res.json({ posts: r.rows, niches });
+}));
+
+const { saveParams } = require('./me-saves');
+
+app.post('/me/saves/:postId', asyncHandler(async (req, res) => {
+  const p = saveParams(req.session.user.modelId, req.params.postId);
+  if (!p) return res.status(400).json({ error: 'Invalid post id' });
+  await pool.query(
+    'INSERT INTO model_saved_posts (model_id, post_id, saved_at) VALUES ($1,$2,$3) ON CONFLICT (model_id, post_id) DO NOTHING',
+    [p.modelId, p.postId, new Date().toISOString()]);
+  res.json({ ok: true });
+}));
+
+app.delete('/me/saves/:postId', asyncHandler(async (req, res) => {
+  const p = saveParams(req.session.user.modelId, req.params.postId);
+  if (!p) return res.status(400).json({ error: 'Invalid post id' });
+  await pool.query('DELETE FROM model_saved_posts WHERE model_id = $1 AND post_id = $2', [p.modelId, p.postId]);
+  res.json({ ok: true });
+}));
+
+app.get('/me/saves', asyncHandler(async (req, res) => {
+  const r = await pool.query(
+    `SELECT posts.* FROM model_saved_posts s
+       JOIN posts ON posts.id = s.post_id
+     WHERE s.model_id = $1 AND (posts.soft_deleted = 0 OR posts.soft_deleted IS NULL)
+     ORDER BY s.saved_at DESC`, [req.session.user.modelId]);
+  res.json({ posts: r.rows });
+}));
+
+app.get('/me/ideas', asyncHandler(async (req, res) => {
+  const r = await pool.query(
+    'SELECT * FROM idea_cards WHERE model_id = $1 ORDER BY created_at DESC LIMIT 50',
+    [req.session.user.modelId]);
+  res.json({ ideas: r.rows });
 }));
 
 // ─── Static Files ───────────────────────────────────────────────

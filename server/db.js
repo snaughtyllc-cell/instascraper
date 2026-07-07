@@ -21,6 +21,10 @@ const SQLITE_MIGRATIONS = [
   `ALTER TABLE posts ADD COLUMN video_cache_error TEXT`,
   `ALTER TABLE posts ADD COLUMN video_cached_at TEXT`,
   `ALTER TABLE posts ADD COLUMN video_url_refreshed_at TEXT`,
+  `ALTER TABLE models ADD COLUMN email TEXT`,
+  `ALTER TABLE models ADD COLUMN password_hash TEXT`,
+  `ALTER TABLE models ADD COLUMN role TEXT DEFAULT 'model'`,
+  `ALTER TABLE models ADD COLUMN login_enabled INTEGER DEFAULT 0`,
 ];
 
 // ─── Unified DB interface: .query(sql, params) → { rows } ──────
@@ -271,6 +275,16 @@ async function initDB() {
     )
   `);
 
+  // Posts a model has saved (per-model login accounts)
+  await db.query(`
+    CREATE TABLE IF NOT EXISTS model_saved_posts (
+      model_id INTEGER NOT NULL,
+      post_id INTEGER NOT NULL,
+      saved_at TEXT DEFAULT ${NOW_DEFAULT},
+      PRIMARY KEY (model_id, post_id)
+    )
+  `);
+
   // AI-generated idea cards
   await db.query(`
     CREATE TABLE IF NOT EXISTS idea_cards (
@@ -352,6 +366,10 @@ async function initDB() {
       `ALTER TABLE posts ADD COLUMN IF NOT EXISTS video_cache_error TEXT`,
       `ALTER TABLE posts ADD COLUMN IF NOT EXISTS video_cached_at TEXT`,
       `ALTER TABLE posts ADD COLUMN IF NOT EXISTS video_url_refreshed_at TEXT`,
+      `ALTER TABLE models ADD COLUMN IF NOT EXISTS email TEXT`,
+      `ALTER TABLE models ADD COLUMN IF NOT EXISTS password_hash TEXT`,
+      `ALTER TABLE models ADD COLUMN IF NOT EXISTS role TEXT DEFAULT 'model'`,
+      `ALTER TABLE models ADD COLUMN IF NOT EXISTS login_enabled INTEGER DEFAULT 0`,
     ];
     for (const sql of migrations) {
       try { await db.query(sql); } catch (e) { /* ignore */ }
@@ -360,6 +378,18 @@ async function initDB() {
     for (const sql of SQLITE_MIGRATIONS) {
       try { await db.query(sql); } catch (e) { /* column already exists */ }
     }
+  }
+
+  // [R1-#6] AFTER the migration loops (email now exists). Case-insensitive unique for
+  // non-empty emails; partial + expression index works on Postgres AND SQLite.
+  try {
+    await db.query(`CREATE UNIQUE INDEX IF NOT EXISTS models_email_lower_uk
+      ON models (LOWER(email)) WHERE email IS NOT NULL AND email <> ''`);
+  } catch (e) {
+    // A failure here means real DUPLICATE emails exist (not just "already created") — this
+    // must not pass silently, or logins become ambiguous. Surface it loudly. [R2-#1]
+    console.error('[db] FATAL: models_email_lower_uk could not be created (duplicate emails?):', e.message);
+    throw e;
   }
 
   const { seedContentTypes } = require('./content-types');
