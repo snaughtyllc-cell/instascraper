@@ -40,9 +40,17 @@ export default function LibraryTab() {
   const observerRef = useRef(null);
 
   const registerRef = useCallback((id, node) => {
-    if (!autoplayInView || !node) return;
-    nodeMap.current.set(id, node);
-    node.dataset.cardId = String(id);
+    if (!autoplayInView) return;
+    const key = String(id);
+    if (!node) {
+      const prev = nodeMap.current.get(key);
+      if (prev && observerRef.current) observerRef.current.unobserve(prev);
+      nodeMap.current.delete(key);
+      ratioMap.current.delete(key);
+      return;
+    }
+    nodeMap.current.set(key, node);
+    node.dataset.cardId = key;
     if (observerRef.current) observerRef.current.observe(node);
   }, [autoplayInView]);
 
@@ -57,7 +65,7 @@ export default function LibraryTab() {
       for (const [id, r] of ratioMap.current.entries()) {
         if (r > best) { best = r; bestId = id; }
       }
-      setActiveCardId(best >= 0.6 ? (isNaN(Number(bestId)) ? bestId : Number(bestId)) : null);
+      setActiveCardId(best >= 0.6 ? bestId : null);
     }, { threshold: [0, 0.6, 1] });
     observerRef.current = obs;
     for (const node of nodeMap.current.values()) obs.observe(node);
@@ -261,7 +269,7 @@ export default function LibraryTab() {
               selected={selected.has(post.id)}
               onToggleSelect={toggleSelect}
               autoplayInView={autoplayInView}
-              isActive={post.id === activeCardId}
+              isActive={String(post.id ?? post.shortcode) === activeCardId}
               soundOn={soundOn}
               onToggleSound={() => setSoundOn((s) => !s)}
               registerRef={registerRef}

@@ -113,7 +113,10 @@ export default function ContentCard({
 
   const cardRef = useRef(null);
   useEffect(() => {
-    if (autoplayInView && registerRef && cardRef.current) registerRef(cardId, cardRef.current);
+    if (!autoplayInView || !registerRef || !cardRef.current) return;
+    const el = cardRef.current;
+    registerRef(cardId, el);
+    return () => registerRef(cardId, null);
   }, [autoplayInView, registerRef, cardId]);
 
   return (
@@ -137,7 +140,7 @@ export default function ContentCard({
               autoPlay
               playsInline
               muted={autoplayInView ? !soundOn : false}
-              loop
+              loop={autoplayInView}
               controls={!autoplayInView}
               className="w-full h-full object-cover"
               onError={() => { /* Plan 3 wires re-resolve here */ }}
@@ -165,7 +168,7 @@ export default function ContentCard({
                 }
               }}
             />
-            {post.video_url && (
+            {!autoplayInView && post.video_url && (
               <button
                 onClick={() => setShowVideo(true)}
                 className="absolute inset-0 flex items-center justify-center bg-black/30 opacity-0 group-hover:opacity-100 transition-opacity"
