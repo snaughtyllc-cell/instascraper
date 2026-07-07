@@ -81,4 +81,12 @@ export const exportIdeas = (modelId, format = 'csv') => {
 };
 export const exportIdeasToNotion = (modelId, pageId) => api.post(`/ideas/export-notion/${modelId}`, { pageId });
 
+// Model (self / me) endpoints
+export const login = (email, password) => api.post('/login', email ? { email, password } : { password });
+export const getMyFeed = (page = 1) => api.get('/me/feed', { params: { page } });
+export const getMySaves = () => api.get('/me/saves');
+export const saveMyPost = (id) => api.post(`/me/saves/${id}`);
+export const unsaveMyPost = (id) => api.delete(`/me/saves/${id}`);
+export const getMyIdeas = () => api.get('/me/ideas');
+
 export default api;
