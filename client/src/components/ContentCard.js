@@ -75,6 +75,7 @@ export default function ContentCard({
     : cardId
       ? `${API_URL}/thumb/${cardId}`
       : post.thumbnail_url;
+  const videoSrc = cardId ? `${API_URL}/video/${cardId}` : post.video_url;
 
   // If the video URL fails to load (Instagram's signed URLs expire within
   // hours/days of a scrape), fall back to the cached thumbnail instead of a
@@ -151,7 +152,7 @@ export default function ContentCard({
         {(showVideo || (autoplayInView && isActive)) && post.video_url && !videoFailed ? (
           <>
             <video
-              src={post.video_url}
+              src={videoSrc}
               poster={thumbnailSrc}
               autoPlay
               playsInline
