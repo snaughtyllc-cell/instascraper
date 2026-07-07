@@ -136,23 +136,24 @@ async function requireModel(req, res, next) {
   next();
 }
 
-app.use('/scrape', requireAuth);
-app.use('/content', requireAuth);
-app.use('/content-types', requireAuth);
-app.use('/creators', requireAuth);
-app.use('/engagement', requireAuth);
-app.use('/export', requireAuth);
+app.use('/scrape', requireAdmin);
+app.use('/content', requireAdmin);
+app.use('/content-types', requireAdmin);
+app.use('/creators', requireAdmin);
+app.use('/engagement', requireAdmin);
+app.use('/export', requireAdmin);
 app.use('/thumb', requireAuth);
 app.use('/thumbnails', requireAuth);
 app.use('/video', requireAuth);
-app.use('/tracked', requireAuth);
-app.use('/suggested', requireAuth);
-app.use('/delete-log', requireAuth);
-app.use('/scheduler', requireAuth);
-app.use('/models', requireAuth);
-app.use('/ideas', requireAuth);
-app.use('/admin', requireAuth);
-app.use('/radar', requireAuth);
+app.use('/tracked', requireAdmin);
+app.use('/suggested', requireAdmin);
+app.use('/delete-log', requireAdmin);
+app.use('/scheduler', requireAdmin);
+app.use('/models', requireAdmin);
+app.use('/ideas', requireAdmin);
+app.use('/admin', requireAdmin);
+app.use('/radar', requireAdmin);
+app.use('/me', requireModel);
 
 const ContentIdeaAgent = require('./ai-agent');
 const { deliverBatch } = require('./delivery');
