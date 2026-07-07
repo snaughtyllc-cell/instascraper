@@ -1126,7 +1126,9 @@ app.get('/me/ideas', asyncHandler(async (req, res) => {
     const ph = all.map((_, i) => `$${i + 1}`).join(', ');
     const pr = await pool.query(
       `SELECT id, shortcode, video_url, thumbnail_url, view_count, caption, post_url, content_type, account_handle, posted_at
-       FROM posts WHERE shortcode IN (${ph})`, all);
+       FROM posts WHERE shortcode IN (${ph})
+         AND (soft_deleted = 0 OR soft_deleted IS NULL)
+         AND (archived = 0 OR archived IS NULL)`, all);
     byCode = Object.fromEntries(pr.rows.map(p => [p.shortcode, p]));
   }
   const enriched = ideas.map((idea, k) => ({

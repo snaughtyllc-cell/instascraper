@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useMemo } from 'react';
 import { getMyIdeas } from '../../api';
 import ContentCard from '../../components/ContentCard';
 import useActiveInView from '../../hooks/useActiveInView';
@@ -31,7 +31,7 @@ export default function IdeasPage() {
   // Shared autoplay-in-view observer across every source reel on the page
   // (mirrors FeedPage), so at most one reel plays at a time as the model
   // scrolls through idea cards.
-  const allReels = ideas.flatMap((i) => i.sourceReels || []);
+  const allReels = useMemo(() => ideas.flatMap((i) => i.sourceReels || []), [ideas]);
   const { autoplayInView, activeCardId, registerRef } = useActiveInView(allReels);
 
   return (
