@@ -18,7 +18,7 @@ const { videoFilePath, DEFAULT_VIDEO_DIR } = require('./videos');
 const { buildBulkUpdate } = require('./content-bulk');
 const { calcViewER, engagementLabel, enrichViewsVsMedian, medianViewsByAccount } = require('./engagement-metrics');
 const { validateTypeLabel } = require('./content-types');
-const { buildCredentialFields, MODEL_WRITE_FIELDS, buildModelWriteColumns, isDuplicateEmailError } = require('./model-credentials');
+const { buildCredentialFields, MODEL_WRITE_FIELDS, buildModelWriteColumns, buildModelInsert, buildModelUpdate, isDuplicateEmailError } = require('./model-credentials');
 
 const app = express();
 wrapAsyncRoutes(app);
@@ -728,12 +728,9 @@ app.post('/models', async (req, res) => {
     delivery_day: delivery_day || 'monday',
     ...buildCredentialFields(req.body),
   };
-  const { columns, placeholders, params } = buildModelWriteColumns(merged, MODEL_ALL_WRITE_FIELDS);
+  const { sql, params } = buildModelInsert(merged, MODEL_ALL_WRITE_FIELDS);
   try {
-    const result = await pool.query(
-      `INSERT INTO models (${columns.join(', ')}) VALUES (${placeholders.join(', ')})`,
-      params
-    );
+    const result = await pool.query(sql, params);
     res.json({ success: true, id: result.rows[0]?.id });
   } catch (err) {
     if (isDuplicateEmailError(err)) return res.status(409).json({ error: 'Email already in use' });
@@ -751,15 +748,9 @@ app.put('/models/:id', async (req, res) => {
     delivery_day: delivery_day || 'monday',
     ...buildCredentialFields(req.body),
   };
-  const { columns, placeholders, params } = buildModelWriteColumns(merged, MODEL_ALL_WRITE_FIELDS);
-  const setClause = columns.map((col, i) => `${col}=${placeholders[i]}`).join(', ');
-  params.push(Number(req.params.id));
-  const idPlaceholder = `$${params.length}`; // [SQLite-safe] last + highest placeholder, no reuse
+  const { sql, params } = buildModelUpdate(merged, MODEL_ALL_WRITE_FIELDS, req.params.id);
   try {
-    await pool.query(
-      `UPDATE models SET ${setClause}, updated_at=TO_CHAR(NOW(), 'YYYY-MM-DD"T"HH24:MI:SS"Z"') WHERE id=${idPlaceholder}`,
-      params
-    );
+    await pool.query(sql, params);
     res.json({ success: true });
   } catch (err) {
     if (isDuplicateEmailError(err)) return res.status(409).json({ error: 'Email already in use' });
