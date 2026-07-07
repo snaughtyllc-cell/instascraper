@@ -1012,6 +1012,21 @@ app.get('/suggested/reels/:id/thumb', asyncHandler(async (req, res) => {
   return res.status(502).json({ error: `thumbnail ${r.status}: ${r.error || ''}` });
 }));
 
+// ─── Model (Me) Routes ──────────────────────────────────────────
+
+// [R2-#3] THE single top-level me-feed import — Task 6 reuses these, never re-requires.
+const { buildMeFeedQuery, nicheVisibilityClause, parseNiches } = require('./me-feed');
+app.get('/me/feed', asyncHandler(async (req, res) => {
+  const modelId = req.session.user.modelId; // requireModel guarantees this
+  const m = await pool.query('SELECT primary_niche, secondary_niches FROM models WHERE id = $1', [modelId]);
+  if (m.rows.length === 0) return res.status(404).json({ error: 'Model not found' });
+  const niches = parseNiches(m.rows[0]);
+  const { sql, params } = buildMeFeedQuery(niches, { page: Number(req.query.page) || 1, limit: 24 });
+  if (!sql) return res.json({ posts: [], niches });
+  const r = await pool.query(sql, params);
+  res.json({ posts: r.rows, niches });
+}));
+
 // ─── Static Files ───────────────────────────────────────────────
 
 const clientBuild = path.join(__dirname, '..', 'client', 'build');
