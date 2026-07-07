@@ -72,31 +72,68 @@ app.use(session({
 app.get('/live', health.liveHandler);
 app.get('/ready', health.readyHandler());
 
+const { resolveLogin, LoginThrottle } = require('./auth');
+const loginThrottle = new LoginThrottle({ max: 5, windowMs: 15 * 60000 });
+
 app.get('/auth/check', (req, res) => {
-  if (!passwordHash) return res.json({ authenticated: true, authRequired: false });
-  res.json({ authenticated: !!req.session.authenticated, authRequired: true });
+  if (!passwordHash) return res.json({ authenticated: true, authRequired: false, role: 'admin', modelId: null });
+  const u = req.session.user;
+  res.json({ authenticated: !!u, authRequired: true, role: u ? u.role : null, modelId: u ? u.modelId : null });
 });
 
-app.post('/login', (req, res) => {
-  const { password } = req.body;
-  if (!passwordHash) return res.json({ success: true });
-  if (bcrypt.compareSync(password || '', passwordHash)) {
-    req.session.authenticated = true;
-    return res.json({ success: true });
+app.post('/login', async (req, res) => {
+  const { email, password } = req.body || {};
+  if (!passwordHash) { // auth disabled (dev) → admin
+    req.session.user = { id: 0, role: 'admin', modelId: null };
+    return res.json({ success: true, role: 'admin' });
   }
-  res.status(401).json({ error: 'Wrong password' });
+  const key = (email ? String(email).toLowerCase() : 'admin') + '|' + (req.ip || '');
+  const gate = loginThrottle.check(key);
+  if (gate.blocked) return res.status(429).json({ error: `Too many attempts. Try again in ${gate.retryInSec}s.` });
+
+  let models = [];
+  if (email) {
+    const r = await pool.query('SELECT id, email, password_hash, role, login_enabled, status FROM models WHERE LOWER(email) = LOWER($1)', [email]);
+    models = r.rows;
+  }
+  const out = resolveLogin({ email, password }, { adminPasswordHash: passwordHash, models });
+  if (!out.ok) { loginThrottle.fail(key); return res.status(401).json({ error: 'Invalid credentials' }); }
+  loginThrottle.reset(key);
+  req.session.user = out.user;
+  res.json({ success: true, role: out.user.role });
 });
 
-app.post('/logout', (req, res) => {
-  req.session.destroy();
-  res.json({ success: true });
-});
+app.post('/logout', (req, res) => { req.session.destroy(() => res.json({ success: true })); });
 
 function requireAuth(req, res, next) {
   if (!passwordHash) return next();
   if (API_KEY && req.headers['x-api-key'] === API_KEY) return next();
-  if (req.session && req.session.authenticated) return next();
+  if (req.session && req.session.user) return next();
   res.status(401).json({ error: 'Not authenticated' });
+}
+function requireAdmin(req, res, next) {
+  if (!passwordHash) return next();
+  if (API_KEY && req.headers['x-api-key'] === API_KEY) return next();
+  if (req.session && req.session.user && req.session.user.role === 'admin') return next();
+  res.status(403).json({ error: 'Admin only' });
+}
+async function requireModel(req, res, next) {
+  const u = req.session && req.session.user;
+  if (!u || u.role !== 'model' || !u.modelId) {
+    // In no-auth dev mode there is no model context; 403 is correct.
+    return res.status(403).json({ error: 'Model account required' });
+  }
+  // [R1-#5] Re-verify the model is still active + login-enabled on EVERY request, so an
+  // admin disabling/deleting a model revokes access promptly despite the 7-day session
+  // cookie. One indexed PK lookup per /me/* request.
+  try {
+    const r = await pool.query('SELECT status, login_enabled FROM models WHERE id = $1', [u.modelId]);
+    const m = r.rows[0];
+    if (!m || m.status !== 'active' || !m.login_enabled) {
+      return req.session.destroy(() => res.status(403).json({ error: 'Account disabled' }));
+    }
+  } catch (e) { return res.status(503).json({ error: 'auth check failed' }); }
+  next();
 }
 
 app.use('/scrape', requireAuth);
