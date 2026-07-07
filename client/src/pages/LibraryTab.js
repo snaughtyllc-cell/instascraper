@@ -1,5 +1,5 @@
-import React, { useState, useEffect, useCallback } from 'react';
-import { getContent, getCreators, exportContent, importUrls, bulkUpdateContent } from '../api';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
+import { getContent, getCreators, exportContent, importUrls, bulkUpdateContent, getContentTypes, addContentType } from '../api';
 import BulkActionBar from '../components/BulkActionBar';
 import ContentCard from '../components/ContentCard';
 import FilterBar from '../components/FilterBar';
@@ -12,6 +12,7 @@ export default function LibraryTab() {
   const [page, setPage] = useState(1);
   const [accounts, setAccounts] = useState([]);
   const [creatorTypes, setCreatorTypes] = useState({});
+  const [contentTypes, setContentTypes] = useState([]);
   const [showImport, setShowImport] = useState(false);
   const [importText, setImportText] = useState('');
   const [importing, setImporting] = useState(false);
@@ -30,6 +31,47 @@ export default function LibraryTab() {
   const [selected, setSelected] = useState(new Set());
   const [loading, setLoading] = useState(false);
 
+  const autoplayInView = typeof window !== 'undefined'
+    && window.matchMedia && window.matchMedia('(pointer: coarse)').matches;
+  const [activeCardId, setActiveCardId] = useState(null);
+  const [soundOn, setSoundOn] = useState(false);
+  const nodeMap = useRef(new Map());       // id -> DOM node
+  const ratioMap = useRef(new Map());      // id -> intersectionRatio
+  const observerRef = useRef(null);
+
+  const registerRef = useCallback((id, node) => {
+    if (!autoplayInView) return;
+    const key = String(id);
+    if (!node) {
+      const prev = nodeMap.current.get(key);
+      if (prev && observerRef.current) observerRef.current.unobserve(prev);
+      nodeMap.current.delete(key);
+      ratioMap.current.delete(key);
+      return;
+    }
+    nodeMap.current.set(key, node);
+    node.dataset.cardId = key;
+    if (observerRef.current) observerRef.current.observe(node);
+  }, [autoplayInView]);
+
+  useEffect(() => {
+    if (!autoplayInView) return;
+    const obs = new IntersectionObserver((entries) => {
+      for (const e of entries) {
+        const id = e.target.dataset.cardId;
+        ratioMap.current.set(id, e.isIntersecting ? e.intersectionRatio : 0);
+      }
+      let bestId = null, best = 0;
+      for (const [id, r] of ratioMap.current.entries()) {
+        if (r > best) { best = r; bestId = id; }
+      }
+      setActiveCardId(best >= 0.6 ? bestId : null);
+    }, { threshold: [0, 0.6, 1] });
+    observerRef.current = obs;
+    for (const node of nodeMap.current.values()) obs.observe(node);
+    return () => obs.disconnect();
+  }, [autoplayInView, posts]);
+
   const loadCreatorTypes = useCallback(async () => {
     try {
       const { data } = await getCreators();
@@ -40,6 +82,19 @@ export default function LibraryTab() {
       setCreatorTypes(map);
     } catch {}
   }, []);
+
+  const loadContentTypes = useCallback(async () => {
+    try {
+      const { data } = await getContentTypes();
+      setContentTypes(data);
+    } catch {}
+  }, []);
+
+  const handleAddContentType = useCallback(async (label) => {
+    const { data } = await addContentType(label);
+    await loadContentTypes();
+    return data; // { value, label }
+  }, [loadContentTypes]);
 
   const loadContent = useCallback(async () => {
     setLoading(true);
@@ -71,7 +126,8 @@ export default function LibraryTab() {
   useEffect(() => {
     loadContent();
     loadCreatorTypes();
-  }, [loadContent, loadCreatorTypes]);
+    loadContentTypes();
+  }, [loadContent, loadCreatorTypes, loadContentTypes]);
 
   const handleFilterChange = (key, value) => {
     setFilters((f) => ({ ...f, [key]: value }));
@@ -172,6 +228,7 @@ export default function LibraryTab() {
       <FilterBar
         filters={filters}
         accounts={accounts}
+        contentTypes={contentTypes}
         total={total}
         onChange={handleFilterChange}
         onExport={() => exportContent('json')}
@@ -206,9 +263,16 @@ export default function LibraryTab() {
               key={post.id}
               post={post}
               creatorTypes={creatorTypes}
+              contentTypes={contentTypes}
+              onAddContentType={handleAddContentType}
               onUpdate={handleUpdate}
               selected={selected.has(post.id)}
               onToggleSelect={toggleSelect}
+              autoplayInView={autoplayInView}
+              isActive={String(post.id ?? post.shortcode) === activeCardId}
+              soundOn={soundOn}
+              onToggleSound={() => setSoundOn((s) => !s)}
+              registerRef={registerRef}
             />
           ))}
         </div>
