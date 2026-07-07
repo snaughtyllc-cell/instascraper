@@ -101,8 +101,16 @@ export default function ContentCard({
     await apply(val || null);
   };
 
-  const handleCreatorType = (e) => maybeAdd(e.target.value, (v) => setCreatorType(post.account_handle, v).then(onUpdate));
-  const handlePostType = (e) => maybeAdd(e.target.value, (v) => setPostContentType(post.id, v).then(onUpdate));
+  const handleCreatorType = (e) => maybeAdd(e.target.value, (v) =>
+    setCreatorType(post.account_handle, v).then(onUpdate).catch((err) => {
+      window.alert('Could not set creator type: ' + (err.response?.data?.error || err.message));
+      onUpdate();
+    }));
+  const handlePostType = (e) => maybeAdd(e.target.value, (v) =>
+    setPostContentType(post.id, v).then(onUpdate).catch((err) => {
+      window.alert('Could not set video type: ' + (err.response?.data?.error || err.message));
+      onUpdate();
+    }));
 
   const handleArchive = async () => {
     await archivePost(post.id, !post.archived);

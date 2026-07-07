@@ -233,8 +233,10 @@ app.post('/content/:id/notes', async (req, res) => {
 
 app.post('/content/:id/content-type', async (req, res) => {
   const { contentType } = req.body;
-  const valid = ['talking', 'dance', 'skit', 'snapchat', 'omegle', 'osc', null];
-  if (!valid.includes(contentType)) return res.status(400).json({ error: 'Invalid content type' });
+  if (contentType) {
+    const ok = await pool.query('SELECT 1 FROM content_types WHERE value = $1', [contentType]);
+    if (ok.rowCount === 0) return res.status(400).json({ error: 'Invalid content type' });
+  }
   const result = await pool.query('UPDATE posts SET content_type = $1 WHERE id = $2', [contentType, Number(req.params.id)]);
   if (result.rowCount === 0) return res.status(404).json({ error: 'Post not found' });
   res.json({ success: true });
@@ -242,8 +244,10 @@ app.post('/content/:id/content-type', async (req, res) => {
 
 app.post('/creators/:handle/type', async (req, res) => {
   const { contentType } = req.body;
-  const valid = ['talking', 'dance', 'skit', 'snapchat', 'omegle', 'osc', null];
-  if (!valid.includes(contentType)) return res.status(400).json({ error: 'Invalid content type' });
+  if (contentType) {
+    const ok = await pool.query('SELECT 1 FROM content_types WHERE value = $1', [contentType]);
+    if (ok.rowCount === 0) return res.status(400).json({ error: 'Invalid content type' });
+  }
   if (contentType) {
     await pool.query('INSERT INTO creator_types (account_handle, content_type) VALUES ($1, $2) ON CONFLICT (account_handle) DO UPDATE SET content_type = $2', [req.params.handle, contentType]);
   } else {
@@ -289,7 +293,8 @@ app.post('/content/:id/archive', async (req, res) => {
 
 app.post('/content/bulk', async (req, res) => {
   const { action, value, ids } = req.body || {};
-  const built = buildBulkUpdate(action, value, ids);
+  const vt = (await pool.query('SELECT value FROM content_types')).rows.map(r => r.value);
+  const built = buildBulkUpdate(action, value, ids, vt);
   if (built.error) return res.status(400).json({ error: built.error });
   if (!built.sql) return res.json({ updated: 0 });
   const result = await pool.query(built.sql, built.params);
@@ -847,8 +852,11 @@ app.get('/export', async (req, res) => {
 
 // Shared save logic (DRY): used by both POST /radar/reels/:shortcode/save and
 // bulk action:'save'. Promotes a radar reel into the Library `posts` table.
-// Dual-mode-safe: the SQLite shim strips `RETURNING id` and `lastInsertRowid`
-// is unreliable on ON CONFLICT, so we resolve post_id with a follow-up SELECT.
+// The INSERT below has no RETURNING clause, so we resolve post_id with a
+// follow-up SELECT by shortcode rather than trusting the INSERT result:
+// `lastInsertRowid` (the SQLite-shim fallback for non-RETURNING inserts)
+// is not updated when `ON CONFLICT (shortcode) DO UPDATE` fires an update
+// instead of an insert, so it can't be relied on here.
 async function saveRadarReel(shortcode) {
   const r = (await pool.query('SELECT * FROM radar_reels WHERE shortcode = $1', [shortcode])).rows[0];
   if (!r) return { ok: false, status: 404, error: 'not_found' };
