@@ -76,3 +76,16 @@ VERDICT: REVISE
 - R2-10 → Task 6: `if (!Number.isInteger(id) || id <= 0) return 404` before any query.
 
 No new rejections this round. Standing rejections remain R1-#4 (DB lease) and R1-#7's removal (302 kept, now gated).
+
+### Claude's response (Round 3 → revised plan)
+
+**Verified before revising:** SQLite migrations array (db.js:335-347) is MIXED-TABLE — posts + scrape_jobs + suggested_accounts + tracked_accounts (R3-1 confirmed; a posts-only extraction would break the schema). `posts.scraped_at` is DEFAULT-on-insert only, NOT updated in the ON CONFLICT DO UPDATE SET (scraper.js:671-681) → stale on re-scrape (R3-3 confirmed); its downstream consumer is scheduler.js:203 (untagged-post cleanup by scraped_at age) which must not be perturbed → dedicated column is the safe fix.
+
+**All 6 incorporated:**
+- R3-1 → Task 1: export the FULL `SQLITE_MIGRATIONS` array verbatim (all 11 lines, 4 tables) and only APPEND the 4 posts video columns; test tolerates "no such table" (other-table lines) as well as "duplicate column".
+- R3-2 + R3-3 → new column `video_url_refreshed_at`, set = `new Date().toISOString()` at every enqueue (Task 7, both paths, insert + on-conflict). It's the single freshness signal for the sweep legacy-gate (Task 4) and `videoUrlIsFresh` (Task 6), replacing `scraped_at` (stale on re-scrape, and a scheduler consumer) and the eternal-`pending` heuristic. Bonus: both cutoffs are now JS ISO-Z → the R2-4 PG/SQLite scraped_at format split is gone.
+- R3-4 → Task 3: after pipeline, `if (seen === 0)` → unlink temp + return `{status:'error', error:'empty body'}` (mirrors thumbnails.js:33). Added a 0-byte test.
+- R3-5 → Task 5: two-phase `'pruning'` claim (Phase 1 claim → Phase 2 unlink → Phase 3 finalize to NULL). Self-healing against BOTH a failed unlink (stays 'pruning', reselected next run) and a failed clear (never zombie-cached). A 'pruning' row serves as not-cached/not-fresh (poster). Added crash/failure tests.
+- R3-6 → Task 6 test: `videoUrlIsFresh` is exercised with real `video_url_refreshed_at`-shaped rows (not a phantom `status` field), including a 20-day-old pending row → false (proves pending isn't eternal).
+
+Standing rejections unchanged: R1-#4 (DB lease), R1-#7 removal (302 kept, gated).

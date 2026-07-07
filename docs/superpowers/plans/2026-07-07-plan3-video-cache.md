@@ -16,10 +16,10 @@
 - **Frontend has NO test harness** — do NOT add one. Gate = `cd client && npm run build` compiles + manual check.
 - **Storage:** files live on the persistent volume mounted at `/app/server/thumbnails` (50 GB). Videos go under a `videos/` subdir there: `DEFAULT_VIDEO_DIR = path.join(DEFAULT_THUMB_DIR, 'videos')`. **Never store video bytes in Postgres** (its volume is 500 MB).
 - **Never download on the scrape path.** Scrape only sets `video_cache_status = 'pending'`; a fire-and-forget `sweepVideos` (batched, `concurrency ≤ 3`, jittered delay, retry-next-sweep on error) does the fetching — same shape as `sweepThumbnails`.
-- **Freshness vs. retention are two different windows, with different timestamp formats [CX-1, CX-2, R2-3, R2-4]:**
-  - **Freshness** governs whether a signed `video_url` is worth attempting. A `'pending'` row was just re-scraped so its URL is fresh — always sweep it (mirrors the thumbnail sweep's documented pending-always rule). A legacy `NULL`-status row is only worth trying if `scraped_at` is recent (URL not yet expired) — gate it by `scraped_at >= freshnessCutoff`. **Freshness uses `scraped_at`.**
-  - **Retention** bounds storage: only cache posts whose `posted_at` is within the last 30 days. Gate the selector by `posted_at IS NOT NULL AND posted_at >= retentionCutoff`. **Retention uses `posted_at`.** [R2-3] Rows with `posted_at IS NULL` are NOT cached at all — prune keys off `posted_at < cutoff` and could never reclaim a null-`posted_at` file, so caching one would leak storage forever. Null `posted_at` means a malformed/timestamp-less reel (rare); it still plays via the 302-fresh fallback while its URL lives, then shows the poster. This keeps the cached set exactly equal to the prunable set.
-  - **Two cutoff formats [R2-4]:** `posted_at` is written by the scraper as `new Date(...).toISOString()` → ISO `…T…Z` in BOTH Postgres and SQLite, but `scraped_at` is a DB default rendered `…T…Z` in Postgres and space-formatted `YYYY-MM-DD HH:MM:SS` in SQLite. So compute TWO cutoffs: `retentionCutoff = new Date(now - maxAgeDays*86400000).toISOString()` (full ISO-Z, used for `posted_at` in both backends) and `freshnessCutoff` in the existing backend-specific `scraped_at` format (Postgres `isoSec+'Z'`, SQLite `isoSec.replace('T',' ')`, exactly as `thumbnails.js:65-69`). Never reuse one format for both.
+- **Freshness vs. retention are two different windows [CX-1, CX-2, R2-3, R2-4, R3-2, R3-3]:**
+  - **Freshness** governs whether a signed `video_url` is worth attempting or 302-ing to. The signal is a dedicated column **`video_url_refreshed_at`**, written = `new Date().toISOString()` at EVERY scrape enqueue (Task 7, both insert paths, insert AND on-conflict). **Why a new column and not `scraped_at` [R3-3]:** the main upsert does NOT update `scraped_at` on conflict (`scraper.js:671`), so a re-scraped post keeps a stale `scraped_at` while its `video_url` is fresh; and `scraped_at` has a downstream consumer (`scheduler.js:203` cleans up untagged posts older than 30d) that we must not perturb. **Why not "pending is fresh" [R3-2]:** an ineligible row (null/out-of-window `posted_at`) is marked `pending` by the scraper but never swept, so `pending` would read as fresh forever and 302 a long-dead URL indefinitely. `video_url_refreshed_at >= freshnessCutoff` is the correct, self-expiring signal used by BOTH the sweep's legacy-row gate and the route's 302 gate.
+  - **Retention** bounds storage: only cache posts whose `posted_at` is within the last 30 days. Gate the selector by `posted_at IS NOT NULL AND posted_at >= retentionCutoff`. [R2-3] Rows with `posted_at IS NULL` are NOT cached at all — prune keys off `posted_at < cutoff` and could never reclaim a null-`posted_at` file, so caching one would leak forever. Null `posted_at` (a malformed/timestamp-less reel, rare) still plays via the 302-fresh fallback while its URL lives, then shows the poster. This keeps the cached set exactly equal to the prunable set.
+  - **Both cutoffs are ISO-Z [R2-4 simplified]:** `posted_at` (scraper `.toISOString()`, `scraper.js:632`) and `video_url_refreshed_at` (JS `.toISOString()`, Task 7) are BOTH full ISO `…T…Z` in Postgres AND SQLite. So `retentionCutoff = new Date(now - maxAgeDays*86400000).toISOString()` and `freshnessCutoff = new Date(now - freshnessDays*86400000).toISOString()` — one format, both backends. (Switching freshness off `scraped_at` onto `video_url_refreshed_at` removed the earlier PG-vs-SQLite `scraped_at` format split entirely.)
 - **Size guard streams, never buffers unbounded [CX-6]:** `downloadVideo` streams the response body to a temp file while counting bytes and aborts + unlinks the moment the running total exceeds `VIDEO_MAX_MB` (default 60). This enforces the cap even when `content-length` is absent or lies, and never loads a whole MP4 into memory. (Thumbnails buffer because images are tiny; videos must not.)
 - **Serve via `res.sendFile`, not hand-rolled streaming [CX-8, CX-9, CX-15]:** the cached-file response uses `res.sendFile(file, { acceptRanges: true }, errCb)`. Express's `send` handles `Range` (206 + `Content-Range`/`Accept-Ranges`), unsatisfiable ranges (`416 bytes */size`), `Content-Type` from the `.mp4` extension, and passes any stream error (including a TOCTOU unlink between stat and open) to `errCb` so a missing file becomes a clean `404` instead of an uncaught crash. No custom `createReadStream` or range parser.
 - **Auth:** `GET /video/:id` sits behind `requireAuth` via `app.use('/video', requireAuth)` (exactly like `/thumb` at `index.js:107`), so both admin and — once Plan 2 lands — model sessions can stream. Not `requireAdmin`. **Cookie flow [CX-12, R2-9]:** the client calls `${API_URL}/video/:id`, and in production the Docker build bakes `REACT_APP_API_URL=https://instascraper-production-7281.up.railway.app` — the **same host that serves the SPA** (`express.static(clientBuild)`, `index.js:928`). So the request is first-party/same-site and the session cookie flows automatically, exactly as it already does for the working `${API_URL}/thumb/:id` reference (`ContentCard.js:76`). No CORS/`crossorigin` needed. `<video>` sends cookies for same-origin `src` by default. (Locally, `API_URL` is `http://localhost:4000` = the dev API, so it works there too.)
@@ -29,73 +29,64 @@
 
 ---
 
-### Task 1: Schema — video cache status columns (exported, in-memory-testable migration)
+### Task 1: Schema — video cache columns (exported FULL migration array, in-memory-testable)
 
 **Files:**
-- Modify: `server/db.js` — (a) hoist the SQLite-branch `posts` migration array to a module-level `const` and export it; (b) add the three video columns to BOTH the Postgres `ADD COLUMN IF NOT EXISTS` list (after `thumbnail_cache_status`/`thumbnail_cache_error` at `db.js:322-323`) and that exported SQLite list (currently inline at `db.js:335-342`).
+- Modify: `server/db.js` — (a) hoist the SQLite-branch migration array (currently inline at `db.js:335-347`) to a module-level `const SQLITE_MIGRATIONS` and export it; (b) add FOUR video columns to BOTH the Postgres `ADD COLUMN IF NOT EXISTS` list (after `db.js:323`) and that exported SQLite array.
 - Test: `server/video-schema.test.js`
 
 **Interfaces:**
-- Produces: `posts.video_cache_status TEXT`, `posts.video_cache_error TEXT`, `posts.video_cached_at TEXT`; and `db.SQLITE_POSTS_MIGRATIONS` (exported `string[]` of the SQLite `ALTER TABLE posts ADD COLUMN …` statements the else-branch of `initDB` iterates).
+- Produces: `posts.video_cache_status TEXT`, `posts.video_cache_error TEXT`, `posts.video_cached_at TEXT`, `posts.video_url_refreshed_at TEXT`; and `db.SQLITE_MIGRATIONS` (exported `string[]` — the EXACT statement list the else-branch of `initDB` iterates).
 
-> **[CX-13, R2-5] The test must exercise the REAL migration statements, in-memory.** A test that `CREATE TABLE`s its own `posts` and alters it is vacuous (passes even if `db.js` is untouched). But calling `initDB()` writes to the hardcoded on-disk dev DB `server/instascraper.db` (`db.js:23`) — order-dependent and against the in-memory constraint. Resolve both: **export the actual SQLite migration statement array** and run it against a throwaway `:memory:` DB in the test. That tests the exact strings `initDB` uses (non-vacuous — forget to add `video_*` and the assertion fails) with zero disk side effects. (`require('./db')` opens the dev DB connection as a pre-existing, harmless side effect — like `radar.test.js` — but runs no schema change; the test operates only on its own `:memory:` DB.)
+> **[R3-1] Export the WHOLE array, not a `posts`-only subset.** The inline SQLite `migrations` array (`db.js:335`) is MIXED-TABLE — it also migrates `scrape_jobs`, `suggested_accounts`, and `tracked_accounts`. A refactor that extracts a posts-only array would DROP those other-table migrations and break a fresh SQLite schema. Hoist the array **verbatim** (every line, same order) and only APPEND the four new posts lines.
 
-- [ ] **Step 1: Refactor `db.js` to export the SQLite migration array.** In the SQLite branch of `initDB` (the `else` at ~`db.js:334`), replace the inline `const migrations = [ … ]` with a reference to a new module-level constant, and export it:
+> **[CX-13, R2-5] The test exercises the REAL statements, in-memory.** A test that writes its own DDL is vacuous (passes even if `db.js` is untouched); calling `initDB()` mutates the hardcoded on-disk dev DB `server/instascraper.db` (`db.js:23`). Instead run the exported array against a throwaway `:memory:` DB whose only real table is `posts` — the other-table `ALTER`s throw "no such table" and are tolerated alongside "duplicate column", so the test still meaningfully asserts the four `posts` video columns land. (`require('./db')` opens the dev DB connection as a pre-existing, harmless side effect — like `radar.test.js` — but runs no schema change.)
 
-```js
-// near the top of db.js, module scope (not inside initDB):
-const SQLITE_POSTS_MIGRATIONS = [
-  `ALTER TABLE posts ADD COLUMN soft_deleted INTEGER DEFAULT 0`,
-  `ALTER TABLE posts ADD COLUMN soft_deleted_at TEXT DEFAULT NULL`,
-  `ALTER TABLE posts ADD COLUMN thumbnail_cache_status TEXT`,
-  `ALTER TABLE posts ADD COLUMN thumbnail_cache_error TEXT`,
-  `ALTER TABLE posts ADD COLUMN tagged_users TEXT DEFAULT NULL`,
-  // (copy the EXACT existing list verbatim; do not drop or reorder any line)
-];
-// …inside initDB's else-branch: `for (const sql of SQLITE_POSTS_MIGRATIONS) { … }`
-// …at the bottom with the other exports: module.exports.SQLITE_POSTS_MIGRATIONS = SQLITE_POSTS_MIGRATIONS;
-```
+- [ ] **Step 1: Refactor `db.js` — hoist + export the full array verbatim.** Move the inline `const migrations = [ … ]` (all 11 lines at `db.js:335-347`) to module scope as `const SQLITE_MIGRATIONS = [ … ]` (do NOT drop or reorder any line — it spans four tables), point the else-branch loop at it (`for (const sql of SQLITE_MIGRATIONS)`), and export it: `module.exports.SQLITE_MIGRATIONS = SQLITE_MIGRATIONS;`.
 
-- [ ] **Step 2: Write the failing test — runs the exported statements against `:memory:`**
+- [ ] **Step 2: Write the failing test — runs the exported array against `:memory:`**
 
 ```js
 // server/video-schema.test.js
 const { test } = require('node:test');
 const assert = require('node:assert');
 const Database = require('better-sqlite3');
-const { SQLITE_POSTS_MIGRATIONS } = require('./db');
+const { SQLITE_MIGRATIONS } = require('./db');
 
-test('SQLITE_POSTS_MIGRATIONS adds video_cache_status/error/cached_at to posts', () => {
+test('SQLITE_MIGRATIONS adds the four video columns to posts', () => {
   const db = new Database(':memory:');
   db.exec(`CREATE TABLE posts (id INTEGER PRIMARY KEY, shortcode TEXT)`);
-  for (const sql of SQLITE_POSTS_MIGRATIONS) {
-    try { db.exec(sql); } catch (e) { if (!/duplicate column/i.test(e.message)) throw e; }
+  for (const sql of SQLITE_MIGRATIONS) {
+    // Tolerate other-table statements (no such table) and re-runs (duplicate column).
+    try { db.exec(sql); } catch (e) { if (!/duplicate column|no such table/i.test(e.message)) throw e; }
   }
   const cols = db.prepare(`PRAGMA table_info(posts)`).all().map(c => c.name);
-  for (const c of ['video_cache_status', 'video_cache_error', 'video_cached_at']) {
+  for (const c of ['video_cache_status', 'video_cache_error', 'video_cached_at', 'video_url_refreshed_at']) {
     assert.ok(cols.includes(c), `${c} missing from the real migration array`);
   }
 });
 ```
 
-- [ ] **Step 3: Run → FAIL** (`cd server && node --test video-schema.test.js`) — `video_cache_status missing…`, because Step 1 hoisted the array but hasn't added the video columns yet. This failure proves the test is non-vacuous.
+- [ ] **Step 3: Run → FAIL** (`cd server && node --test video-schema.test.js`) — `video_cache_status missing…`, because Step 1 only hoisted the array. Proves the test is non-vacuous.
 
-- [ ] **Step 4: Add the three columns to BOTH lists.** In the exported `SQLITE_POSTS_MIGRATIONS` (Step 1) AND the Postgres `IF NOT EXISTS` list (after `db.js:323`):
+- [ ] **Step 4: Append the FOUR columns to BOTH lists.** In the exported `SQLITE_MIGRATIONS` (append) AND the Postgres `IF NOT EXISTS` list (after `db.js:323`):
 
 ```js
-// SQLITE_POSTS_MIGRATIONS (append):
+// SQLITE_MIGRATIONS (append — posts only):
 `ALTER TABLE posts ADD COLUMN video_cache_status TEXT`,
 `ALTER TABLE posts ADD COLUMN video_cache_error TEXT`,
 `ALTER TABLE posts ADD COLUMN video_cached_at TEXT`,
+`ALTER TABLE posts ADD COLUMN video_url_refreshed_at TEXT`,
 // Postgres branch (near db.js:322):
 `ALTER TABLE posts ADD COLUMN IF NOT EXISTS video_cache_status TEXT`,
 `ALTER TABLE posts ADD COLUMN IF NOT EXISTS video_cache_error TEXT`,
 `ALTER TABLE posts ADD COLUMN IF NOT EXISTS video_cached_at TEXT`,
+`ALTER TABLE posts ADD COLUMN IF NOT EXISTS video_url_refreshed_at TEXT`,
 ```
 
 - [ ] **Step 5: Run → PASS**. Also boot check: `cd server && node -e "delete process.env.DATABASE_URL; require('./db').initDB().then(()=>console.log('ok'))"` → `ok`.
 
-- [ ] **Step 6: Commit** — `git commit -am "feat(video-cache): video_cache columns via exported, in-memory-tested migration array"`
+- [ ] **Step 6: Commit** — `git commit -am "feat(video-cache): 4 video cache columns via exported full migration array (in-memory tested)"`
 
 ---
 
@@ -240,6 +231,12 @@ test('downloadVideo skips a too-big body with NO content-length [CX-6, R2-6]', a
   assert.strictEqual(r.status, 'skipped');
   assert.ok(!fs.existsSync(path.join(DIR, '4.mp4')), 'temp cleaned up, no final file');
 });
+test('downloadVideo returns error on an empty (0-byte) 200 body [R3-4]', async () => {
+  const r = await downloadVideo({ id: 9, video_url: 'http://x' },
+    { fs, fetch: fetchOf({ headers: { 'content-type': 'video/mp4' }, chunks: [] }), videoDir: DIR, inflight: new Map() });
+  assert.strictEqual(r.status, 'error');
+  assert.ok(!fs.existsSync(path.join(DIR, '9.mp4')), 'no 0-byte file left behind');
+});
 test('downloadVideo returns cached without refetching if file exists', async () => {
   fs.writeFileSync(path.join(DIR, '5.mp4'), Buffer.alloc(5));
   let fetched = false;
@@ -279,7 +276,11 @@ let seen = 0;
 const cap$ = new Transform({ transform(chunk, _enc, cb) { seen += chunk.length; if (seen > cap) return cb(new Error('too_big')); cb(null, chunk); } });
 try {
   await pipeline(res.body, cap$, fs.createWriteStream(tmp));
-  fs.renameSync(tmp, file);            // only after flush
+  if (seen === 0) {                    // [R3-4] empty-body guard (mirrors thumbnails.js:33)
+    try { fs.unlinkSync(tmp); } catch { /* ENOENT ok */ }
+    return { status: 'error', error: 'empty body' };
+  }
+  fs.renameSync(tmp, file);            // only after flush, only if non-empty
   return { status: 'cached', path: file };
 } catch (err) {
   try { fs.unlinkSync(tmp); } catch { /* ENOENT ok */ }
@@ -307,17 +308,17 @@ Wrap the whole thing in the in-flight-dedup IIFE from `downloadThumbnail` keyed 
 **Selector [CX-1, CX-2, R2-3] — retention on `posted_at` (non-null), freshness on `scraped_at`:**
 
 ```sql
-SELECT id, shortcode, video_url, video_url AS sel_url FROM posts
+SELECT id, shortcode, video_url FROM posts
 WHERE video_url IS NOT NULL
   AND posted_at IS NOT NULL AND posted_at >= $retentionCutoff       -- retention: bound storage; null posted_at NEVER cached (unprunable)
   AND ( video_cache_status = 'pending'                              -- freshly re-scraped URL: always try
-        OR (video_cache_status IS NULL AND scraped_at >= $freshnessCutoff) )  -- legacy: only if URL still fresh
+        OR (video_cache_status IS NULL AND video_url_refreshed_at >= $freshnessCutoff) )  -- legacy: only if URL still fresh
 ORDER BY id DESC LIMIT $batchLimit
 ```
 
-- **[R2-4] Two differently-formatted cutoffs — do NOT share one string:**
-  - `retentionCutoff = new Date(now - maxAgeDays*86400000).toISOString()` — full ISO `…T…Z`; `posted_at` is stored via `.toISOString()` in BOTH backends (scraper.js:632), so this one format is correct for Postgres AND SQLite.
-  - `freshnessCutoff` = now − `freshnessDays` (default 14, matching the thumbnail recency window), formatted for `scraped_at` exactly as `sweepThumbnails` does (`thumbnails.js:65-69`): Postgres `isoSec + 'Z'`, SQLite `isoSec.replace('T', ' ')`.
+- **[R2-4, R3-3] Both cutoffs are JS-computed ISO-Z — one format, both backends:**
+  - `retentionCutoff = new Date(now - maxAgeDays*86400000).toISOString()` — `posted_at` is stored via `.toISOString()` in both backends (scraper.js:632).
+  - `freshnessCutoff = new Date(now - freshnessDays*86400000).toISOString()` — gates on `video_url_refreshed_at` (also a JS `.toISOString()` value, Task 7), NOT `scraped_at`. Legacy pre-migration rows have `video_url_refreshed_at IS NULL` → the NULL-status branch selects none of them (correct — their URLs are long expired); every current-scraped row is `pending` and swept via the first branch. This is why the old PG-vs-SQLite `scraped_at` format split is gone.
 - `maxAgeDays` default 30, `freshnessDays` default 14, `concurrency` default **3**, `batchLimit` default **60**, jittered `delay` between items.
 
 **Per-item UPDATE is URL-guarded [CX-3]:** capture the `video_url` used for each selected row; when writing status back, guard the UPDATE so a slow download can't clobber a row that was re-scraped (new URL) mid-flight:
@@ -355,18 +356,24 @@ If `video_url` changed since selection, 0 rows update and the row stays `'pendin
 **Interfaces:**
 - Produces: `pruneOldVideos(opts?, deps?) : Promise<{deleted}>` — deletes cached files for posts whose `posted_at < now - maxAgeDays` (default 30), then clears their `video_cache_status`/`video_cached_at`. Dependency-injected `fs`/`db`/`videoDir`/`now`.
 
-**Claim-then-unlink [CX-10, R2-2]:** the earlier draft unlinked the file BEFORE the guarded UPDATE — so a row that a concurrent scrape re-marked `'pending'` (or whose window changed at the boundary) between SELECT and UPDATE could lose its file while keeping DB state, orphaning a `cached`/`pending` row with no bytes. Reverse the order: **claim first with a predicate-guarded UPDATE, unlink only when the claim actually took effect.**
+**Two-phase `pruning` claim [CX-10, R2-2, R3-5].** Two failure modes pull in opposite directions: unlink-before-clear orphans the file if the DB write fails; clear-before-unlink orphans the file if `unlinkSync` fails with a non-ENOENT error (status is already NULL → prune never reselects → leaked forever). Resolve both with an intermediate `'pruning'` status that is self-healing:
 
 ```sql
-UPDATE posts SET video_cache_status = NULL, video_cached_at = NULL
-WHERE id = $1 AND posted_at < $cutoff AND video_cache_status IS NOT NULL   -- re-check window + still-cached at write time
+-- Phase 1 (claim): atomically move eligible rows out of "cached/pending" into "pruning".
+UPDATE posts SET video_cache_status = 'pruning', video_cached_at = NULL
+WHERE id = $1 AND posted_at < $cutoff AND video_cache_status IS NOT NULL AND video_cache_status <> 'pruning'
+-- Phase 2: only if Phase 1 changed the row, unlink the file (ignore ENOENT).
+-- Phase 3: on unlink success OR confirmed ENOENT, finalize:
+UPDATE posts SET video_cache_status = NULL WHERE id = $1 AND video_cache_status = 'pruning'
 ```
 
-Only if this UPDATE reports it changed a row (SQLite adapter → `changes`; Postgres → `rowCount`) do we then `fs.unlinkSync(videoFilePath(post, videoDir))` (ignore ENOENT). If the guard matched 0 rows (raced into `pending`, or already cleared), we leave the file alone — the file always outlives or dies with its DB claim, never the reverse.
+- A `'pruning'` row is served as **not cached** by `/video/:id` and is **not fresh** (`videoUrlIsFresh` returns false), so it shows the poster during deletion. The sweep never reselects it (it's neither `pending` nor `NULL`).
+- If the process dies between phases, the row stays `'pruning'` with `video_cache_status IS NOT NULL`, so the **next** prune reselects it (its SELECT filter is `posted_at < cutoff AND video_cache_status IS NOT NULL`), retries the unlink → ENOENT → Phase 3 clears it. No orphaned file, no zombie-cached row.
+- On a non-ENOENT unlink error, skip Phase 3 (leave it `'pruning'`) and log — the next run retries.
 
-- [ ] **Step 1: Write the failing test** [CX-14, R2-2] — seed two posts (one 40 days old with a cached file present, one 5 days old); run `pruneOldVideos({maxAgeDays:30})`; assert the old file was `unlinkSync`'d and its `video_cache_status` cleared, the recent one untouched; assert a missing file (ENOENT) does not throw; **and** assert that if the guarded UPDATE matches 0 rows (simulate by pre-clearing the row's status, or asserting unlink is skipped when `changes===0`), the file is NOT unlinked.
+- [ ] **Step 1: Write the failing test** [CX-14, R2-2, R3-5] — seed two posts (one 40 days old with a cached file present, one 5 days old); run `pruneOldVideos({maxAgeDays:30})`; assert the old file was `unlinkSync`'d and its status ended `NULL`, the recent one untouched; assert a missing file (ENOENT) still finalizes to `NULL` and does not throw; assert an already-`'pruning'` orphan (file present, no unlink error) is reclaimed to `NULL`; assert a simulated non-ENOENT unlink error leaves status `'pruning'` (retryable), not `NULL`.
 
-- [ ] **Step 2: Run → FAIL. Step 3: implement** — SELECT `id` of posts with `posted_at < cutoff` AND `video_cache_status IS NOT NULL`; for each: run the guarded UPDATE above, and only on a positive `changes`/`rowCount` call `try { fs.unlinkSync(videoFilePath(post, videoDir)); } catch (e) { if (e.code !== 'ENOENT') throw e; }`. Log `[Metric] video_prune deleted=N` (count the rows actually claimed). Add to exports.
+- [ ] **Step 2: Run → FAIL. Step 3: implement** — SELECT `id` of posts with `posted_at < cutoff AND video_cache_status IS NOT NULL`; for each: run Phase-1 UPDATE; if it changed a row (`changes`/`rowCount` > 0), `try { fs.unlinkSync(videoFilePath(post, videoDir)); } catch (e) { if (e.code !== 'ENOENT') { console.error('[Prune] unlink failed', e.code); continue; } }` then Phase-3 UPDATE. Log `[Metric] video_prune deleted=N` (rows finalized to NULL). Add to exports.
 
 - [ ] **Step 4: Run → PASS. Step 5: Commit** — `git commit -am "feat(video-cache): pruneOldVideos rolling recycle (guarded clear)"`
 
@@ -389,23 +396,20 @@ Only if this UPDATE reports it changed a row (SQLite adapter → `changes`; Post
 ```js
 const { videoFilePath, DEFAULT_VIDEO_DIR } = require('./videos');
 
-// Fresh enough to bother 302-ing the raw IG URL? Mirrors the sweep's freshness rule.
+// [R2-1, R3-2, R3-3] Worth 302-ing the raw IG URL? Only if it was refreshed recently.
+// Reads video_url_refreshed_at — NOT status (pending is eternal) and NOT scraped_at
+// (stale on re-scrape). Self-expiring: a pending row refreshed 20d ago is NOT fresh.
 function videoUrlIsFresh(post, freshnessDays = 14) {
-  if (post.video_cache_status === 'pending') return true;
-  if (post.video_cache_status == null && post.scraped_at) {
-    const usePg = !!process.env.DATABASE_URL;
-    const isoSec = new Date(Date.now() - freshnessDays * 86400000).toISOString().slice(0, 19);
-    const cutoff = usePg ? isoSec + 'Z' : isoSec.replace('T', ' ');
-    return post.scraped_at >= cutoff;
-  }
-  return false; // expired / error / skipped, or stale null → poster wins
+  if (!post.video_url_refreshed_at) return false;
+  const cutoff = new Date(Date.now() - freshnessDays * 86400000).toISOString();
+  return post.video_url_refreshed_at >= cutoff;
 }
 
 app.get('/video/:id', asyncHandler(async (req, res) => {
   const id = Number(req.params.id);
   if (!Number.isInteger(id) || id <= 0) return res.status(404).send('not found');   // [R2-10]
   const r = await pool.query(
-    'SELECT id, video_url, video_cache_status, scraped_at FROM posts WHERE id = $1', [id]);
+    'SELECT id, video_url, video_url_refreshed_at FROM posts WHERE id = $1', [id]);
   const post = r.rows[0];
   if (!post) return res.status(404).send('not found');
   const file = videoFilePath(post, DEFAULT_VIDEO_DIR);
@@ -423,7 +427,7 @@ app.get('/video/:id', asyncHandler(async (req, res) => {
 
 (`fs`, `asyncHandler`, `pool` already exist in `index.js`; `res.sendFile` is already used at `index.js:911`.)
 
-- [ ] **Step 2: Write the extracted-handler test [CX-12, R2-1, R2-10]** — export `videoUrlIsFresh` from a small module (or `index.js`) so it's unit-testable without booting Express, and test: (a) `videoUrlIsFresh({status:'pending'})` → true; (b) `status:'expired'` → false (known-dead → poster, NOT a 302); (c) `status:null` + recent `scraped_at` → true; (d) `status:null` + `scraped_at` 30 days ago → false. Also unit-test the id-validation branch — `Number('abc')`/`0`/`-1` short-circuit to 404 before any `pool.query`. Factor the handler body into a small `serveVideo(post, { fs, videoDir, res })`-style function if that makes the sendFile/302/404 branches testable with fake `res`/`fs`; otherwise the `videoUrlIsFresh` + id-validation unit tests plus the Step-3 manual curls are the gate. (Auth is enforced by the `app.use('/video', requireAuth)` prefix, identical to `/thumb`; note in the test that `/video` is among the `requireAuth` prefixes at `index.js:107`.)
+- [ ] **Step 2: Write the extracted-handler test [CX-12, R2-1, R2-10, R3-6]** — export `videoUrlIsFresh` so it's unit-testable without booting Express, and test with **real row-shaped objects that use the actual field name `video_url_refreshed_at`** (the function reads that, not `status` — a test passing `{status:'pending'}` would test nothing): (a) `{ video_url_refreshed_at: new Date().toISOString() }` → true; (b) `{ video_url_refreshed_at: new Date(Date.now() - 30*86400000).toISOString() }` → false (aged out → poster, not a 302); (c) `{ video_url_refreshed_at: null }` → false; (d) a `pending` row whose `video_url_refreshed_at` is 20 days old → false (proves `pending` is NOT treated as eternally fresh, [R3-2]). Also unit-test id validation — `Number('abc')`/`0`/`-1` short-circuit to 404 before any `pool.query`. Factor the handler body into a small `serveVideo(post, { fs, videoDir, res })`-style function if that makes the sendFile/302/404 branches testable with fake `res`/`fs`; otherwise `videoUrlIsFresh` + id-validation units plus the Step-3 curls are the gate. (Auth is enforced by the `app.use('/video', requireAuth)` prefix, identical to `/thumb`, at `index.js:107`.)
 
 - [ ] **Step 3: Manual verify** — cache one video (seed a post + run a sweep locally, or drop a small mp4 at `videos/<id>.mp4`), then:
   - `curl -s -D- -o /dev/null "localhost:4000/video/<id>" -H 'Range: bytes=0-99'` → `206 Partial Content`, `Content-Range: bytes 0-99/<size>`, `Accept-Ranges: bytes`.
@@ -441,13 +445,15 @@ app.get('/video/:id', asyncHandler(async (req, res) => {
 - Modify: `server/scraper.js` — the main upsert (`scraper.js:668-681`), the URL-import insert (`scraper.js:1113-1116`), and the post-scrape sweep call.
 
 **Interfaces:**
-- Produces: **every** post-insert path that writes a fresh `video_url` also sets `video_cache_status = 'pending'` [CX-11], and a `sweepVideos({batchLimit:60})` fires fire-and-forget after the scrape — mirroring the existing `thumbnail_cache_status = 'pending'` + `sweepThumbnails(...)`.
+- Produces: **every** post-insert path that writes a fresh `video_url` sets `video_cache_status = 'pending'` [CX-11] AND `video_url_refreshed_at = <nowIso>` [R3-2, R3-3], and a `sweepVideos({batchLimit:60})` fires fire-and-forget after the scrape — mirroring the existing `thumbnail_cache_status = 'pending'` + `sweepThumbnails(...)`.
 
-> **[CX-11] There are TWO insert paths, not one.** `scraper.js:668` is the main `ON CONFLICT (shortcode) DO UPDATE` upsert (already sets `thumbnail_cache_status = 'pending'`). `scraper.js:1113` is the URL-import `INSERT ... ON CONFLICT (shortcode) DO NOTHING` — it writes `video_url` for NEW rows but the earlier draft never enqueued it. Both must set `video_cache_status = 'pending'`. (The `DO NOTHING` path only needs it in the INSERT column list/values, since a conflict is a no-op.)
+> **[CX-11] There are TWO insert paths.** `scraper.js:668` is the main `ON CONFLICT DO UPDATE` upsert (both INSERT values AND the `DO UPDATE SET` clause must set the two columns — a re-scrape must refresh `video_url_refreshed_at` even though the row already exists). `scraper.js:1113` is the URL-import `INSERT ... ON CONFLICT DO NOTHING` — only the INSERT column list/values need them (a conflict is a no-op). **Compute one `const nowIso = new Date().toISOString();` per scrape and bind it** — do NOT use a SQL `NOW()`/`CURRENT_TIMESTAMP` default (those render in different formats per backend, reintroducing the R2-4 mismatch).
 
-- [ ] **Step 1: Main upsert (`scraper.js:668`).** Add `video_cache_status` to the INSERT column list (value `'pending'`) and add `video_cache_status = 'pending'` to the `ON CONFLICT (shortcode) DO UPDATE SET` list, right next to the existing `thumbnail_cache_status = 'pending'` (`scraper.js:681`).
+> **Placeholder renumbering:** both INSERTs currently list 15 columns (`$1..$15`); adding `video_cache_status` + `video_url_refreshed_at` makes them 17 (`$1..$17`). Renumber carefully and add the two values to each params array.
 
-- [ ] **Step 2: URL-import insert (`scraper.js:1113`).** Add `video_cache_status` to that INSERT's column list with value `'pending'` (this path is `DO NOTHING`, so no `SET` clause change needed).
+- [ ] **Step 1: Main upsert (`scraper.js:668`).** Add `video_cache_status` and `video_url_refreshed_at` to the INSERT column list + values (`'pending'`, `nowIso`); add BOTH `video_cache_status = 'pending'` and `video_url_refreshed_at = EXCLUDED.video_url_refreshed_at` (or `= $N` bound to `nowIso`) to the `ON CONFLICT (shortcode) DO UPDATE SET` list, next to the existing `thumbnail_cache_status = 'pending'` (`scraper.js:681`).
+
+- [ ] **Step 2: URL-import insert (`scraper.js:1113`).** Add `video_cache_status` (`'pending'`) and `video_url_refreshed_at` (`nowIso`) to that INSERT's column list + values (`DO NOTHING`, so no `SET` change).
 
 - [ ] **Step 3: Post-scrape sweep — in BOTH scrape methods [R2-8].** The main flow's `sweepThumbnails(...)` fire-and-forget is at `scraper.js:720`; add the video sweep right after it. But `importByUrls` returns at `scraper.js:1132` and has NO sweep of its own — so add the SAME line just before its `return { imported, ... }`, or the URL-imported rows sit `'pending'` until some unrelated future scrape happens to sweep them. Add in both places:
 
@@ -509,11 +515,14 @@ cron.schedule('30 3 * * *', () =>
 - Rejected (rationale in the review log): CX-4 (cross-process `pending→downloading` lease — over-engineered for a single-instance Railway deploy; CX-3+CX-5 remove the real harms; matches the proven `thumbnails.js` pattern) and CX-7's *removal* of the 302 (kept but gated per R2-1).
 
 **Round-2 Codex findings — ALL incorporated:**
-- R2-1 (gate the 302 to genuinely-fresh rows, else 404→poster, Task 6), R2-2 (prune claims-then-unlinks, Task 5), R2-3 (never cache null-`posted_at` — keeps cached set == prunable set, Task 4 + Global Constraints), R2-4 (two cutoff formats: `posted_at` ISO-Z vs `scraped_at` backend-specific, Task 4 + Global Constraints), R2-5 (export the SQLite migration array, test it in-memory — no disk side-effect, Task 1 + db.js refactor), R2-6 (`stream.pipeline` + byte-counting Transform, tested against a real temp dir, Task 3), R2-7 (crypto suffix in `tempVideoPath`, Task 2), R2-8 (fire the sweep after `importByUrls` too, Task 7), R2-9 (cookie flow grounded in the baked prod origin, mirrors the working `/thumb` reference, Task 9 + Global Constraints), R2-10 (validate `id` before querying, Task 6).
+- R2-1 (gate the 302 to genuinely-fresh rows, else 404→poster, Task 6), R2-2 (prune claim/unlink ordering → superseded by the R3-5 two-phase claim, Task 5), R2-3 (never cache null-`posted_at` — keeps cached set == prunable set, Task 4 + Global Constraints), R2-4 (cutoff formats — simplified by R3-3 to both ISO-Z, Task 4 + Global Constraints), R2-5 (export the migration array, test it in-memory — no disk side-effect, Task 1 + db.js refactor), R2-6 (`stream.pipeline` + byte-counting Transform, tested against a real temp dir, Task 3), R2-7 (crypto suffix in `tempVideoPath`, Task 2), R2-8 (fire the sweep after `importByUrls` too, Task 7), R2-9 (cookie flow grounded in the baked prod origin, mirrors the working `/thumb` reference, Task 9 + Global Constraints), R2-10 (validate `id` before querying, Task 6).
+
+**Round-3 Codex findings — ALL incorporated:**
+- R3-1 (export the FULL mixed-table SQLite migration array, not a posts-only subset that would drop scrape_jobs/suggested_accounts/tracked_accounts migrations, Task 1), R3-2 + R3-3 (add a dedicated `video_url_refreshed_at` column as the freshness signal — `pending` is eternal and `scraped_at` doesn't update on re-scrape / has a `scheduler.js:203` consumer; used by both the sweep legacy-gate and the route 302-gate, Tasks 1/4/6/7 + Global Constraints), R3-4 (empty-body guard `seen > 0`, Task 3), R3-5 (two-phase `'pruning'` claim — self-healing against both a failed unlink and a failed clear, Task 5), R3-6 (test `videoUrlIsFresh` with the real `video_url_refreshed_at` field, not a phantom `status`, Task 6).
 
 **Placeholder scan:** none — pure-logic tasks carry full code; the sweep/prune tasks give the exact selector/UPDATE SQL plus the `thumbnails.js` structure to copy; the endpoint + frontend carry full code and concrete manual checks. The one implementer-judgment seam (fake-stream modeling in Task 3) is explicitly bounded with a required test outcome.
 
-**Type consistency:** `video_cache_status`/`video_cache_error`/`video_cached_at` (Task 1) are written by `sweepVideos` (4), cleared by `pruneOldVideos` (5), set `'pending'` by the scraper (7); `videoFilePath`/`tempVideoPath` (2) are consumed by `downloadVideo` (3) and `/video/:id` (6); `DEFAULT_VIDEO_DIR` is one definition imported everywhere. No `parseRangeHeader` anywhere (dropped).
+**Type consistency:** the four columns (Task 1) — `video_cache_status`/`video_cache_error`/`video_cached_at`/`video_url_refreshed_at` — are: set (`'pending'` + `nowIso`) by the scraper (7), written (`cached`/`expired`/`skipped`/`error`) by `sweepVideos` (4), transitioned through `'pruning'`→`NULL` by `pruneOldVideos` (5). `video_url_refreshed_at` is the freshness signal read by both the sweep legacy-gate (4) and `videoUrlIsFresh` (6). `videoFilePath`/`tempVideoPath` (2) are consumed by `downloadVideo` (3) and `/video/:id` (6); `DEFAULT_VIDEO_DIR` is one definition imported everywhere. Both cutoffs (retention on `posted_at`, freshness on `video_url_refreshed_at`) are JS `.toISOString()` values → one ISO-Z format across backends. No `parseRangeHeader` anywhere (dropped).
 
 ## Verification (end-to-end)
 
