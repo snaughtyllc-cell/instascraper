@@ -18,6 +18,7 @@ const { videoFilePath, DEFAULT_VIDEO_DIR } = require('./videos');
 const { buildBulkUpdate } = require('./content-bulk');
 const { calcViewER, engagementLabel, enrichViewsVsMedian, medianViewsByAccount } = require('./engagement-metrics');
 const { validateTypeLabel } = require('./content-types');
+const { buildCredentialFields, MODEL_WRITE_FIELDS, buildModelWriteColumns, isDuplicateEmailError } = require('./model-credentials');
 
 const app = express();
 wrapAsyncRoutes(app);
@@ -694,32 +695,82 @@ app.get('/models/niches/available', async (req, res) => {
   res.json(result.rows.map(r => r.content_type));
 });
 
+// [R1-#8] The only columns POST/PUT /models may ever write. Base fields have always
+// been positional; MODEL_WRITE_FIELDS (email/login_enabled/password_hash) are the new
+// credential columns from model-credentials.js. 'role' is deliberately excluded — see
+// buildCredentialFields. Both handlers below build columns/placeholders/params by
+// iterating THIS constant against a hand-built `merged` object — never Object.keys(req.body).
+const MODEL_BASE_FIELDS = ['name', 'primary_niche', 'secondary_niches', 'delivery_method', 'delivery_contact', 'delivery_day'];
+const MODEL_ALL_WRITE_FIELDS = [...MODEL_BASE_FIELDS, ...MODEL_WRITE_FIELDS];
+
+// [R1-#9] Explicit column list — deliberately excludes password_hash so it can never
+// reach the admin client. Includes email/role/login_enabled so the admin UI can show
+// login status. This is the ONLY `SELECT * FROM models` that serialized a raw row
+// straight to an HTTP response; the other SELECT * FROM models call sites (PDF/Notion
+// export, ai-agent.js, delivery.js, scheduler.js) read named fields only and never echo
+// the row, so they were left as-is.
 app.get('/models', async (req, res) => {
-  const result = await pool.query("SELECT * FROM models WHERE status = 'active' ORDER BY created_at DESC");
+  const result = await pool.query(
+    `SELECT id, name, primary_niche, secondary_niches, delivery_method, delivery_contact, delivery_day, status, email, role, login_enabled, created_at, updated_at
+     FROM models WHERE status = 'active' ORDER BY created_at DESC`
+  );
   res.json(result.rows);
 });
 
 app.post('/models', async (req, res) => {
   const { name, primary_niche, secondary_niches, delivery_method, delivery_contact, delivery_day } = req.body;
   if (!name || !primary_niche) return res.status(400).json({ error: 'name and primary_niche required' });
-  const result = await pool.query(
-    `INSERT INTO models (name, primary_niche, secondary_niches, delivery_method, delivery_contact, delivery_day) VALUES ($1, $2, $3, $4, $5, $6)`,
-    [name, primary_niche, secondary_niches || '', delivery_method || 'whatsapp', delivery_contact || '', delivery_day || 'monday']
-  );
-  res.json({ success: true, id: result.rows[0]?.id });
+  const merged = {
+    name, primary_niche,
+    secondary_niches: secondary_niches || '',
+    delivery_method: delivery_method || 'whatsapp',
+    delivery_contact: delivery_contact || '',
+    delivery_day: delivery_day || 'monday',
+    ...buildCredentialFields(req.body),
+  };
+  const { columns, placeholders, params } = buildModelWriteColumns(merged, MODEL_ALL_WRITE_FIELDS);
+  try {
+    const result = await pool.query(
+      `INSERT INTO models (${columns.join(', ')}) VALUES (${placeholders.join(', ')})`,
+      params
+    );
+    res.json({ success: true, id: result.rows[0]?.id });
+  } catch (err) {
+    if (isDuplicateEmailError(err)) return res.status(409).json({ error: 'Email already in use' });
+    throw err;
+  }
 });
 
 app.put('/models/:id', async (req, res) => {
   const { name, primary_niche, secondary_niches, delivery_method, delivery_contact, delivery_day } = req.body;
-  await pool.query(
-    `UPDATE models SET name=$1, primary_niche=$2, secondary_niches=$3, delivery_method=$4, delivery_contact=$5, delivery_day=$6, updated_at=TO_CHAR(NOW(), 'YYYY-MM-DD"T"HH24:MI:SS"Z"') WHERE id=$7`,
-    [name, primary_niche, secondary_niches || '', delivery_method || 'whatsapp', delivery_contact || '', delivery_day || 'monday', Number(req.params.id)]
-  );
-  res.json({ success: true });
+  const merged = {
+    name, primary_niche,
+    secondary_niches: secondary_niches || '',
+    delivery_method: delivery_method || 'whatsapp',
+    delivery_contact: delivery_contact || '',
+    delivery_day: delivery_day || 'monday',
+    ...buildCredentialFields(req.body),
+  };
+  const { columns, placeholders, params } = buildModelWriteColumns(merged, MODEL_ALL_WRITE_FIELDS);
+  const setClause = columns.map((col, i) => `${col}=${placeholders[i]}`).join(', ');
+  params.push(Number(req.params.id));
+  const idPlaceholder = `$${params.length}`; // [SQLite-safe] last + highest placeholder, no reuse
+  try {
+    await pool.query(
+      `UPDATE models SET ${setClause}, updated_at=TO_CHAR(NOW(), 'YYYY-MM-DD"T"HH24:MI:SS"Z"') WHERE id=${idPlaceholder}`,
+      params
+    );
+    res.json({ success: true });
+  } catch (err) {
+    if (isDuplicateEmailError(err)) return res.status(409).json({ error: 'Email already in use' });
+    throw err;
+  }
 });
 
 app.delete('/models/:id', async (req, res) => {
-  await pool.query("UPDATE models SET status = 'inactive' WHERE id = $1", [Number(req.params.id)]);
+  // [R1-#5] Also disable login so a deleted model fails BOTH resolveLogin (status check)
+  // AND the per-request requireModel re-check — belt and suspenders for prompt revocation.
+  await pool.query("UPDATE models SET status = 'inactive', login_enabled = 0 WHERE id = $1", [Number(req.params.id)]);
   res.json({ success: true });
 });
 
