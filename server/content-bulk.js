@@ -2,15 +2,14 @@
 // allow-lists the single-item /content routes use, coerces ids to positive
 // integers, and returns a portable `id IN ($2,$3,…)` UPDATE (never ANY()).
 const TAG_VALUES = ['recreate', 'reference', 'skip', null];
-const CONTENT_TYPE_VALUES = ['talking', 'dance', 'skit', 'snapchat', 'omegle', 'osc', null];
 
-function buildBulkUpdate(action, value, ids) {
+function buildBulkUpdate(action, value, ids, validTypeValues = []) {
   let column, param;
   if (action === 'tag') {
     if (!TAG_VALUES.includes(value)) return { error: 'Invalid tag' };
     column = 'tag'; param = value;
   } else if (action === 'content-type') {
-    if (!CONTENT_TYPE_VALUES.includes(value)) return { error: 'Invalid content type' };
+    if (![...validTypeValues, null].includes(value)) return { error: 'Invalid content type' };
     column = 'content_type'; param = value;
   } else if (action === 'archive') {
     column = 'archived'; param = value ? 1 : 0;
