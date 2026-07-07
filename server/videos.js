@@ -92,4 +92,83 @@ async function downloadVideo(post, deps = {}) {
   return job;
 }
 
-module.exports = { DEFAULT_VIDEO_DIR, VIDEO_MAX_MB, videoFilePath, tempVideoPath, downloadVideo };
+async function sweepVideos(opts = {}, deps = {}) {
+  const { maxAgeDays = 30, freshnessDays = 14, batchLimit = 60, concurrency = 3 } = opts;
+  const db = deps.db || require('./db');
+  const download = deps.download || ((p) => downloadVideo(p, { videoDir: deps.videoDir }));
+  const delay = deps.delay || ((ms) => new Promise(r => setTimeout(r, ms)));
+  const started = Date.now();
+
+  // [R2-4, R3-3] Both cutoffs are JS-computed ISO-Z strings: posted_at and
+  // video_url_refreshed_at are both stored via .toISOString() in both Postgres
+  // and SQLite (scraper.js:632), so a single ISO-Z cutoff is correct for both
+  // backends — unlike sweepThumbnails' scraped_at compare, no PG/SQLite format
+  // split is needed here.
+  const now = deps.now ? deps.now() : Date.now();
+  const nowIso = new Date(now).toISOString();
+  const retentionCutoff = new Date(now - maxAgeDays * 86400000).toISOString();
+  const freshnessCutoff = new Date(now - freshnessDays * 86400000).toISOString();
+
+  const sel = await db.query(
+    `SELECT id, shortcode, video_url FROM posts
+     WHERE video_url IS NOT NULL
+       AND posted_at IS NOT NULL AND posted_at >= $1
+       AND ( video_cache_status = 'pending'
+             OR (video_cache_status IS NULL AND video_url_refreshed_at >= $2) )
+     ORDER BY id DESC LIMIT $3`,
+    [retentionCutoff, freshnessCutoff, batchLimit]
+  );
+  const posts = sel.rows || [];
+  const tally = { attempted: 0, cached: 0, expired: 0, skipped: 0, errored: 0 };
+
+  // [CX-3] URL-guarded write: post.video_url is the URL captured at selection
+  // time (the one actually downloaded). If a concurrent re-scrape has since
+  // written a fresh video_url onto this row, the WHERE clause matches 0 rows
+  // and the status write is silently skipped — the row stays 'pending' so the
+  // next sweep picks it up with the fresh URL instead of clobbering it.
+  //
+  // NOTE: unlike Postgres, this repo's SQLite adapter (db.js) does a naive
+  // `sql.replace(/\$(\d+)/g, '?')` that does NOT collapse repeated $N
+  // placeholders to a single bound value — reusing $1 in both the SET clause
+  // and the CASE guard (as sketched in the task brief) produces 6 "?" marks
+  // for only 5 bound params and throws "Too few parameter values were
+  // provided" under SQLite. Every placeholder below is therefore given its
+  // own number, with `status` passed twice ($1 and $3) — identical semantics,
+  // correct positional binding on both backends.
+  async function writeStatus(post, status, error) {
+    await db.query(
+      `UPDATE posts SET video_cache_status = $1, video_cache_error = $2,
+        video_cached_at = CASE WHEN $3 = 'cached' THEN $4 ELSE video_cached_at END
+       WHERE id = $5 AND video_url = $6`,
+      [status, error || null, status, nowIso, post.id, post.video_url]
+    );
+  }
+
+  async function worker(queue) {
+    while (queue.length) {
+      const post = queue.shift();
+      tally.attempted++;
+      let outcome;
+      try {
+        const r = await download(post);
+        outcome = r.status;
+        await writeStatus(post, r.status, r.error);
+      } catch (err) {
+        outcome = 'error';
+        try { await writeStatus(post, 'error', err.message); } catch { /* ignore */ }
+      }
+      if (outcome === 'cached') tally.cached++;
+      else if (outcome === 'expired') tally.expired++;
+      else if (outcome === 'skipped') tally.skipped++;
+      else tally.errored++;
+      await delay(100 + Math.floor(Math.random() * 200));
+    }
+  }
+
+  const queue = posts.slice();
+  await Promise.all(Array.from({ length: Math.min(concurrency, queue.length) }, () => worker(queue)));
+  console.log(`[Metric] video_sweep cached=${tally.cached} expired=${tally.expired} skipped=${tally.skipped} errored=${tally.errored} attempted=${tally.attempted} ms=${Date.now() - started}`);
+  return tally;
+}
+
+module.exports = { DEFAULT_VIDEO_DIR, VIDEO_MAX_MB, videoFilePath, tempVideoPath, downloadVideo, sweepVideos };
