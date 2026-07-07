@@ -8,6 +8,7 @@ import SuggestedAccountsTab from './pages/SuggestedAccountsTab';
 import DeleteLogTab from './pages/DeleteLogTab';
 import ModelsTab from './pages/ModelsTab';
 import LoginPage from './components/LoginPage';
+import ModelApp from './ModelApp';
 
 const TABS = [
   { id: 'tracked', label: 'Tracked' },
@@ -22,6 +23,8 @@ const TABS = [
 export default function App() {
   const [activeTab, setActiveTab] = useState('tracked');
   const [authState, setAuthState] = useState('loading');
+  const [role, setRole] = useState(null);
+  const [modelId, setModelId] = useState(null);
 
   useEffect(() => {
     checkAuth();
@@ -31,6 +34,8 @@ export default function App() {
     try {
       const { data } = await api.get('/auth/check');
       if (!data.authRequired || data.authenticated) {
+        setRole(data.role || 'admin');
+        setModelId(data.modelId || null);
         setAuthState('app');
       } else {
         setAuthState('login');
@@ -54,7 +59,11 @@ export default function App() {
   }
 
   if (authState === 'login') {
-    return <LoginPage onLogin={() => setAuthState('app')} />;
+    return <LoginPage onLogin={checkAuth} />;
+  }
+
+  if (role === 'model') {
+    return <ModelApp onLogout={handleLogout} />;
   }
 
   return (
