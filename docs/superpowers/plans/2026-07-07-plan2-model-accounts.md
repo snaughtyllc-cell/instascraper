@@ -21,51 +21,86 @@
   - Login attempts are throttled (per-identifier lockout) to blunt brute force.
 - **Back-compat:** the current admin login (team `AUTH_PASSWORD`, no email) must keep working; existing behavior when `AUTH_PASSWORD` is unset (auth disabled → treat as admin) must be preserved.
 - **Commits:** one per task, frequent.
-- **This plan will be reviewed by `/codex-review` before execution.** Base branch: `mobile-model-accounts` (off the merged `reel-radar-discovery`, which contains Plan 1).
+- **This plan will be reviewed by `/codex-review` before execution.** Base branch: `model-accounts` off `main` (the deploy branch), which now contains **Plan 1** (auth + editable content types) AND **Plan 3** (video cache).
+
+> **↳ RETARGETED to `main` (2026-07-07).** The plan was drafted against a pre-Plan-3 codebase; a reality-check updated its references. Key drift folded in below:
+> - **`db.js` has TWO parallel migration arrays now** (Plan 3 refactor): the exported module-level `SQLITE_MIGRATIONS` (`db.js:8-24`, exported at line 373) AND a separate inline Postgres `migrations` array inside `initDB` (`db.js:339-355`). New `models` columns must be added to BOTH, kept in sync. (Task 1.)
+> - **Schema tests are non-vacuous now:** import the real exported `SQLITE_MIGRATIONS` and run it against `:memory:`, mirroring `server/video-schema.test.js` — do NOT hand-write the DDL in the test. (Task 1.)
+> - **Plan 3 added `app.use('/video', requireAuth)` (`index.js:110`).** It must stay on `requireAuth` (models need to watch their niche reels), NOT become `requireAdmin`. `GET /video/:id` (`index.js:958`) has no per-owner check — see the accepted-risk note in Task 4.
+> - Current line refs (verified): auth block `index.js:75-100`; requireAuth prefixes `index.js:102-118`; `models` CREATE `db.js:259-272` (no auth columns yet); `GET/POST /models` `index.js:659/664-672`, `PUT /models/:id` `674-681` (fully positional — no dynamic SET exists yet); `GET /models` does `SELECT *` (line 659); `/ideas/:modelId` `index.js:699-705`; niche match `ai-agent.js:117,120` (posts aliased `p`) + `/content` route `index.js:182,192` (unaliased `posts.`); session middleware `index.js:61-70`; admin hash `bcrypt.hashSync(AUTH_PASSWORD,10)` `index.js:31`. `bcryptjs` + `express-session` already installed and wired.
 
 ---
 
 ### Task 1: Schema — model login columns + `model_saved_posts`
 
 **Files:**
-- Modify: `server/db.js` (add ALTERs to the migration list near the existing `ADD COLUMN IF NOT EXISTS` block ~`db.js:318`; add `model_saved_posts` in the `CREATE TABLE` block)
+- Modify: `server/db.js` — add the four `models` ALTERs to BOTH migration arrays (exported `SQLITE_MIGRATIONS` at `db.js:8-24` AND the inline Postgres `migrations` array inside `initDB` at `db.js:339-355`); add the `model_saved_posts` CREATE TABLE right after the `models` table (`db.js:259-272`).
 - Test: `server/model-schema.test.js`
 
 **Interfaces:**
-- Produces: `models` gains `email TEXT`, `password_hash TEXT`, `role TEXT DEFAULT 'model'`, `login_enabled INTEGER DEFAULT 0`. New table `model_saved_posts (model_id INTEGER, post_id INTEGER, saved_at TEXT, PRIMARY KEY(model_id, post_id))`. A partial-unique index on `models(email)` where email is not null (Postgres) — for SQLite dev, a plain index is acceptable.
+- Produces: `models` gains `email TEXT`, `password_hash TEXT`, `role TEXT DEFAULT 'model'`, `login_enabled INTEGER DEFAULT 0`. New table `model_saved_posts (model_id INTEGER, post_id INTEGER, saved_at TEXT, PRIMARY KEY(model_id, post_id))`. Exports `db.SQLITE_MIGRATIONS` already exist (Plan 3); this task extends it.
 
-- [ ] **Step 1: Write the failing test**
+> **[RETARGET — dual arrays]** Plan 3 split the migrations into two hand-synced lists. The four `models` columns go in BOTH:
+> - the exported `SQLITE_MIGRATIONS` array (`db.js:8-24`) as bare `ALTER TABLE models ADD COLUMN …` (SQLite has no `IF NOT EXISTS` on ADD COLUMN; the apply loop swallows "duplicate column").
+> - the inline Postgres `migrations` array (`db.js:339-355`) as `ALTER TABLE models ADD COLUMN IF NOT EXISTS …`.
+> `model_saved_posts` is a `CREATE TABLE`, so it lives directly in `initDB` (after the `models` CREATE, ~`db.js:272`), NOT in either array.
+
+- [ ] **Step 1: Write the failing test — against the REAL exported migration array** (mirrors `server/video-schema.test.js`; a self-DDL test would be vacuous and is forbidden by the Global Constraints):
 
 ```js
 // server/model-schema.test.js
 const { test } = require('node:test');
 const assert = require('node:assert');
 const Database = require('better-sqlite3');
+const { SQLITE_MIGRATIONS } = require('./db');
 
-// Mirrors the columns/table the migration must add; if db.js drifts, this fails.
-test('model login columns + model_saved_posts exist after applying the migration DDL', () => {
+test('SQLITE_MIGRATIONS adds the four model login columns to models', () => {
   const db = new Database(':memory:');
   db.exec(`CREATE TABLE models (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT, primary_niche TEXT)`);
-  // The migration statements (SQLite forms) — keep in sync with db.js:
-  db.exec(`ALTER TABLE models ADD COLUMN email TEXT`);
-  db.exec(`ALTER TABLE models ADD COLUMN password_hash TEXT`);
-  db.exec(`ALTER TABLE models ADD COLUMN role TEXT DEFAULT 'model'`);
-  db.exec(`ALTER TABLE models ADD COLUMN login_enabled INTEGER DEFAULT 0`);
-  db.exec(`CREATE TABLE IF NOT EXISTS model_saved_posts (model_id INTEGER, post_id INTEGER, saved_at TEXT, PRIMARY KEY(model_id, post_id))`);
+  for (const sql of SQLITE_MIGRATIONS) {
+    // Tolerate other-table statements (no such table) and re-runs (duplicate column).
+    try { db.exec(sql); } catch (e) { if (!/duplicate column|no such table/i.test(e.message)) throw e; }
+  }
   const cols = db.prepare(`PRAGMA table_info(models)`).all().map(c => c.name);
-  for (const c of ['email', 'password_hash', 'role', 'login_enabled']) assert.ok(cols.includes(c), `models.${c} missing`);
-  const saved = db.prepare(`PRAGMA table_info(model_saved_posts)`).all().map(c => c.name);
-  assert.deepStrictEqual(saved.sort(), ['model_id', 'post_id', 'saved_at'].sort());
+  for (const c of ['email', 'password_hash', 'role', 'login_enabled']) {
+    assert.ok(cols.includes(c), `models.${c} missing from the real migration array`);
+  }
+});
+
+test('model_saved_posts DDL (copied verbatim from db.js) has the expected shape', () => {
+  // model_saved_posts is a CREATE TABLE in initDB, not in SQLITE_MIGRATIONS, so it can't be
+  // exercised via the array. Copy the CREATE verbatim from db.js to keep this self-consistent.
+  const db = new Database(':memory:');
+  db.exec(`CREATE TABLE IF NOT EXISTS model_saved_posts (
+    model_id INTEGER NOT NULL, post_id INTEGER NOT NULL, saved_at TEXT, PRIMARY KEY (model_id, post_id))`);
+  const saved = db.prepare(`PRAGMA table_info(model_saved_posts)`).all().map(c => c.name).sort();
+  assert.deepStrictEqual(saved, ['model_id', 'post_id', 'saved_at'].sort());
 });
 ```
 
-- [ ] **Step 2: Run test to verify it passes (it asserts the DDL shape the migration must add)**
+> The first test is non-vacuous (fails if `db.js`'s array isn't updated). The second only checks the CREATE's shape against a copy — a weaker guarantee for that one table (flagged, acceptable per the same tradeoff `video-schema.test.js` documents).
 
-Run: `cd server && node --test model-schema.test.js` → PASS (locks the contract).
+- [ ] **Step 2: Run → the first test FAILS** (`cd server && node --test model-schema.test.js`) — `models.email missing…`, because the columns aren't in `SQLITE_MIGRATIONS` yet. This failure proves the test is non-vacuous.
 
-- [ ] **Step 3: Add the migrations to `db.js`**
+- [ ] **Step 3: Add the migrations to `db.js`** — append to the exported `SQLITE_MIGRATIONS` (`db.js:8-24`):
 
-In the `ADD COLUMN IF NOT EXISTS` migration array (the Postgres branch near `db.js:309-320`, plus the SQLite `ADD COLUMN` fallback branch near `db.js:325-334`), add the four `models` columns following the existing pattern exactly. In the `CREATE TABLE` block (after `models`, near `db.js:214`), add:
+```js
+`ALTER TABLE models ADD COLUMN email TEXT`,
+`ALTER TABLE models ADD COLUMN password_hash TEXT`,
+`ALTER TABLE models ADD COLUMN role TEXT DEFAULT 'model'`,
+`ALTER TABLE models ADD COLUMN login_enabled INTEGER DEFAULT 0`,
+```
+
+and to the inline Postgres `migrations` array (`db.js:339-355`):
+
+```js
+`ALTER TABLE models ADD COLUMN IF NOT EXISTS email TEXT`,
+`ALTER TABLE models ADD COLUMN IF NOT EXISTS password_hash TEXT`,
+`ALTER TABLE models ADD COLUMN IF NOT EXISTS role TEXT DEFAULT 'model'`,
+`ALTER TABLE models ADD COLUMN IF NOT EXISTS login_enabled INTEGER DEFAULT 0`,
+```
+
+and add the `model_saved_posts` CREATE directly in `initDB` after the `models` CREATE (~`db.js:272`):
 
 ```js
   await db.query(`
@@ -78,15 +113,13 @@ In the `ADD COLUMN IF NOT EXISTS` migration array (the Postgres branch near `db.
   `);
 ```
 
-- [ ] **Step 4: Boot check**
-
-Run: `cd server && node -e "require('./db').initDB().then(()=>console.log('ok')).catch(e=>{console.error(e);process.exit(1)})"` → prints `ok`.
+- [ ] **Step 4: Run → PASS**, then boot check: `cd server && node -e "delete process.env.DATABASE_URL; require('./db').initDB().then(()=>console.log('ok')).catch(e=>{console.error(e);process.exit(1)})"` → prints `ok`.
 
 - [ ] **Step 5: Commit**
 
 ```bash
 git add server/db.js server/model-schema.test.js
-git commit -m "feat(auth): model login columns + model_saved_posts schema"
+git commit -m "feat(auth): model login columns (both migration arrays) + model_saved_posts"
 ```
 
 ---
@@ -223,7 +256,7 @@ git commit -m "feat(auth): auth helper — hashing, login resolution, throttle"
 
 - [ ] **Step 1: Rewrite `/login`, `/auth/check`, `/logout`, and add middleware**
 
-Replace the block at `server/index.js:73-98` with:
+Replace the block at `server/index.js:75-100` (`/auth/check` → `requireAuth`; `req.session.authenticated` is currently a plain boolean) with:
 
 ```js
 const { resolveLogin, LoginThrottle } = require('./auth');
@@ -296,7 +329,7 @@ git commit -m "feat(auth): session user + role login, throttle, requireAdmin/req
 ### Task 4: Gate admin routes with `requireAdmin`
 
 **Files:**
-- Modify: `server/index.js` (the `app.use('<prefix>', requireAuth)` block at `index.js:100-115`)
+- Modify: `server/index.js` (the `app.use('<prefix>', requireAuth)` block at `index.js:102-118`)
 - Test: `server/route-gating.test.js`
 
 **Interfaces:**
@@ -329,7 +362,9 @@ test('model gate: admin (no modelId) denied, model allowed', () => {
 
 - [ ] **Step 3: Swap admin prefixes to `requireAdmin`**
 
-In `server/index.js:100-115`, change these prefixes from `requireAuth` to `requireAdmin`: `/scrape`, `/content`, `/content-types`, `/creators`, `/engagement`, `/export`, `/tracked`, `/suggested`, `/delete-log`, `/scheduler`, `/models`, `/ideas`, `/admin`, `/radar`. Leave `/thumb` and `/thumbnails` on `requireAuth` (models need images). Add `app.use('/me', requireModel);` (routes added in Tasks 5–7).
+In `server/index.js:102-118`, change these prefixes from `requireAuth` to `requireAdmin`: `/scrape`, `/content`, `/content-types`, `/creators`, `/engagement`, `/export`, `/tracked`, `/suggested`, `/delete-log`, `/scheduler`, `/models`, `/ideas`, `/admin`, `/radar`. **Leave `/thumb`, `/thumbnails`, AND `/video` (`index.js:110`, added by Plan 3) on `requireAuth`** — models need thumbnails AND videos for their niche feed. Add `app.use('/me', requireModel);` (routes added in Tasks 5–7).
+
+> **[RETARGET — accepted risk, `/video/:id` IDOR]** `GET /video/:id` (`index.js:958`) streams by post id with no per-owner/per-niche check, so any authenticated model could fetch any post's video by guessing an id. This is an **accepted risk for this plan**: post ids are only surfaced to a model through their own scoped `/me/feed` and `/me/saves` responses, the library is shared org content (not per-model-secret), and adding a per-request ownership join to `/video/:id` is out of scope here. State this explicitly for the Codex review rather than silently gating `/video` further. (If future requirements demand niche-level video privacy, revisit with a scoped check.)
 
 - [ ] **Step 4: Manual verify** a model session is 403 on `/content` and 200 on `/thumb`. Start server with `AUTH_PASSWORD` set, create a model login (Task 8 or a direct DB insert), log in as the model, `curl` `/content` → 403, `/me/feed` → 200. Document in report. (If Task 8's admin UI isn't built yet, insert a model row with a bcrypt hash via a one-off `node -e`.)
 
@@ -349,7 +384,7 @@ git commit -m "feat(auth): requireAdmin on admin routes, /me behind requireModel
 - Modify: `server/index.js` (add `GET /me/feed`)
 
 **Interfaces:**
-- Produces: `buildMeFeedQuery(niches, { page=1, limit=24 })` → `{ sql, params }` selecting non-duplicate (`duplicate_of IS NULL` if the column exists — it does not yet in Plan 2, so guard: only add that clause when a `hasDuplicateOf` flag is passed; default false), non-soft-deleted posts where `COALESCE(posts.content_type, ct.content_type) = ANY(niches)`, newest first, paginated. Mirrors the niche match in `ai-agent.js:117-120` and the `LEFT JOIN creator_types ct` at `index.js:188`.
+- Produces: `buildMeFeedQuery(niches, { page=1, limit=24 })` → `{ sql, params }` selecting non-soft-deleted posts where `COALESCE(posts.content_type, ct.content_type) = ANY(niches)`, newest first, paginated. Mirrors the niche match in `ai-agent.js:117,120` (method `_queryTopContent`, line 109 — note it aliases posts as `p`; the `/content` route at `index.js:182,192` uses the unaliased `posts.content_type` + `LEFT JOIN creator_types ct ON posts.account_handle = ct.account_handle`, which is the style `me-feed.js` mirrors). No `duplicate_of` column exists on `main` (that was a deferred Plan-3 dedup idea, never shipped), so do NOT reference it.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -501,7 +536,7 @@ git commit -m "feat(me): per-model saves, owner always from session"
 - Modify: `server/index.js` (add `GET /me/ideas`)
 
 **Interfaces:**
-- Produces: `GET /me/ideas` → the session model's `idea_cards` (reuses the existing query shape from `index.js:648`, but scoped to `req.session.user.modelId`, NOT a route param).
+- Produces: `GET /me/ideas` → the session model's `idea_cards` (reuses the exact query shape from the existing `GET /ideas/:modelId` at `index.js:699-705`, but scoped to `req.session.user.modelId`, NOT a route param). `idea_cards.model_id` exists (`db.js:278`).
 
 - [ ] **Step 1: Add the route**
 
@@ -528,8 +563,12 @@ git commit -m "feat(me): GET /me/ideas self-scoped to session model"
 ### Task 8: Admin — provision model logins
 
 **Files:**
-- Modify: `server/index.js` (extend `POST /models` and `PUT /models/:id` at `index.js:611-628` to accept `email`, `password`, `login_enabled`; hash the password)
+- Modify: `server/index.js` — extend `POST /models` (`index.js:664-672`) and `PUT /models/:id` (`index.js:674-681`) to accept `email`, `password`, `login_enabled`; hash the password. AND change `GET /models` (`index.js:659`) off `SELECT *`.
 - Test: `server/model-credentials.test.js` (the credential-merge builder)
+
+> **[RETARGET — two required edits the plan didn't anticipate]**
+> 1. **`GET /models` does `SELECT * FROM models` (`index.js:659`).** Once `password_hash` exists, `SELECT *` would leak every model's hash to the admin client. Change it to an explicit column list that EXCLUDES `password_hash` (include `email`, `role`, `login_enabled` so the admin UI can show login status). This is REQUIRED, not optional.
+> 2. **`POST`/`PUT /models` are fully positional today** (fixed `$1..$6`/`$7`, no dynamic SET builder exists anywhere). Merging `buildCredentialFields` means INTRODUCING dynamic column building here for the first time — build the column/placeholder/params lists from a base object spread with `buildCredentialFields(req.body)`. Don't assume a reusable dynamic-SET helper exists.
 
 **Interfaces:**
 - Consumes: `hashPassword` from Task 2.
@@ -617,7 +656,7 @@ export const getMyIdeas = () => api.get('/me/ideas');
 
 - [ ] **Step 1: `LoginPage` — add an email field**, keep password. Submit `login(email || undefined, password)`. Keep the existing styling; add a small "Model? enter your email" affordance (email input above password; leaving it blank logs in as admin/team).
 
-- [ ] **Step 2: `App.js` — capture role.** In `checkAuth`, store `role`/`modelId` from `/auth/check` into state. When `authState==='app'`: if `role==='model'` render `<ModelApp onLogout={handleLogout} />`; else render the existing admin header + tabs unchanged. `LoginPage.onLogin` should re-run `checkAuth` (so role is loaded) rather than blindly setting `'app'`.
+- [ ] **Step 2: `App.js` — capture role.** `App.js` (`checkAuth` at lines 30-41) has NO `role` state today — add it. Store `role`/`modelId` from `/auth/check` into state. When `authState==='app'`: if `role==='model'` render `<ModelApp onLogout={handleLogout} />`; else render the existing admin header + tabs unchanged. **The current `onLogin={() => setAuthState('app')}` (`App.js:57`) is the literal to replace** — change it to re-run `checkAuth()` so `role`/`modelId` load before rendering the surface (otherwise a fresh model login renders the admin app with a null role).
 
 - [ ] **Step 3: Build check** → compiles.
 - [ ] **Step 4: Manual** — admin login (blank email) → admin tool; model login → model app shell. Document.
