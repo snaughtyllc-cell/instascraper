@@ -76,14 +76,20 @@ export default function ReelCard({
     }
   }, [playing, autoplayInView, soundOn, manualPaused]);
 
-  // Tap the reel surface: desktop → start; mobile → toggle play/pause (also the
-  // recovery path if iOS refused to autoplay).
+  // Tap the reel surface. If the <video> isn't mounted yet (this reel is showing
+  // its poster because it isn't the active/autoplaying one, or a prior load
+  // errored), force-mount it and let the playback effect start it. Otherwise
+  // toggle play/pause. This is what makes tapping ANY reel play it — not just the
+  // one the in-view observer picked.
   const handleSurfaceTap = () => {
-    if (!autoplayInView) { setShowVideo(true); return; }
     const el = videoRef.current;
-    if (!el) return;
+    if (!el) {
+      setVideoFailed(false); // retry a prior error
+      setShowVideo(true);    // mount now; the effect calls play()
+      return;
+    }
     if (el.paused) {
-      el.muted = !soundOn;
+      el.muted = autoplayInView ? !soundOn : false;
       const p = el.play();
       if (p && typeof p.catch === 'function') p.catch(() => {});
       setManualPaused(false);
@@ -93,8 +99,9 @@ export default function ReelCard({
     }
   };
 
-  // Center play affordance: desktop before start, or mobile when paused/blocked.
-  const showCenterPlay = (!autoplayInView && !showVideo) || (autoplayInView && playing && manualPaused);
+  // Center play affordance: whenever a reel is showing its poster (tap to play),
+  // or when it's paused.
+  const showCenterPlay = !playing || manualPaused;
 
   return (
     <div
