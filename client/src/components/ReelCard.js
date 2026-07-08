@@ -1,10 +1,16 @@
 import React, { useState, useEffect, useRef } from 'react';
 
-// Lean, model-only reel card (Feed + Saved). Deliberately NOT the shared admin
-// ContentCard: the reel fills the screen and every piece of context — @handle,
-// ER, views, caption, and the Save / Open / Sound actions — rides ON the video,
-// Instagram-style, so the reel stays big and the model never scrolls to see
-// context. The admin Library keeps ContentCard untouched.
+// Lean, model-only reel card (Feed + Saved). The reel fills the screen and every
+// piece of context — @handle, ER, views, caption, and the Save / Open / Sound
+// actions — rides ON the video, Instagram-style. The admin Library keeps
+// ContentCard untouched.
+//
+// PLAYBACK (the "videos won't play on the phone" fix): React's `muted` prop is
+// unreliable on iOS — it sets the attribute but not the muted *property*, so iOS
+// treats a muted-autoplay <video> as unmuted and silently BLOCKS autoplay,
+// leaving a frozen poster. We therefore set `muted` on the element imperatively
+// and call play() ourselves, and make the whole reel tap-to-play/pause so a
+// blocked autoplay (e.g. iOS Low Power Mode) is always recoverable by tapping.
 
 const API_URL = process.env.REACT_APP_API_URL || 'http://localhost:4000';
 
@@ -35,7 +41,9 @@ export default function ReelCard({
 }) {
   const [showVideo, setShowVideo] = useState(false); // desktop tap-to-play fallback
   const [videoFailed, setVideoFailed] = useState(false);
+  const [manualPaused, setManualPaused] = useState(false);
   const cardRef = useRef(null);
+  const videoRef = useRef(null);
 
   const cardId = post.id ?? post.shortcode;
   const reelUrl = post.post_url || (post.shortcode ? `https://www.instagram.com/reel/${post.shortcode}/` : null);
@@ -43,8 +51,8 @@ export default function ReelCard({
   const videoSrc = cardId ? `${API_URL}/video/${cardId}` : post.video_url;
   const typeLabel = post.niche || post.content_type;
 
-  // Reset the fallback-to-poster flag when the underlying reel changes.
-  useEffect(() => { setVideoFailed(false); }, [cardId]);
+  // Reset per-reel playback flags when the underlying reel changes.
+  useEffect(() => { setVideoFailed(false); setManualPaused(false); }, [cardId]);
 
   // Register with the shared in-view observer so only the most-visible reel plays.
   useEffect(() => {
@@ -56,6 +64,38 @@ export default function ReelCard({
 
   const playing = (showVideo || (autoplayInView && isActive)) && !videoFailed && cardId != null;
 
+  // Drive playback imperatively (see file header). Runs whenever the reel becomes
+  // the active/playing one, or when mute/pause state changes.
+  useEffect(() => {
+    const el = videoRef.current;
+    if (!el || !playing) return;
+    el.muted = autoplayInView ? !soundOn : false;
+    if (!manualPaused) {
+      const p = el.play();
+      if (p && typeof p.catch === 'function') p.catch(() => {});
+    }
+  }, [playing, autoplayInView, soundOn, manualPaused]);
+
+  // Tap the reel surface: desktop → start; mobile → toggle play/pause (also the
+  // recovery path if iOS refused to autoplay).
+  const handleSurfaceTap = () => {
+    if (!autoplayInView) { setShowVideo(true); return; }
+    const el = videoRef.current;
+    if (!el) return;
+    if (el.paused) {
+      el.muted = !soundOn;
+      const p = el.play();
+      if (p && typeof p.catch === 'function') p.catch(() => {});
+      setManualPaused(false);
+    } else {
+      el.pause();
+      setManualPaused(true);
+    }
+  };
+
+  // Center play affordance: desktop before start, or mobile when paused/blocked.
+  const showCenterPlay = (!autoplayInView && !showVideo) || (autoplayInView && playing && manualPaused);
+
   return (
     <div
       ref={cardRef}
@@ -64,13 +104,14 @@ export default function ReelCard({
       {/* Media — true aspect, no crop */}
       {playing ? (
         <video
+          ref={videoRef}
           src={videoSrc}
           poster={thumbnailSrc}
           autoPlay
           playsInline
           muted={autoplayInView ? !soundOn : false}
           loop={autoplayInView}
-          controls={!autoplayInView}
+          controls={false}
           className="absolute inset-0 w-full h-full object-contain"
           onError={() => setVideoFailed(true)}
         />
@@ -86,22 +127,26 @@ export default function ReelCard({
         />
       )}
 
-      {/* Desktop / non-autoplay: center tap-to-play */}
-      {!autoplayInView && !showVideo && (
-        <button
-          onClick={() => setShowVideo(true)}
-          className="absolute inset-0 z-10 flex items-center justify-center bg-black/20 hover:bg-black/30 transition-colors"
-          aria-label="Play reel"
-        >
-          <span className="w-16 h-16 rounded-full bg-white/90 flex items-center justify-center">
-            <svg className="w-7 h-7 text-gray-900 ml-1" fill="currentColor" viewBox="0 0 24 24"><path d="M8 5v14l11-7z" /></svg>
+      {/* Full-surface tap layer: play/pause (mobile) or start (desktop). Sits below
+          the action rail (z-20) and above the pointer-events-none overlay. */}
+      <button
+        type="button"
+        onClick={handleSurfaceTap}
+        className="absolute inset-0 z-[5] w-full h-full"
+        aria-label={playing && !manualPaused ? 'Pause' : 'Play'}
+      >
+        {showCenterPlay && (
+          <span className="absolute inset-0 flex items-center justify-center">
+            <span className="w-16 h-16 rounded-full bg-black/45 flex items-center justify-center backdrop-blur">
+              <svg className="w-7 h-7 text-white ml-1" fill="currentColor" viewBox="0 0 24 24"><path d="M8 5v14l11-7z" /></svg>
+            </span>
           </span>
-        </button>
-      )}
+        )}
+      </button>
 
       {/* "playing" pill — reassures the model the video is live */}
-      {playing && autoplayInView && (
-        <div className="absolute top-3 left-3 z-20 flex items-center gap-1.5 rounded-full bg-black/45 px-2.5 py-1 text-[11px] font-semibold text-white backdrop-blur">
+      {playing && !manualPaused && autoplayInView && (
+        <div className="pointer-events-none absolute top-3 left-3 z-20 flex items-center gap-1.5 rounded-full bg-black/45 px-2.5 py-1 text-[11px] font-semibold text-white backdrop-blur">
           <span className="w-[7px] h-[7px] rounded-full bg-emerald-400" />
           playing
         </div>
@@ -163,8 +208,9 @@ export default function ReelCard({
         )}
       </div>
 
-      {/* Bottom overlay: handle + meta + caption + type — all ON the video */}
-      <div className="absolute inset-x-0 bottom-0 z-10 px-3.5 pt-9 pb-3.5 pr-16 bg-gradient-to-t from-black/85 via-black/35 to-transparent">
+      {/* Bottom overlay: handle + meta + caption + type — pointer-events-none so
+          taps fall through to the play/pause surface. */}
+      <div className="pointer-events-none absolute inset-x-0 bottom-0 z-10 px-3.5 pt-9 pb-3.5 pr-16 bg-gradient-to-t from-black/85 via-black/35 to-transparent">
         <div className="flex items-center gap-2 text-sm font-bold text-white">
           <span className="w-6 h-6 rounded-full bg-gradient-to-br from-gold to-[#b06a3d] ring-[1.5px] ring-white/70 shrink-0" />
           @{post.account_handle}
