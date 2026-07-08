@@ -1,11 +1,10 @@
-import React, { useState, useEffect, useCallback, useMemo } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import { getMyIdeas } from '../../api';
-import ContentCard from '../../components/ContentCard';
-import useActiveInView from '../../hooks/useActiveInView';
+import IdeaReel from '../../components/IdeaReel';
 
 function formatDate(d) {
   if (!d) return '';
-  return new Date(d).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
+  return new Date(d).toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
 }
 
 export default function IdeasPage() {
@@ -28,14 +27,8 @@ export default function IdeasPage() {
     loadIdeas();
   }, [loadIdeas]);
 
-  // Shared autoplay-in-view observer across every source reel on the page
-  // (mirrors FeedPage), so at most one reel plays at a time as the model
-  // scrolls through idea cards.
-  const allReels = useMemo(() => ideas.flatMap((i) => i.sourceReels || []), [ideas]);
-  const { autoplayInView, activeCardId, registerRef } = useActiveInView(allReels);
-
   return (
-    <div className="px-4 py-5 space-y-5">
+    <div className="px-3 py-3 space-y-3">
       {loading ? (
         <div className="flex items-center justify-center py-20 text-gray-500">
           <svg className="w-6 h-6 animate-spin mr-2" viewBox="0 0 24 24" fill="none">
@@ -51,53 +44,41 @@ export default function IdeasPage() {
         </div>
       ) : (
         ideas.map((idea) => (
-          <div key={idea.id} className="bg-gray-900 rounded-2xl border border-gray-800/80 p-5 space-y-3">
-            <div className="flex items-start justify-between gap-3">
-              <h3 className="text-base font-semibold text-white leading-snug">{idea.concept}</h3>
+          <article key={idea.id} className="bg-gray-900 rounded-2xl border border-gray-800/70 p-4">
+            <div className="flex items-center gap-2 flex-wrap mb-2">
               {idea.format && (
-                <span className="shrink-0 px-2 py-0.5 rounded-full text-xs font-medium bg-gold/20 text-gold border border-gold/40">
+                <span className="rounded-full bg-gold/15 border border-gold/30 px-2.5 py-0.5 text-[11px] font-semibold text-gold">
                   {idea.format}
                 </span>
               )}
+              <span className="ml-auto text-[11px] text-gray-500">{formatDate(idea.created_at)}</span>
             </div>
 
+            <p className="text-[15px] font-semibold leading-snug text-white">{idea.concept}</p>
+
             {idea.hook_line && (
-              <p className="text-sm text-gray-300 italic leading-relaxed">&ldquo;{idea.hook_line}&rdquo;</p>
+              <p className="mt-2 text-[13px] italic text-gray-400 leading-snug">&ldquo;{idea.hook_line}&rdquo;</p>
             )}
 
             {idea.why_working && (
-              <p className="text-xs text-gray-400 leading-relaxed">{idea.why_working}</p>
+              <p className="mt-2 text-xs text-gray-500 leading-relaxed line-clamp-2">{idea.why_working}</p>
             )}
 
             {idea.stale_warning && (
-              <p className="text-xs text-yellow-500">{idea.stale_warning}</p>
+              <p className="mt-2 text-xs text-yellow-500">{idea.stale_warning}</p>
             )}
 
             {idea.sourceReels?.length > 0 && (
-              <div className="pt-2 space-y-2">
-                <p className="text-[11px] font-medium uppercase tracking-wide text-gray-500">Reels that inspired this</p>
-                <div className="grid grid-cols-3 gap-2.5">
-                  {idea.sourceReels.map((reel) => (
-                    <ContentCard
-                      key={`${idea.id}-${reel.id}`}
-                      post={reel}
-                      variant="feed"
-                      autoplayInView={autoplayInView}
-                      isActive={String(reel.id ?? reel.shortcode) === activeCardId}
-                      registerRef={registerRef}
-                    />
+              <div className="mt-3.5">
+                <p className="mb-2 text-[10.5px] font-semibold uppercase tracking-wider text-gray-500">Reels that inspired this</p>
+                <div className="flex gap-2.5">
+                  {idea.sourceReels.slice(0, 3).map((reel) => (
+                    <IdeaReel key={`${idea.id}-${reel.id ?? reel.shortcode}`} reel={reel} />
                   ))}
                 </div>
               </div>
             )}
-
-            <div className="flex items-center justify-between pt-3 mt-1 border-t border-gray-800/60">
-              {idea.source_niche && (
-                <span className="text-xs text-gray-600">{idea.source_niche}</span>
-              )}
-              <span className="text-xs text-gray-600">{formatDate(idea.created_at)}</span>
-            </div>
-          </div>
+          </article>
         ))
       )}
     </div>
