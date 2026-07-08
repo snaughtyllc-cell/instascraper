@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import { getMySaves, unsaveMyPost } from '../../api';
-import ContentCard from '../../components/ContentCard';
+import ReelCard from '../../components/ReelCard';
 import useActiveInView from '../../hooks/useActiveInView';
 
 export default function SavedPage() {
@@ -39,7 +39,7 @@ export default function SavedPage() {
   };
 
   return (
-    <div className="px-4 py-5 space-y-6">
+    <div className="px-3 pt-3 pb-4 space-y-3">
       {loading ? (
         <div className="flex items-center justify-center py-20 text-gray-500">
           <svg className="w-6 h-6 animate-spin mr-2" viewBox="0 0 24 24" fill="none">
@@ -54,12 +54,11 @@ export default function SavedPage() {
           <p className="text-gray-600 text-sm mt-1.5">Tap the heart on a reel in your Feed to save it here.</p>
         </div>
       ) : (
-        <div className="grid grid-cols-1 sm:grid-cols-2 gap-5">
+        <div className="flex flex-col gap-4">
           {posts.map((post) => (
-            <ContentCard
+            <ReelCard
               key={post.id}
               post={post}
-              variant="feed"
               autoplayInView={autoplayInView}
               isActive={String(post.id ?? post.shortcode) === activeCardId}
               soundOn={soundOn}
