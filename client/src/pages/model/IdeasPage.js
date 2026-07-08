@@ -71,8 +71,8 @@ export default function IdeasPage() {
             {idea.sourceReels?.length > 0 && (
               <div className="mt-3.5">
                 <p className="mb-2 text-[10.5px] font-semibold uppercase tracking-wider text-gray-500">Reels that inspired this</p>
-                <div className="flex gap-2.5">
-                  {idea.sourceReels.slice(0, 3).map((reel) => (
+                <div className="grid grid-cols-2 gap-2.5">
+                  {idea.sourceReels.slice(0, 4).map((reel) => (
                     <IdeaReel key={`${idea.id}-${reel.id ?? reel.shortcode}`} reel={reel} />
                   ))}
                 </div>

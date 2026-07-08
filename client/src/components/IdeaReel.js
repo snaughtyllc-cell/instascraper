@@ -26,7 +26,7 @@ export default function IdeaReel({ reel }) {
   const videoSrc = id != null ? `${API_URL}/video/${id}` : reel.video_url;
 
   return (
-    <div className="flex-1 min-w-0">
+    <div className="min-w-0">
       <div className="relative aspect-[9/13] rounded-xl overflow-hidden bg-gray-800">
         {playing && !failed ? (
           <video
