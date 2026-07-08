@@ -1,4 +1,6 @@
+require('./instrument'); // Sentry — must load before express/http (inert unless SENTRY_DSN set)
 require('dotenv').config({ path: require('path').join(__dirname, '..', '.env') });
+const Sentry = require('@sentry/node');
 const express = require('express');
 const cors = require('cors');
 const session = require('express-session');
@@ -1147,6 +1149,10 @@ if (fs.existsSync(clientBuild)) {
     res.sendFile(path.join(clientBuild, 'index.html'));
   });
 }
+
+// Sentry error capture — after all routes, before our own error responder so it
+// sees every route error. No-op unless SENTRY_DSN is set.
+if (process.env.SENTRY_DSN) Sentry.setupExpressErrorHandler(app);
 
 app.use(dbErrorMiddleware); // must be last
 
