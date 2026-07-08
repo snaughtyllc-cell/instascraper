@@ -1,5 +1,6 @@
 import React, { useState } from 'react';
 import FeedPage from './pages/model/FeedPage';
+import SoundsPage from './pages/model/SoundsPage';
 import SavedPage from './pages/model/SavedPage';
 import IdeasPage from './pages/model/IdeasPage';
 
@@ -10,6 +11,15 @@ const TABS = [
     icon: (active) => (
       <svg className="w-6 h-6" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={active ? 2.5 : 2}>
         <path strokeLinecap="round" strokeLinejoin="round" d="M3 12l2-2m0 0l7-7 7 7M5 10v10a1 1 0 001 1h3m10-11l2 2m-2-2v10a1 1 0 01-1 1h-3m-6 0a1 1 0 001-1v-4a1 1 0 011-1h2a1 1 0 011 1v4a1 1 0 001 1m-6 0h6" />
+      </svg>
+    ),
+  },
+  {
+    id: 'sounds',
+    label: 'Sounds',
+    icon: (active) => (
+      <svg className="w-6 h-6" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={active ? 2.5 : 2}>
+        <path strokeLinecap="round" strokeLinejoin="round" d="M9 19V6l12-2v13M9 19a3 3 0 11-6 0 3 3 0 016 0zM21 17a3 3 0 11-6 0 3 3 0 016 0z" />
       </svg>
     ),
   },
@@ -68,6 +78,7 @@ export default function ModelApp({ onLogout }) {
       <main className="flex-1 pb-24">
         <div className="max-w-xl mx-auto">
           {tab === 'feed' && <FeedPage />}
+          {tab === 'sounds' && <SoundsPage />}
           {tab === 'saved' && <SavedPage />}
           {tab === 'ideas' && <IdeasPage />}
         </div>

@@ -644,6 +644,11 @@ class InstagramScraper {
       const taggedHandles = normalizeTaggedUsers(item, item.ownerUsername || item.owner?.username || '');
       const taggedJson = taggedHandles ? JSON.stringify(taggedHandles) : null;
 
+      // Audio/music track (Trending Audio). The reel actor returns musicInfo on
+      // every reel; we capture it here so audio trends can be aggregated over the
+      // reels we already scrape (no extra Apify cost). Absent → nulls.
+      const music = item.musicInfo || {};
+
       const post = {
         _type: item.type || 'Unknown',
         _productType: item.productType || '',
@@ -661,6 +666,10 @@ class InstagramScraper {
         followersAtScrape: itemFollowers,
         erPercent: er_percent,
         erLabel: er_label,
+        audioId: music.audio_id != null ? String(music.audio_id) : null,
+        audioTitle: music.song_name || null,
+        audioAuthor: music.artist_name || null,
+        isOriginalAudio: music.uses_original_audio ? 1 : 0,
       };
 
       if (!this._passesFilters(post, filters)) continue;
@@ -671,8 +680,8 @@ class InstagramScraper {
         const insertResult = await pool.query(`
           INSERT INTO posts (shortcode, video_url, thumbnail_url, caption, like_count, comment_count,
             view_count, posted_at, account_handle, post_url, source_query, followers_at_scrape, er_percent, er_label, tagged_users,
-            video_cache_status, video_url_refreshed_at)
-          VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17)
+            video_cache_status, video_url_refreshed_at, audio_id, audio_title, audio_author, is_original_audio)
+          VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21)
           ON CONFLICT (shortcode) DO UPDATE SET
             thumbnail_url = EXCLUDED.thumbnail_url,
             video_url = EXCLUDED.video_url,
@@ -685,13 +694,18 @@ class InstagramScraper {
             tagged_users = EXCLUDED.tagged_users,
             thumbnail_cache_status = 'pending',
             video_cache_status = 'pending',
-            video_url_refreshed_at = EXCLUDED.video_url_refreshed_at
+            video_url_refreshed_at = EXCLUDED.video_url_refreshed_at,
+            audio_id = EXCLUDED.audio_id,
+            audio_title = EXCLUDED.audio_title,
+            audio_author = EXCLUDED.audio_author,
+            is_original_audio = EXCLUDED.is_original_audio
         `, [
           post.shortcode, post.videoUrl, post.thumbnailUrl, post.caption,
           post.likeCount, post.commentCount, post.viewCount, post.postedAt,
           post.accountHandle, post.postUrl, post.sourceQuery,
           post.followersAtScrape, post.erPercent, post.erLabel, taggedJson,
           'pending', nowIso,
+          post.audioId, post.audioTitle, post.audioAuthor, post.isOriginalAudio,
         ]);
         if (insertResult.rowCount > 0) count++; // counts both new inserts and refreshed rows
       } catch (e) {
