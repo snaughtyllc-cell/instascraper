@@ -11,7 +11,22 @@ if (process.env.REACT_APP_SENTRY_DSN) {
   Sentry.init({
     dsn: process.env.REACT_APP_SENTRY_DSN,
     environment: process.env.NODE_ENV || 'production',
-    tracesSampleRate: 0, // errors only for now
+    tracesSampleRate: 0, // errors only — no perf tracing
+    integrations: [
+      Sentry.replayIntegration({
+        // Deliberate privacy choices for this internal tool: the models are our
+        // own users and the feed is public Instagram content, so text is left
+        // readable. Login inputs are always masked so credentials never reach a
+        // replay, and media is shown so we can actually SEE reel playback — the
+        // thing we most want to debug on real phones.
+        maskAllText: false,
+        maskAllInputs: true,
+        blockAllMedia: false,
+      }),
+    ],
+    // Always capture the session that hit an error; spot-check ~10% of the rest.
+    replaysOnErrorSampleRate: 1.0,
+    replaysSessionSampleRate: 0.1,
   });
 }
 
