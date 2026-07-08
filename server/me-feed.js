@@ -22,30 +22,16 @@ function visibilityOnlyClause() {
     + ` AND (posts.archived = 0 OR posts.archived IS NULL)`;
 }
 
-// The reel-playback fix. The model feed must only surface reels /video/:id can
-// actually deliver — otherwise the model sees frozen thumbnails for reels whose
-// cached file was never built AND whose raw IG URL has expired. This mirrors
-// serveVideo (index.js) exactly: a reel is playable iff we hold a cached file
-// ('cached'), OR its raw video_url is still fresh (refreshed within
-// VIDEO_FRESHNESS_DAYS) so serveVideo can 302 to it. A 'pruning' row is
-// mid-delete → excluded. `cutoff` is the ISO-Z freshness boundary; it consumes
-// exactly one placeholder ($startIdx), numbered by the caller.
-function playableClause(cutoffIdx) {
-  const clause =
-    `(posts.video_cache_status = 'cached'` +
-    ` OR (posts.video_url IS NOT NULL` +
-    ` AND posts.video_url_refreshed_at IS NOT NULL` +
-    ` AND posts.video_url_refreshed_at >= $${cutoffIdx}` +
-    ` AND (posts.video_cache_status IS NULL OR posts.video_cache_status <> 'pruning')))`;
-  return clause;
-}
+// The reel-playback guarantee. The model feed must only surface reels /video/:id
+// can DELIVER FROM DISK — i.e. a cached file. We deliberately do NOT trust the
+// raw IG video_url here: those signed URLs expire within hours, so a
+// "recently refreshed" URL can still 403 at Instagram → a frozen thumbnail the
+// model can never play. The post-scrape sweep (scraper.js) caches reels while
+// their URLs are alive, so cached-only stays populated with a short lag instead
+// of showing reels that only *might* play. No placeholder — a bare status check.
+const PLAYABLE_CLAUSE = `posts.video_cache_status = 'cached'`;
 
-function buildMeFeedQuery(niches, { page = 1, limit = 24, all = false, freshnessCutoff } = {}) {
-  // Default the freshness boundary from the same env knob serveVideo uses, so the
-  // feed and the video route agree on what "fresh" means. Overridable for tests.
-  const cutoff = freshnessCutoff
-    || new Date(Date.now() - Number(process.env.VIDEO_FRESHNESS_DAYS || 2) * 86400000).toISOString();
-
+function buildMeFeedQuery(niches, { page = 1, limit = 24, all = false } = {}) {
   let clause, params;
   if (all) {
     clause = visibilityOnlyClause(); params = [];
@@ -54,23 +40,15 @@ function buildMeFeedQuery(niches, { page = 1, limit = 24, all = false, freshness
     if (!clause) return { sql: null, params: [] };
   }
 
-  // Append the playable filter. Its single placeholder ($cutoffIdx) follows the
-  // visibility params; then limit/offset follow that. Every $N is used exactly
-  // once, so the SQLite adapter's naive `$N -> ?` rewrite binds positionally on
-  // both backends.
-  const cutoffIdx = params.length + 1;
-  const play = playableClause(cutoffIdx);
-  const whereParams = [...params, cutoff];
-
   const offset = (Math.max(1, Number(page)) - 1) * limit;
-  const limIdx = whereParams.length + 1, offIdx = whereParams.length + 2;
+  const limIdx = params.length + 1, offIdx = params.length + 2;
   const sql = `
     SELECT posts.*, COALESCE(posts.content_type, ct.content_type) AS niche
     FROM posts
     LEFT JOIN creator_types ct ON posts.account_handle = ct.account_handle
-    WHERE ${clause} AND ${play}
+    WHERE ${clause} AND ${PLAYABLE_CLAUSE}
     ORDER BY posts.posted_at DESC
     LIMIT $${limIdx} OFFSET $${offIdx}`;
-  return { sql, params: [...whereParams, limit, offset] };
+  return { sql, params: [...params, limit, offset] };
 }
-module.exports = { buildMeFeedQuery, nicheVisibilityClause, parseNiches, visibilityOnlyClause, playableClause };
+module.exports = { buildMeFeedQuery, nicheVisibilityClause, parseNiches, visibilityOnlyClause, PLAYABLE_CLAUSE };
