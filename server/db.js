@@ -25,6 +25,10 @@ const SQLITE_MIGRATIONS = [
   `ALTER TABLE models ADD COLUMN password_hash TEXT`,
   `ALTER TABLE models ADD COLUMN role TEXT DEFAULT 'model'`,
   `ALTER TABLE models ADD COLUMN login_enabled INTEGER DEFAULT 0`,
+  `ALTER TABLE posts ADD COLUMN audio_id TEXT`,
+  `ALTER TABLE posts ADD COLUMN audio_title TEXT`,
+  `ALTER TABLE posts ADD COLUMN audio_author TEXT`,
+  `ALTER TABLE posts ADD COLUMN is_original_audio INTEGER`,
 ];
 
 // ─── Unified DB interface: .query(sql, params) → { rows } ──────
@@ -370,6 +374,10 @@ async function initDB() {
       `ALTER TABLE models ADD COLUMN IF NOT EXISTS password_hash TEXT`,
       `ALTER TABLE models ADD COLUMN IF NOT EXISTS role TEXT DEFAULT 'model'`,
       `ALTER TABLE models ADD COLUMN IF NOT EXISTS login_enabled INTEGER DEFAULT 0`,
+      `ALTER TABLE posts ADD COLUMN IF NOT EXISTS audio_id TEXT`,
+      `ALTER TABLE posts ADD COLUMN IF NOT EXISTS audio_title TEXT`,
+      `ALTER TABLE posts ADD COLUMN IF NOT EXISTS audio_author TEXT`,
+      `ALTER TABLE posts ADD COLUMN IF NOT EXISTS is_original_audio INTEGER`,
     ];
     for (const sql of migrations) {
       try { await db.query(sql); } catch (e) { /* ignore */ }

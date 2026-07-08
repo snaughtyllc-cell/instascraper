@@ -13,6 +13,7 @@ const InstagramScraper = require('./scraper');
 const { BudgetExceededError, usageSummary, suggestionsOrderClause, attachTopReels } = InstagramScraper;
 const { startScheduler, getSchedulerStatus, runAutoScrape, runEngagementRollup, runAutoCleanup, runDiscovery, runIdeaGeneration } = require('./scheduler');
 const radar = require('./radar');
+const audio = require('./audio');
 const { asyncHandler, dbErrorMiddleware, initWithRetry, wrapAsyncRoutes } = require('./db-health');
 const health = require('./health');
 const { downloadThumbnail, DEFAULT_THUMB_DIR } = require('./thumbnails');
@@ -162,6 +163,7 @@ app.use('/models', requireAdmin);
 app.use('/ideas', requireAdmin);
 app.use('/admin', requireAdmin);
 app.use('/radar', requireAdmin);
+app.use('/audio', requireAdmin);
 app.use('/me', requireModel);
 
 const ContentIdeaAgent = require('./ai-agent');
@@ -533,6 +535,34 @@ app.post('/scheduler/run/:job', async (req, res) => {
   jobs[job]();
   res.json({ success: true, message: `Job '${job}' started` });
 });
+
+// ─── Trending Audio Routes ──────────────────────────────────────
+// Admin: roster-wide. Model (/me/audio): scoped to the model's niches.
+app.get('/audio/trending', asyncHandler(async (req, res) => {
+  const rows = await audio.trendingAudio(pool, { all: true });
+  res.json({ audio: rows });
+}));
+app.get('/audio/:audioId/reels', asyncHandler(async (req, res) => {
+  const { sql, params } = audio.buildAudioReelsQuery(String(req.params.audioId), [], { all: true, limit: 24 });
+  const r = await pool.query(sql, params);
+  res.json({ reels: r.rows });
+}));
+
+app.get('/me/audio/trending', asyncHandler(async (req, res) => {
+  const m = await pool.query('SELECT primary_niche, secondary_niches FROM models WHERE id = $1', [req.session.user.modelId]);
+  if (m.rows.length === 0) return res.status(404).json({ error: 'Model not found' });
+  const niches = parseNiches(m.rows[0]);
+  const rows = await audio.trendingAudio(pool, { niches });
+  res.json({ audio: rows, niches });
+}));
+app.get('/me/audio/:audioId/reels', asyncHandler(async (req, res) => {
+  const m = await pool.query('SELECT primary_niche, secondary_niches FROM models WHERE id = $1', [req.session.user.modelId]);
+  const niches = m.rows.length ? parseNiches(m.rows[0]) : [];
+  const { sql, params } = audio.buildAudioReelsQuery(String(req.params.audioId), niches, { limit: 24 });
+  if (!sql) return res.json({ reels: [] });
+  const r = await pool.query(sql, params);
+  res.json({ reels: r.rows });
+}));
 
 // ─── Reel Radar Routes ──────────────────────────────────────────
 app.get('/radar/terms', async (req, res) => {

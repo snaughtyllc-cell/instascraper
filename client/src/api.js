@@ -88,5 +88,11 @@ export const getMySaves = () => api.get('/me/saves');
 export const saveMyPost = (id) => api.post(`/me/saves/${id}`);
 export const unsaveMyPost = (id) => api.delete(`/me/saves/${id}`);
 export const getMyIdeas = () => api.get('/me/ideas');
+export const getMyTrendingAudio = () => api.get('/me/audio/trending');
+export const getMyAudioReels = (audioId) => api.get(`/me/audio/${encodeURIComponent(audioId)}/reels`);
+
+// Trending audio (admin, roster-wide)
+export const getTrendingAudio = () => api.get('/audio/trending');
+export const getAudioReels = (audioId) => api.get(`/audio/${encodeURIComponent(audioId)}/reels`);
 
 export default api;
