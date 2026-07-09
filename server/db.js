@@ -29,6 +29,10 @@ const SQLITE_MIGRATIONS = [
   `ALTER TABLE posts ADD COLUMN audio_title TEXT`,
   `ALTER TABLE posts ADD COLUMN audio_author TEXT`,
   `ALTER TABLE posts ADD COLUMN is_original_audio INTEGER`,
+  `ALTER TABLE models ADD COLUMN notion_page_id TEXT`,
+  `ALTER TABLE models ADD COLUMN character_context TEXT`,
+  `ALTER TABLE models ADD COLUMN persona_statement TEXT`,
+  `ALTER TABLE models ADD COLUMN comfort_ceiling TEXT`,
 ];
 
 // ─── Unified DB interface: .query(sql, params) → { rows } ──────
@@ -378,6 +382,10 @@ async function initDB() {
       `ALTER TABLE posts ADD COLUMN IF NOT EXISTS audio_title TEXT`,
       `ALTER TABLE posts ADD COLUMN IF NOT EXISTS audio_author TEXT`,
       `ALTER TABLE posts ADD COLUMN IF NOT EXISTS is_original_audio INTEGER`,
+      `ALTER TABLE models ADD COLUMN IF NOT EXISTS notion_page_id TEXT`,
+      `ALTER TABLE models ADD COLUMN IF NOT EXISTS character_context TEXT`,
+      `ALTER TABLE models ADD COLUMN IF NOT EXISTS persona_statement TEXT`,
+      `ALTER TABLE models ADD COLUMN IF NOT EXISTS comfort_ceiling TEXT`,
     ];
     for (const sql of migrations) {
       try { await db.query(sql); } catch (e) { /* ignore */ }
@@ -398,6 +406,13 @@ async function initDB() {
     // must not pass silently, or logins become ambiguous. Surface it loudly. [R2-#1]
     console.error('[db] FATAL: models_email_lower_uk could not be created (duplicate emails?):', e.message);
     throw e;
+  }
+
+  try {
+    await db.query(`CREATE UNIQUE INDEX IF NOT EXISTS models_notion_page_uk
+      ON models (notion_page_id) WHERE notion_page_id IS NOT NULL AND notion_page_id <> ''`);
+  } catch (e) {
+    console.error('[db] models_notion_page_uk could not be created:', e.message);
   }
 
   const { seedContentTypes } = require('./content-types');
