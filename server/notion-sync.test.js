@@ -312,3 +312,29 @@ test('resyncModel: confirm path on an Offboarded persona disables login + sets s
   assert.strictEqual(row.login_enabled, 0);
   assert.strictEqual(row.status, 'inactive');
 });
+
+test('resyncModel: confirm path with a PARTIAL confirmed proposal preserves existing secondary_niches/character_context [hardening]', async () => {
+  const pool = sqlitePool();
+  pool.sqlite.prepare(
+    `INSERT INTO models (id, name, primary_niche, secondary_niches, character_context, status, notion_page_id)
+     VALUES (1, 'Jayden', 'dance', 'skit,cosplay', 'existing context — must not be blanked', 'active', 'page-123')`
+  ).run();
+  const model = {
+    id: 1, name: 'Jayden', primary_niche: 'dance', secondary_niches: 'skit,cosplay',
+    character_context: 'existing context — must not be blanked', status: 'active', notion_page_id: 'page-123',
+  };
+  // Only primary_niche set — mirrors a stale-client request missing the rest of the confirmed proposal.
+  const confirmed = { primary_niche: 'talking' };
+  const deps = {
+    notionClient: { pages: { retrieve: async () => personaPage() } },
+    // Confirm must not derive — if it tried to, this mock throws and the test fails loudly.
+    claude: { messages: { create: () => { throw new Error('should not derive on confirm'); } } },
+    pool, availableNiches: ['talking', 'skit', 'dance'],
+  };
+  const out = await resyncModel(deps, model, { confirm: true, confirmed });
+  assert.strictEqual(out.applied, true);
+  const row = pool.sqlite.prepare('SELECT * FROM models WHERE id = ?').get(1);
+  assert.strictEqual(row.primary_niche, 'talking');
+  assert.strictEqual(row.secondary_niches, 'skit,cosplay', 'secondary_niches preserved, not blanked');
+  assert.strictEqual(row.character_context, 'existing context — must not be blanked', 'character_context preserved, not blanked');
+});

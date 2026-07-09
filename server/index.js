@@ -616,9 +616,10 @@ app.post('/notion/personas/:pageId/import', asyncHandler(async (req, res) => {
 app.post('/models/:id/resync-notion', asyncHandler(async (req, res) => {
   if (!notionClient) return res.status(400).json({ error: 'Notion not configured' });
   if (!notionClaude) return res.status(400).json({ error: 'ANTHROPIC_API_KEY not configured' });
-  const m = await pool.query('SELECT id, name, primary_niche, secondary_niches, status, notion_page_id FROM models WHERE id = $1', [Number(req.params.id)]);
+  const m = await pool.query('SELECT id, name, primary_niche, secondary_niches, character_context, status, notion_page_id FROM models WHERE id = $1', [Number(req.params.id)]);
   const model = m.rows[0];
   if (!model || !model.notion_page_id) return res.status(404).json({ error: 'Model not linked to a Notion persona' });
+  if (req.body && req.body.confirm && !req.body.confirmed) return res.status(400).json({ error: 'confirmed proposal required to apply re-sync' });
   const out = await notionSync.resyncModel(notionDeps(await availableNiches()), model, { confirm: Boolean(req.body && req.body.confirm), confirmed: req.body && req.body.confirmed });
   res.json(out);
 }));

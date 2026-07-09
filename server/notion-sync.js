@@ -235,8 +235,8 @@ async function resyncModel(deps, model, { confirm, confirmed } = {}) {
   const merged = {
     name: model.name,
     primary_niche: c.primary_niche || model.primary_niche,
-    secondary_niches: c.secondary_niches || '',
-    character_context: c.character_context || '',
+    secondary_niches: c.secondary_niches != null ? c.secondary_niches : (model.secondary_niches || ''),
+    character_context: c.character_context != null ? c.character_context : (model.character_context || ''),
     persona_statement: persona.personaStatement || '',
     comfort_ceiling: persona.comfortCeiling || '',
     ...(offboarded ? { login_enabled: 0 } : {}),
