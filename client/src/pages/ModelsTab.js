@@ -85,7 +85,7 @@ export default function ModelsTab() {
       const { data } = await resyncNotion(model.id, false);
       const d = data.diff;
       const msg = `Re-sync "${model.name}" from Notion?\n\nniche: ${d.current.primary_niche} → ${d.proposed.primary_niche}\nstatus: ${d.current.status} → ${d.proposed.status}`;
-      if (window.confirm(msg)) { await resyncNotion(model.id, true); loadModels(); }
+      if (window.confirm(msg)) { await resyncNotion(model.id, true, d.proposed); loadModels(); }
     } catch (err) { alert('Re-sync failed: ' + (err.response?.data?.error || err.message)); }
   };
 

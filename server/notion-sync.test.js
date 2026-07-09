@@ -191,7 +191,7 @@ test('seedNicheIfThin: no scraper api key → adds terms but skips radar run', a
   assert.strictEqual(ran, 0, 'no scrape fired without an api key');
 });
 
-const { previewPersona, importPersona } = require('./notion-sync');
+const { previewPersona, importPersona, resyncModel } = require('./notion-sync');
 const Database = require('better-sqlite3');
 
 function sqlitePool() {
@@ -205,10 +205,15 @@ function sqlitePool() {
   s.exec(`CREATE TABLE creator_types (account_handle TEXT, content_type TEXT)`);
   s.exec(`CREATE TABLE watch_terms (id INTEGER PRIMARY KEY AUTOINCREMENT, term TEXT, kind TEXT, source TEXT, status TEXT, UNIQUE(term, kind))`);
   // Adapter must route writes to .run() — better-sqlite3 .all() throws on INSERT/UPDATE.
+  // buildModelUpdate() always appends a literal TO_CHAR(NOW(), '...') for updated_at
+  // (Postgres syntax) — mirror db.js's dev/test conversion so UPDATE SQL runs on raw sqlite.
   return {
     sqlite: s,
     query: async (sql, params = []) => {
-      const stmt = s.prepare(sql.replace(/\$\d+/g, '?'));
+      const converted = sql
+        .replace(/TO_CHAR\(NOW\(\),\s*'[^']*'\)/gi, "datetime('now')")
+        .replace(/\$\d+/g, '?');
+      const stmt = s.prepare(converted);
       if (/^\s*SELECT/i.test(sql) || /RETURNING/i.test(sql)) return { rows: stmt.all(...params) };
       const info = stmt.run(...params);
       return { rows: [], rowCount: info.changes, lastID: info.lastInsertRowid };
@@ -259,4 +264,51 @@ test('importPersona: rejects a non-Approved persona', async () => {
     availableNiches: ['talking'], cfg: notionConfig({ NOTION_API_KEY: 'k', NOTION_PERSONAS_DB_ID: 'd' }),
   };
   await assert.rejects(() => importPersona(deps, 'page-123', { primary_niche: 'talking', email: 'a@b.com', password: 'strongpass123' }), /Approved/);
+});
+
+test('resyncModel: confirm path applies the confirmed proposal WITHOUT re-deriving [review fix]', async () => {
+  const pool = sqlitePool();
+  pool.sqlite.prepare(
+    `INSERT INTO models (id, name, primary_niche, secondary_niches, status, notion_page_id)
+     VALUES (1, 'Jayden', 'dance', '', 'active', 'page-123')`
+  ).run();
+  const model = { id: 1, name: 'Jayden', primary_niche: 'dance', secondary_niches: '', status: 'active', notion_page_id: 'page-123' };
+  const confirmed = { primary_niche: 'talking', secondary_niches: 'skit', character_context: 'confirmed brief — admin already saw this' };
+  const deps = {
+    notionClient: { pages: { retrieve: async () => personaPage() } },
+    // If resyncModel re-derives on the confirm path, this throws — the test would fail loudly.
+    claude: { messages: { create: () => { throw new Error('should not derive on confirm'); } } },
+    pool, availableNiches: ['talking', 'skit', 'dance'],
+  };
+  const out = await resyncModel(deps, model, { confirm: true, confirmed });
+  assert.strictEqual(out.applied, true);
+  assert.strictEqual(out.offboarded, false);
+  const row = pool.sqlite.prepare('SELECT * FROM models WHERE id = ?').get(1);
+  assert.strictEqual(row.primary_niche, confirmed.primary_niche);
+  assert.strictEqual(row.secondary_niches, confirmed.secondary_niches);
+  assert.strictEqual(row.character_context, confirmed.character_context);
+  // Deterministic Notion properties (persona statement / comfort ceiling) still refresh
+  // from the persona fetch — only the derived niche/context must come from `confirmed`.
+  assert.strictEqual(row.persona_statement, 'Half-Mexican Tempe party girl.');
+  assert.strictEqual(row.comfort_ceiling, 'Full nude');
+});
+
+test('resyncModel: confirm path on an Offboarded persona disables login + sets status inactive', async () => {
+  const pool = sqlitePool();
+  pool.sqlite.prepare(
+    `INSERT INTO models (id, name, primary_niche, secondary_niches, status, notion_page_id, login_enabled)
+     VALUES (1, 'Jayden', 'dance', '', 'active', 'page-123', 1)`
+  ).run();
+  const model = { id: 1, name: 'Jayden', primary_niche: 'dance', secondary_niches: '', status: 'active', notion_page_id: 'page-123' };
+  const confirmed = { primary_niche: 'talking', secondary_niches: '', character_context: 'ctx' };
+  const deps = {
+    notionClient: { pages: { retrieve: async () => personaPage({ 'Status': { type: 'select', select: { name: 'Offboarded' } } }) } },
+    claude: { messages: { create: () => { throw new Error('should not derive on confirm'); } } },
+    pool, availableNiches: ['talking', 'dance'],
+  };
+  const out = await resyncModel(deps, model, { confirm: true, confirmed });
+  assert.strictEqual(out.offboarded, true);
+  const row = pool.sqlite.prepare('SELECT * FROM models WHERE id = ?').get(1);
+  assert.strictEqual(row.login_enabled, 0);
+  assert.strictEqual(row.status, 'inactive');
 });

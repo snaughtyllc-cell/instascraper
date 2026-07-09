@@ -212,23 +212,32 @@ async function importPersona(deps, pageId, confirmed) {
   return { id, name: persona.name, seeded: seed.seeded, seedReason: seed.reason };
 }
 
-async function resyncModel(deps, model, { confirm } = {}) {
+async function resyncModel(deps, model, { confirm, confirmed } = {}) {
   const persona = await fetchPersonaById(deps.notionClient, model.notion_page_id);
-  const derived = await deriveProfile(persona, deps.availableNiches, deps.claude);
-  const ranked = rankNiches([derived.proposedPrimary, ...derived.proposedSecondary], deps.availableNiches);
   const offboarded = persona.status === 'Offboarded';
-  const proposed = {
-    primary_niche: ranked.primary || model.primary_niche,
-    secondary_niches: ranked.secondary.join(','),
-    character_context: derived.characterContext,
-    status: offboarded ? 'inactive' : model.status,
-  };
+
   if (!confirm) {
+    const derived = await deriveProfile(persona, deps.availableNiches, deps.claude);
+    const ranked = rankNiches([derived.proposedPrimary, ...derived.proposedSecondary], deps.availableNiches);
+    const proposed = {
+      primary_niche: ranked.primary || model.primary_niche,
+      secondary_niches: ranked.secondary.join(','),
+      character_context: derived.characterContext,
+      status: offboarded ? 'inactive' : model.status,
+    };
     return { diff: { current: { primary_niche: model.primary_niche, secondary_niches: model.secondary_niches, status: model.status }, proposed, personaStatus: persona.personaStatus } };
   }
+
+  // Confirm path: apply EXACTLY the proposal the admin saw and confirmed. Never
+  // re-derive here — deriveProfile is non-deterministic (an LLM call), so calling it
+  // again would risk writing niche/context values the admin never reviewed.
+  const c = confirmed || {};
   const merged = {
-    name: model.name, primary_niche: proposed.primary_niche, secondary_niches: proposed.secondary_niches,
-    character_context: proposed.character_context, persona_statement: persona.personaStatement || '',
+    name: model.name,
+    primary_niche: c.primary_niche || model.primary_niche,
+    secondary_niches: c.secondary_niches || '',
+    character_context: c.character_context || '',
+    persona_statement: persona.personaStatement || '',
     comfort_ceiling: persona.comfortCeiling || '',
     ...(offboarded ? { login_enabled: 0 } : {}),
   };

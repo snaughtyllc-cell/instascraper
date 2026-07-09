@@ -619,7 +619,7 @@ app.post('/models/:id/resync-notion', asyncHandler(async (req, res) => {
   const m = await pool.query('SELECT id, name, primary_niche, secondary_niches, status, notion_page_id FROM models WHERE id = $1', [Number(req.params.id)]);
   const model = m.rows[0];
   if (!model || !model.notion_page_id) return res.status(404).json({ error: 'Model not linked to a Notion persona' });
-  const out = await notionSync.resyncModel(notionDeps(await availableNiches()), model, { confirm: Boolean(req.body && req.body.confirm) });
+  const out = await notionSync.resyncModel(notionDeps(await availableNiches()), model, { confirm: Boolean(req.body && req.body.confirm), confirmed: req.body && req.body.confirmed });
   res.json(out);
 }));
 
