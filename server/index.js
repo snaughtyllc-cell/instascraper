@@ -808,7 +808,7 @@ const MODEL_ALL_WRITE_FIELDS = [...MODEL_BASE_FIELDS, ...MODEL_WRITE_FIELDS];
 // the row, so they were left as-is.
 app.get('/models', async (req, res) => {
   const result = await pool.query(
-    `SELECT id, name, primary_niche, secondary_niches, delivery_method, delivery_contact, delivery_day, status, email, role, login_enabled, created_at, updated_at
+    `SELECT id, name, primary_niche, secondary_niches, delivery_method, delivery_contact, delivery_day, status, email, role, login_enabled, notion_page_id, created_at, updated_at
      FROM models WHERE status = 'active' ORDER BY created_at DESC`
   );
   res.json(result.rows);
