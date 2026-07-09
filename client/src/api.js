@@ -69,6 +69,10 @@ export const createModel = (data) => api.post('/models', data);
 export const updateModel = (id, data) => api.put(`/models/${id}`, data);
 export const deleteModel = (id) => api.delete(`/models/${id}`);
 export const getAvailableNiches = () => api.get('/models/niches/available');
+export const getNotionPersonas = () => api.get('/notion/personas');
+export const previewNotionPersona = (pageId) => api.post(`/notion/personas/${pageId}/preview`);
+export const importNotionPersona = (pageId, data) => api.post(`/notion/personas/${pageId}/import`, data);
+export const resyncNotion = (id, confirm, confirmed) => api.post(`/models/${id}/resync-notion`, { confirm, confirmed });
 
 // Ideas
 export const generateIdeas = (modelId) => api.post(`/ideas/generate/${modelId}`);

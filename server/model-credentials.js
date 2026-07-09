@@ -5,6 +5,10 @@ const { hashPassword } = require('./auth');
 // deliberately absent [R1-#7] — a model can never set its own (or another model's) role.
 const MODEL_WRITE_FIELDS = ['email', 'login_enabled', 'password_hash'];
 
+// Persona-sync columns written only by the Notion import/resync path (never by generic
+// POST /models). Appended to the write allowlist by the import route.
+const MODEL_NOTION_FIELDS = ['notion_page_id', 'character_context', 'persona_statement', 'comfort_ceiling'];
+
 function buildCredentialFields(body = {}) {
   const f = {};
   if (body.email !== undefined) f.email = body.email ? String(body.email).trim().toLowerCase() : null;
@@ -73,4 +77,4 @@ function isDuplicateEmailError(err) {
   return msg.includes('unique') && msg.includes('email');
 }
 
-module.exports = { buildCredentialFields, MODEL_WRITE_FIELDS, buildModelWriteColumns, buildModelInsert, buildModelUpdate, isDuplicateEmailError };
+module.exports = { buildCredentialFields, MODEL_WRITE_FIELDS, MODEL_NOTION_FIELDS, buildModelWriteColumns, buildModelInsert, buildModelUpdate, isDuplicateEmailError };

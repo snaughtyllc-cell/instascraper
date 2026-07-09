@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useCallback } from 'react';
-import { getModels, createModel, updateModel, deleteModel, getAvailableNiches, generateIdeas, getIdeas, exportIdeas, exportIdeasToNotion } from '../api';
+import { getModels, createModel, updateModel, deleteModel, getAvailableNiches, generateIdeas, getIdeas, exportIdeas, exportIdeasToNotion, getNotionPersonas, previewNotionPersona, importNotionPersona, resyncNotion } from '../api';
 
 const DELIVERY_METHODS = [
   { value: 'whatsapp', label: 'WhatsApp' },
@@ -27,6 +27,8 @@ export default function ModelsTab() {
   const [generating, setGenerating] = useState({});
   const [exportOpen, setExportOpen] = useState(null);
   const [form, setForm] = useState({ ...EMPTY_FORM });
+  const [notion, setNotion] = useState({ open: false, enabled: null, personas: [], loading: false });
+  const [importForm, setImportForm] = useState(null); // { pageId, name, preview, primary_niche, secondary_niches, email, password }
 
   const loadModels = useCallback(async () => {
     try {
@@ -43,6 +45,49 @@ export default function ModelsTab() {
   }, []);
 
   useEffect(() => { loadModels(); loadNiches(); }, [loadModels, loadNiches]);
+
+  const openNotion = async () => {
+    setNotion((n) => ({ ...n, open: true, loading: true }));
+    try {
+      const { data } = await getNotionPersonas();
+      setNotion({ open: true, enabled: data.enabled, personas: data.personas || [], loading: false });
+    } catch (err) { setNotion({ open: true, enabled: false, personas: [], loading: false }); }
+  };
+
+  const startImport = async (p) => {
+    try {
+      const { data } = await previewNotionPersona(p.pageId);
+      setImportForm({
+        pageId: p.pageId, name: data.name, preview: data,
+        primary_niche: data.proposedPrimary || '', secondary_niches: (data.proposedSecondary || []).join(','),
+        email: '', password: '',
+      });
+    } catch (err) { alert('Preview failed: ' + (err.response?.data?.error || err.message)); }
+  };
+
+  const submitImport = async () => {
+    try {
+      await importNotionPersona(importForm.pageId, {
+        primary_niche: importForm.primary_niche,
+        secondary_niches: importForm.secondary_niches,
+        character_context: importForm.preview.characterContext,
+        email: importForm.email, password: importForm.password,
+        seedKeywords: importForm.preview.seedKeywords,
+      });
+      setImportForm(null);
+      setNotion((n) => ({ ...n, open: false }));
+      loadModels();
+    } catch (err) { alert('Import failed: ' + (err.response?.data?.error || err.message)); }
+  };
+
+  const doResync = async (model) => {
+    try {
+      const { data } = await resyncNotion(model.id, false);
+      const d = data.diff;
+      const msg = `Re-sync "${model.name}" from Notion?\n\nniche: ${d.current.primary_niche} → ${d.proposed.primary_niche}\nstatus: ${d.current.status} → ${d.proposed.status}`;
+      if (window.confirm(msg)) { await resyncNotion(model.id, true, d.proposed); loadModels(); }
+    } catch (err) { alert('Re-sync failed: ' + (err.response?.data?.error || err.message)); }
+  };
 
   const handleSubmit = async (e) => {
     e.preventDefault();
@@ -115,12 +160,15 @@ export default function ModelsTab() {
           <h2 className="text-2xl font-bold text-white">My Models</h2>
           <p className="text-gray-400 text-sm mt-1">AI-powered content idea generation per model</p>
         </div>
-        <button
-          onClick={() => { setShowForm(!showForm); setEditingId(null); setForm({ ...EMPTY_FORM }); }}
-          className="px-4 py-2 bg-gold text-gray-950 rounded-lg font-medium hover:bg-gold/90 transition-colors"
-        >
-          + Add Model
-        </button>
+        <div className="flex items-center gap-2">
+          <button onClick={openNotion} className="px-3 py-2 rounded bg-gold text-gray-950 font-medium">Import from Notion</button>
+          <button
+            onClick={() => { setShowForm(!showForm); setEditingId(null); setForm({ ...EMPTY_FORM }); }}
+            className="px-4 py-2 bg-gold text-gray-950 rounded-lg font-medium hover:bg-gold/90 transition-colors"
+          >
+            + Add Model
+          </button>
+        </div>
       </div>
 
       {/* Add/Edit Form */}
@@ -311,6 +359,7 @@ export default function ModelsTab() {
                     </div>
                   )}
                 </div>
+                {model.notion_page_id && <button onClick={() => doResync(model)} className="px-2 py-1 text-sm rounded bg-gray-700">Re-sync</button>}
                 <button onClick={() => handleEdit(model)} className="p-1.5 text-gray-500 hover:text-white">
                   <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}><path strokeLinecap="round" strokeLinejoin="round" d="M15.232 5.232l3.536 3.536m-2.036-5.036a2.5 2.5 0 113.536 3.536L6.5 21.036H3v-3.572L16.732 3.732z" /></svg>
                 </button>
@@ -376,6 +425,51 @@ export default function ModelsTab() {
           </div>
         ))}
       </div>
+
+      {notion.open && !importForm && (
+        <div className="fixed inset-0 bg-black/60 flex items-center justify-center z-50" onClick={() => setNotion((n) => ({ ...n, open: false }))}>
+          <div className="bg-gray-900 p-5 rounded-lg w-[min(560px,92vw)] max-h-[80vh] overflow-y-auto" onClick={(e) => e.stopPropagation()}>
+            <h3 className="text-lg font-semibold mb-3">Import model from Notion</h3>
+            {notion.loading && <p className="text-gray-400">Loading personas…</p>}
+            {notion.enabled === false && <p className="text-gray-400">Notion isn't configured (set NOTION_API_KEY + NOTION_PERSONAS_DB_ID).</p>}
+            {notion.enabled && notion.personas.length === 0 && <p className="text-gray-400">No Approved personas found.</p>}
+            {notion.personas.map((p) => (
+              <div key={p.pageId} className="flex items-center justify-between py-2 border-b border-gray-800">
+                <span>{p.name} <span className="text-xs text-gray-500">({p.status})</span></span>
+                {p.linked
+                  ? <span className="text-xs text-gray-500">already imported</span>
+                  : <button onClick={() => startImport(p)} className="px-2 py-1 text-sm rounded bg-gold text-gray-950">Import</button>}
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {importForm && (
+        <div className="fixed inset-0 bg-black/60 flex items-center justify-center z-50">
+          <div className="bg-gray-900 p-5 rounded-lg w-[min(560px,92vw)] max-h-[85vh] overflow-y-auto">
+            <h3 className="text-lg font-semibold mb-1">Import {importForm.name}</h3>
+            <p className="text-xs text-gray-400 mb-3">{importForm.preview.personaStatement}</p>
+            <label className="block text-sm mb-1">Primary niche</label>
+            <select value={importForm.primary_niche} onChange={(e) => setImportForm({ ...importForm, primary_niche: e.target.value })} className="w-full mb-3 bg-gray-800 rounded p-2">
+              <option value="">— pick —</option>
+              {niches.map((n) => <option key={n} value={n}>{n}</option>)}
+            </select>
+            <label className="block text-sm mb-1">Secondary niches (comma-separated)</label>
+            <input value={importForm.secondary_niches} onChange={(e) => setImportForm({ ...importForm, secondary_niches: e.target.value })} className="w-full mb-3 bg-gray-800 rounded p-2" />
+            {importForm.preview.unmatchedNiches?.length > 0 && <p className="text-xs text-yellow-500 mb-3">No InstaScraper niche for: {importForm.preview.unmatchedNiches.join(', ')}</p>}
+            <label className="block text-sm mb-1">Login email</label>
+            <input value={importForm.email} onChange={(e) => setImportForm({ ...importForm, email: e.target.value })} className="w-full mb-3 bg-gray-800 rounded p-2" />
+            <label className="block text-sm mb-1">Password</label>
+            <input type="password" value={importForm.password} onChange={(e) => setImportForm({ ...importForm, password: e.target.value })} className="w-full mb-4 bg-gray-800 rounded p-2" />
+            <details className="mb-4"><summary className="text-sm text-gray-400 cursor-pointer">Character context (AI)</summary><pre className="text-xs whitespace-pre-wrap text-gray-300 mt-2">{importForm.preview.characterContext}</pre></details>
+            <div className="flex gap-2 justify-end">
+              <button onClick={() => setImportForm(null)} className="px-3 py-2 rounded bg-gray-700">Cancel</button>
+              <button onClick={submitImport} disabled={!importForm.primary_niche || !importForm.email || !importForm.password} className="px-3 py-2 rounded bg-gold text-gray-950 disabled:opacity-50">Create model</button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

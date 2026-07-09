@@ -93,3 +93,14 @@ test('_callClaude returns a warning containing the error message on SDK failure'
   assert.deepStrictEqual(ideas, []);
   assert.ok(warning.includes('network timeout'));
 });
+
+test('personaBlock: empty when no character_context', () => {
+  assert.strictEqual(ContentIdeaAgent.personaBlock({ name: 'X' }), '');
+  assert.strictEqual(ContentIdeaAgent.personaBlock({ name: 'X', character_context: '' }), '');
+});
+
+test('personaBlock: includes the context when present', () => {
+  const out = ContentIdeaAgent.personaBlock({ character_context: 'Flirty AZ party girl; never crude.' });
+  assert.ok(out.includes('Flirty AZ party girl'));
+  assert.match(out, /persona/i);
+});

@@ -3,6 +3,7 @@ const { test } = require('node:test');
 const assert = require('node:assert');
 const Database = require('better-sqlite3');
 const { buildCredentialFields, buildModelWriteColumns, buildModelUpdate } = require('./model-credentials');
+const { buildModelInsert, MODEL_WRITE_FIELDS, MODEL_NOTION_FIELDS } = require('./model-credentials');
 
 test('password provided → includes a bcrypt hash, never plaintext', () => {
   const f = buildCredentialFields({ email: 'a@b.com', password: 'pw', login_enabled: 1 });
@@ -132,4 +133,31 @@ test('buildModelUpdate: PUT SQL assembly actually EXECUTES against sqlite — id
   assert.strictEqual(row.login_enabled, 1);
   assert.strictEqual(row.password_hash, 'new-hash');
   assert.ok(row.updated_at, 'updated_at should be bumped to a non-null value');
+});
+
+test('MODEL_NOTION_FIELDS are the four persona-sync columns', () => {
+  assert.deepStrictEqual(MODEL_NOTION_FIELDS,
+    ['notion_page_id', 'character_context', 'persona_statement', 'comfort_ceiling']);
+});
+
+test('buildModelInsert with notion fields: sequential placeholders + real sqlite round-trip', () => {
+  const s = new Database(':memory:');
+  s.exec(`CREATE TABLE models (id INTEGER PRIMARY KEY, name TEXT, primary_niche TEXT,
+    secondary_niches TEXT, email TEXT, login_enabled INTEGER, password_hash TEXT,
+    notion_page_id TEXT, character_context TEXT, persona_statement TEXT, comfort_ceiling TEXT)`);
+  const merged = {
+    name: 'Jayden', primary_niche: 'talking', secondary_niches: 'dance',
+    email: 'j@x.com', login_enabled: 1, password_hash: 'h',
+    notion_page_id: 'pg1', character_context: 'ctx', persona_statement: 'ps', comfort_ceiling: 'Full nude',
+  };
+  const fields = ['name', 'primary_niche', 'secondary_niches', ...MODEL_WRITE_FIELDS, ...MODEL_NOTION_FIELDS];
+  const { sql, params } = buildModelInsert(merged, fields);
+  // placeholders must be $1..$N ascending, no gaps
+  const nums = [...sql.matchAll(/\$(\d+)/g)].map(m => Number(m[1]));
+  assert.deepStrictEqual(nums, params.map((_, i) => i + 1));
+  s.prepare(sql.replace(/\$\d+/g, '?')).run(...params);
+  const row = s.prepare('SELECT * FROM models WHERE notion_page_id = ?').get('pg1');
+  assert.strictEqual(row.name, 'Jayden');
+  assert.strictEqual(row.character_context, 'ctx');
+  assert.strictEqual(row.comfort_ceiling, 'Full nude');
 });
