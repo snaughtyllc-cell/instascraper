@@ -1,6 +1,20 @@
 const { test } = require('node:test');
 const assert = require('node:assert');
 const { notionConfig, normalizePersona, rankNiches, buildModelPatch } = require('./notion-sync');
+const { fetchApprovedPersonas, fetchPersonaById, deriveProfile } = require('./notion-sync');
+
+function mockNotion(pages) {
+  return {
+    calls: [],
+    databases: {
+      query: async (args) => {
+        // one page of results, no pagination
+        return { results: pages, has_more: false, next_cursor: null, _args: args };
+      },
+    },
+    pages: { retrieve: async ({ page_id }) => pages.find((p) => p.id === page_id) },
+  };
+}
 
 // Minimal Notion API page shape (query result / pages.retrieve share this).
 function personaPage(over = {}) {
@@ -61,4 +75,64 @@ test('buildModelPatch: assembles persona-derived columns (no credential fields)'
     name: 'Jayden', primary_niche: 'talking', secondary_niches: 'dance',
     notion_page_id: 'pg1', character_context: 'ctx', persona_statement: 'ps', comfort_ceiling: 'Full nude',
   });
+});
+
+test('fetchApprovedPersonas: filters by importGate and normalizes rows', async () => {
+  let received;
+  const client = {
+    databases: { query: async (args) => { received = args; return { results: [personaPage()], has_more: false }; } },
+  };
+  const rows = await fetchApprovedPersonas(client, { personasDbId: 'db1', importGate: 'Approved' });
+  assert.strictEqual(received.database_id, 'db1');
+  assert.deepStrictEqual(received.filter, { property: 'Persona Status', select: { equals: 'Approved' } });
+  assert.strictEqual(rows.length, 1);
+  assert.strictEqual(rows[0].name, 'Jayden');
+});
+
+test('fetchApprovedPersonas: follows pagination', async () => {
+  let page = 0;
+  const client = {
+    databases: {
+      query: async () => {
+        page += 1;
+        if (page === 1) return { results: [personaPage()], has_more: true, next_cursor: 'c2' };
+        return { results: [personaPage({ 'Model Name': { type: 'title', title: [{ plain_text: 'Izi' }] } })], has_more: false };
+      },
+    },
+  };
+  const rows = await fetchApprovedPersonas(client, { personasDbId: 'db1', importGate: 'Approved' });
+  assert.deepStrictEqual(rows.map((r) => r.name), ['Jayden', 'Izi']);
+});
+
+test('fetchPersonaById: retrieves + normalizes', async () => {
+  const client = mockNotion([personaPage()]);
+  const p = await fetchPersonaById(client, 'page-123');
+  assert.strictEqual(p.name, 'Jayden');
+});
+
+test('deriveProfile: sends niches to Claude and returns parsed proposal', async () => {
+  let sent;
+  const claude = {
+    messages: {
+      create: async (args) => {
+        sent = args;
+        return {
+          stop_reason: 'end_turn',
+          content: [{ type: 'text', text: JSON.stringify({
+            proposedPrimary: 'talking', proposedSecondary: ['skit'],
+            characterContext: 'Flirty AZ party girl; keep sweet, never crude.', seedKeywords: ['party girl', 'glam'],
+          }) }],
+        };
+      },
+    },
+  };
+  const persona = { name: 'Jayden', personaStatement: 'party girl', comfortCeiling: 'Full nude', tensions: 't' };
+  const out = await deriveProfile(persona, ['talking', 'skit', 'dance'], claude);
+  assert.ok(sent.system && String(sent.messages[0].content).includes('talking'), 'niche list in prompt');
+  assert.strictEqual(out.proposedPrimary, 'talking');
+  assert.deepStrictEqual(out.seedKeywords, ['party girl', 'glam']);
+});
+
+test('deriveProfile: throws when claude is null', async () => {
+  await assert.rejects(() => deriveProfile({ name: 'x' }, ['talking'], null), /ANTHROPIC/);
 });

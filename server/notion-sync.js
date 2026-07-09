@@ -60,4 +60,72 @@ function buildModelPatch(persona, confirmed) {
   };
 }
 
-module.exports = { notionConfig, normalizePersona, rankNiches, buildModelPatch };
+async function fetchApprovedPersonas(client, cfg) {
+  const out = [];
+  let cursor;
+  do {
+    const res = await client.databases.query({
+      database_id: cfg.personasDbId,
+      filter: { property: 'Persona Status', select: { equals: cfg.importGate } },
+      ...(cursor ? { start_cursor: cursor } : {}),
+    });
+    for (const page of res.results || []) out.push(normalizePersona(page));
+    cursor = res.has_more ? res.next_cursor : null;
+  } while (cursor);
+  return out;
+}
+
+async function fetchPersonaById(client, pageId) {
+  const page = await client.pages.retrieve({ page_id: pageId });
+  return normalizePersona(page);
+}
+
+const DERIVE_SCHEMA = {
+  type: 'object', additionalProperties: false,
+  required: ['proposedPrimary', 'proposedSecondary', 'characterContext', 'seedKeywords'],
+  properties: {
+    proposedPrimary: { type: 'string' },
+    proposedSecondary: { type: 'array', items: { type: 'string' } },
+    characterContext: { type: 'string' },
+    seedKeywords: { type: 'array', items: { type: 'string' } },
+  },
+};
+
+async function deriveProfile(persona, availableNiches, claude) {
+  if (!claude) throw new Error('ANTHROPIC_API_KEY not configured — cannot derive persona profile');
+  const nicheList = (availableNiches || []).join(', ');
+  const system = `You map an OnlyFans/Instagram creator persona onto a fixed content-niche taxonomy and write a tight creative brief. Choose niches ONLY from the provided list. Be specific and grounded in the persona; never invent niches outside the list.`;
+  const userPrompt = `Available niches (choose ONLY from these exact values): ${nicheList}
+
+Persona: ${persona.name}
+Persona statement: ${persona.personaStatement || '(none)'}
+Comfort ceiling: ${persona.comfortCeiling || '(unspecified)'}
+Tensions / nuances: ${persona.tensions || '(none)'}
+
+Return:
+- proposedPrimary: the single best-fit niche from the list.
+- proposedSecondary: 0-2 more niches from the list (never repeat the primary).
+- characterContext: a <=30-line brief the content AI will read every time — voice, tone, formats that fit, and hard boundaries/brand don'ts implied by the persona and comfort ceiling.
+- seedKeywords: 1-2 short Instagram search keywords (e.g. "blonde", "party girl") to discover fresh creators in this lane.`;
+
+  const response = await claude.messages.create({
+    model: 'claude-opus-4-8',
+    max_tokens: 4000,
+    thinking: { type: 'adaptive' },
+    output_config: { effort: 'high', format: { type: 'json_schema', schema: DERIVE_SCHEMA } },
+    system,
+    messages: [{ role: 'user', content: userPrompt }],
+  });
+  if (response.stop_reason === 'refusal') throw new Error('Persona derivation was declined this run — try again.');
+  const textBlock = (response.content || []).find((b) => b.type === 'text');
+  if (!textBlock || !textBlock.text) throw new Error('Persona derivation returned no content');
+  const parsed = JSON.parse(textBlock.text);
+  return {
+    proposedPrimary: parsed.proposedPrimary || '',
+    proposedSecondary: Array.isArray(parsed.proposedSecondary) ? parsed.proposedSecondary : [],
+    characterContext: parsed.characterContext || '',
+    seedKeywords: Array.isArray(parsed.seedKeywords) ? parsed.seedKeywords.slice(0, 2) : [],
+  };
+}
+
+module.exports = { notionConfig, normalizePersona, rankNiches, buildModelPatch, fetchApprovedPersonas, fetchPersonaById, deriveProfile, DERIVE_SCHEMA };
