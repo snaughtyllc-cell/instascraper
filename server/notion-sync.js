@@ -167,4 +167,76 @@ async function seedNicheIfThin(deps, niche, keywords, cfg) {
   return { seeded: true, freshCount, threshold, keywords: kws, reason: 'seeded' };
 }
 
-module.exports = { notionConfig, normalizePersona, rankNiches, buildModelPatch, fetchApprovedPersonas, fetchPersonaById, deriveProfile, seedNicheIfThin, DERIVE_SCHEMA };
+// buildModelPatch, rankNiches, deriveProfile, fetchPersonaById, seedNicheIfThin are all
+// defined above in this same file — do not re-import or shadow them.
+const { buildCredentialFields, buildModelInsert, buildModelUpdate, MODEL_NOTION_FIELDS } = require('./model-credentials');
+
+const IMPORT_WRITE_FIELDS = [
+  'name', 'primary_niche', 'secondary_niches', 'email', 'login_enabled', 'password_hash', ...MODEL_NOTION_FIELDS,
+];
+
+async function previewPersona(deps, pageId) {
+  const persona = await fetchPersonaById(deps.notionClient, pageId);
+  const derived = await deriveProfile(persona, deps.availableNiches, deps.claude);
+  const ranked = rankNiches([derived.proposedPrimary, ...derived.proposedSecondary], deps.availableNiches);
+  return {
+    name: persona.name,
+    personaStatus: persona.personaStatus,
+    comfortCeiling: persona.comfortCeiling,
+    personaStatement: persona.personaStatement,
+    proposedPrimary: ranked.primary,
+    proposedSecondary: ranked.secondary,
+    unmatchedNiches: ranked.unmatched,
+    characterContext: derived.characterContext,
+    seedKeywords: derived.seedKeywords,
+  };
+}
+
+async function importPersona(deps, pageId, confirmed) {
+  const persona = await fetchPersonaById(deps.notionClient, pageId);
+  if (persona.personaStatus !== deps.cfg.importGate) {
+    throw new Error(`Persona is "${persona.personaStatus}", not ${deps.cfg.importGate} — cannot import.`);
+  }
+  const merged = {
+    ...buildModelPatch(persona, confirmed),
+    ...buildCredentialFields({ email: confirmed.email, password: confirmed.password, login_enabled: true }),
+  };
+  const { sql, params } = buildModelInsert(merged, IMPORT_WRITE_FIELDS);
+  await deps.pool.query(sql, params);
+  const idRow = await deps.pool.query('SELECT id FROM models WHERE notion_page_id = $1', [pageId]);
+  const id = idRow.rows[0] && idRow.rows[0].id;
+  const seed = await seedNicheIfThin(
+    { pool: deps.pool, scraper: deps.scraper, radar: deps.radar },
+    confirmed.primary_niche, confirmed.seedKeywords || [], deps.cfg
+  );
+  return { id, name: persona.name, seeded: seed.seeded, seedReason: seed.reason };
+}
+
+async function resyncModel(deps, model, { confirm } = {}) {
+  const persona = await fetchPersonaById(deps.notionClient, model.notion_page_id);
+  const derived = await deriveProfile(persona, deps.availableNiches, deps.claude);
+  const ranked = rankNiches([derived.proposedPrimary, ...derived.proposedSecondary], deps.availableNiches);
+  const offboarded = persona.status === 'Offboarded';
+  const proposed = {
+    primary_niche: ranked.primary || model.primary_niche,
+    secondary_niches: ranked.secondary.join(','),
+    character_context: derived.characterContext,
+    status: offboarded ? 'inactive' : model.status,
+  };
+  if (!confirm) {
+    return { diff: { current: { primary_niche: model.primary_niche, secondary_niches: model.secondary_niches, status: model.status }, proposed, personaStatus: persona.personaStatus } };
+  }
+  const merged = {
+    name: model.name, primary_niche: proposed.primary_niche, secondary_niches: proposed.secondary_niches,
+    character_context: proposed.character_context, persona_statement: persona.personaStatement || '',
+    comfort_ceiling: persona.comfortCeiling || '',
+    ...(offboarded ? { login_enabled: 0 } : {}),
+  };
+  const fields = ['name', 'primary_niche', 'secondary_niches', ...(offboarded ? ['login_enabled'] : []), ...MODEL_NOTION_FIELDS];
+  const { sql, params } = buildModelUpdate(merged, fields, model.id);
+  await deps.pool.query(sql, params);
+  if (offboarded) await deps.pool.query("UPDATE models SET status = 'inactive' WHERE id = $1", [model.id]);
+  return { applied: true, offboarded };
+}
+
+module.exports = { notionConfig, normalizePersona, rankNiches, buildModelPatch, fetchApprovedPersonas, fetchPersonaById, deriveProfile, seedNicheIfThin, previewPersona, importPersona, resyncModel, DERIVE_SCHEMA };

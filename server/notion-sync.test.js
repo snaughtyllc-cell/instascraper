@@ -190,3 +190,73 @@ test('seedNicheIfThin: no scraper api key → adds terms but skips radar run', a
   assert.strictEqual(out.seeded, true);
   assert.strictEqual(ran, 0, 'no scrape fired without an api key');
 });
+
+const { previewPersona, importPersona } = require('./notion-sync');
+const Database = require('better-sqlite3');
+
+function sqlitePool() {
+  const s = new Database(':memory:');
+  s.exec(`CREATE TABLE models (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT, primary_niche TEXT,
+    secondary_niches TEXT, delivery_method TEXT, delivery_contact TEXT, delivery_day TEXT,
+    status TEXT DEFAULT 'active', email TEXT, role TEXT, login_enabled INTEGER, password_hash TEXT,
+    notion_page_id TEXT, character_context TEXT, persona_statement TEXT, comfort_ceiling TEXT,
+    created_at TEXT, updated_at TEXT)`);
+  s.exec(`CREATE TABLE posts (id INTEGER, account_handle TEXT, content_type TEXT, video_cache_status TEXT, soft_deleted INTEGER, archived INTEGER)`);
+  s.exec(`CREATE TABLE creator_types (account_handle TEXT, content_type TEXT)`);
+  s.exec(`CREATE TABLE watch_terms (id INTEGER PRIMARY KEY AUTOINCREMENT, term TEXT, kind TEXT, source TEXT, status TEXT, UNIQUE(term, kind))`);
+  // Adapter must route writes to .run() — better-sqlite3 .all() throws on INSERT/UPDATE.
+  return {
+    sqlite: s,
+    query: async (sql, params = []) => {
+      const stmt = s.prepare(sql.replace(/\$\d+/g, '?'));
+      if (/^\s*SELECT/i.test(sql) || /RETURNING/i.test(sql)) return { rows: stmt.all(...params) };
+      const info = stmt.run(...params);
+      return { rows: [], rowCount: info.changes, lastID: info.lastInsertRowid };
+    },
+  };
+}
+
+const derivedClaude = () => ({ messages: { create: async () => ({ stop_reason: 'end_turn', content: [{ type: 'text', text: JSON.stringify({ proposedPrimary: 'talking', proposedSecondary: ['skit'], characterContext: 'ctx', seedKeywords: ['party girl'] }) }] }) } });
+
+test('previewPersona: derives + ranks, writes nothing', async () => {
+  const notionClient = { pages: { retrieve: async () => personaPage() } };
+  const deps = { notionClient, claude: derivedClaude(), availableNiches: ['talking', 'skit', 'dance'], cfg: notionConfig({ NOTION_API_KEY: 'k', NOTION_PERSONAS_DB_ID: 'd' }) };
+  const out = await previewPersona(deps, 'page-123');
+  assert.strictEqual(out.name, 'Jayden');
+  assert.strictEqual(out.proposedPrimary, 'talking');
+  assert.deepStrictEqual(out.proposedSecondary, ['skit']);
+  assert.deepStrictEqual(out.seedKeywords, ['party girl']);
+});
+
+test('importPersona: creates the model row + stamps notion_page_id + seeds thin niche', async () => {
+  const pool = sqlitePool();
+  let ran = 0;
+  const deps = {
+    notionClient: { pages: { retrieve: async () => personaPage() } },
+    claude: derivedClaude(), pool, scraper: { apiKey: 'k' },
+    radar: { runRadar: async () => { ran += 1; }, getRadarStatus: () => ({ running: false }) },
+    availableNiches: ['talking', 'skit'], cfg: notionConfig({ NOTION_API_KEY: 'k', NOTION_PERSONAS_DB_ID: 'd' }),
+  };
+  const out = await importPersona(deps, 'page-123', {
+    primary_niche: 'talking', secondary_niches: 'skit', character_context: 'ctx',
+    email: 'j@x.com', password: 'strongpass123', seedKeywords: ['party girl'],
+  });
+  assert.ok(out.id > 0);
+  assert.strictEqual(out.seeded, true);
+  const row = pool.sqlite.prepare('SELECT * FROM models WHERE id = ?').get(out.id);
+  assert.strictEqual(row.name, 'Jayden');
+  assert.strictEqual(row.notion_page_id, 'page-123');
+  assert.strictEqual(row.login_enabled, 1);
+  assert.ok(row.password_hash && row.password_hash !== 'strongpass123', 'password hashed');
+  assert.strictEqual(ran, 1);
+});
+
+test('importPersona: rejects a non-Approved persona', async () => {
+  const pool = sqlitePool();
+  const deps = {
+    notionClient: { pages: { retrieve: async () => personaPage({ 'Persona Status': { type: 'select', select: { name: 'Draft' } } }) } },
+    claude: derivedClaude(), pool, scraper: { apiKey: 'k' }, radar: { runRadar: async () => {}, getRadarStatus: () => ({ running: false }) },
+    availableNiches: ['talking'], cfg: notionConfig({ NOTION_API_KEY: 'k', NOTION_PERSONAS_DB_ID: 'd' }),
+  };
+  await assert.rejects(() => importPersona(deps, 'page-123', { primary_niche: 'talking', email: 'a@b.com', password: 'strongpass123' }), /Approved/);
+});

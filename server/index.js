@@ -13,6 +13,9 @@ const InstagramScraper = require('./scraper');
 const { BudgetExceededError, usageSummary, suggestionsOrderClause, attachTopReels } = InstagramScraper;
 const { startScheduler, getSchedulerStatus, runAutoScrape, runEngagementRollup, runAutoCleanup, runDiscovery, runIdeaGeneration } = require('./scheduler');
 const radar = require('./radar');
+const notionSync = require('./notion-sync');
+const { Client: NotionClient } = require('@notionhq/client');
+const Anthropic = require('@anthropic-ai/sdk');
 const audio = require('./audio');
 const { asyncHandler, dbErrorMiddleware, initWithRetry, wrapAsyncRoutes } = require('./db-health');
 const health = require('./health');
@@ -162,6 +165,7 @@ app.use('/scheduler', requireAdmin);
 app.use('/models', requireAdmin);
 app.use('/ideas', requireAdmin);
 app.use('/admin', requireAdmin);
+app.use('/notion', requireAdmin);
 app.use('/radar', requireAdmin);
 app.use('/audio', requireAdmin);
 app.use('/me', requireModel);
@@ -171,6 +175,21 @@ const { deliverBatch } = require('./delivery');
 
 const scraper = new InstagramScraper(process.env.APIFY_API_KEY || '');
 const ideaAgent = new ContentIdeaAgent(process.env.ANTHROPIC_API_KEY || '');
+
+const notionCfg = notionSync.notionConfig(process.env);
+const notionClient = notionCfg.enabled ? new NotionClient({ auth: notionCfg.apiKey }) : null;
+const notionClaude = process.env.ANTHROPIC_API_KEY ? new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY }) : null;
+
+async function availableNiches() {
+  const r = await pool.query('SELECT value FROM content_types ORDER BY sort_order, label');
+  const vals = r.rows.map((x) => x.value);
+  if (vals.length) return vals;
+  const d = await pool.query('SELECT DISTINCT content_type FROM creator_types WHERE content_type IS NOT NULL ORDER BY content_type');
+  return d.rows.map((x) => x.content_type);
+}
+function notionDeps(niches) {
+  return { notionClient, claude: notionClaude, pool, scraper, radar, cfg: notionCfg, availableNiches: niches };
+}
 
 // ─── Scrape Routes ──────────────────────────────────────────────
 
@@ -562,6 +581,45 @@ app.get('/me/audio/:audioId/reels', asyncHandler(async (req, res) => {
   if (!sql) return res.json({ reels: [] });
   const r = await pool.query(sql, params);
   res.json({ reels: r.rows });
+}));
+
+// ─── Notion Onboarding Routes ──────────────────────────────────
+app.get('/notion/personas', asyncHandler(async (req, res) => {
+  if (!notionClient) return res.json({ enabled: false, personas: [] });
+  const personas = await notionSync.fetchApprovedPersonas(notionClient, notionCfg);
+  const linked = await pool.query("SELECT notion_page_id FROM models WHERE notion_page_id IS NOT NULL AND notion_page_id <> ''");
+  const linkedIds = new Set(linked.rows.map((r) => r.notion_page_id));
+  res.json({ enabled: true, personas: personas.map((p) => ({ pageId: p.pageId, name: p.name, status: p.status, linked: linkedIds.has(p.pageId) })) });
+}));
+
+app.post('/notion/personas/:pageId/preview', asyncHandler(async (req, res) => {
+  if (!notionClient) return res.status(400).json({ error: 'Notion not configured' });
+  if (!notionClaude) return res.status(400).json({ error: 'ANTHROPIC_API_KEY not configured' });
+  const preview = await notionSync.previewPersona(notionDeps(await availableNiches()), req.params.pageId);
+  res.json(preview);
+}));
+
+app.post('/notion/personas/:pageId/import', asyncHandler(async (req, res) => {
+  if (!notionClient) return res.status(400).json({ error: 'Notion not configured' });
+  const { primary_niche, secondary_niches, character_context, email, password, seedKeywords } = req.body || {};
+  if (!primary_niche || !email || !password) return res.status(400).json({ error: 'primary_niche, email, password required' });
+  try {
+    const out = await notionSync.importPersona(notionDeps(await availableNiches()), req.params.pageId, { primary_niche, secondary_niches, character_context, email, password, seedKeywords });
+    res.json({ success: true, ...out });
+  } catch (err) {
+    if (isDuplicateEmailError(err)) return res.status(409).json({ error: 'Email already in use' });
+    if (/already|UNIQUE|notion_page/i.test(String(err.message))) return res.status(409).json({ error: 'This persona is already linked to a model' });
+    res.status(400).json({ error: err.message });
+  }
+}));
+
+app.post('/models/:id/resync-notion', asyncHandler(async (req, res) => {
+  if (!notionClient) return res.status(400).json({ error: 'Notion not configured' });
+  const m = await pool.query('SELECT id, name, primary_niche, secondary_niches, status, notion_page_id FROM models WHERE id = $1', [Number(req.params.id)]);
+  const model = m.rows[0];
+  if (!model || !model.notion_page_id) return res.status(404).json({ error: 'Model not linked to a Notion persona' });
+  const out = await notionSync.resyncModel(notionDeps(await availableNiches()), model, { confirm: Boolean(req.body && req.body.confirm) });
+  res.json(out);
 }));
 
 // ─── Reel Radar Routes ──────────────────────────────────────────
