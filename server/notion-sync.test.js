@@ -256,6 +256,46 @@ test('importPersona: creates the model row + stamps notion_page_id + seeds thin 
   assert.strictEqual(ran, 1);
 });
 
+test('importPersona: registers radar terms even when the niche is stocked (addRadarTerms on)', async () => {
+  const pool = sqlitePool();
+  let ran = 0;
+  const deps = {
+    notionClient: { pages: { retrieve: async () => personaPage() } },
+    claude: derivedClaude(), pool, scraper: { apiKey: 'k' },
+    radar: { runRadar: async () => { ran += 1; }, getRadarStatus: () => ({ running: false }) },
+    availableNiches: ['talking', 'skit'],
+    cfg: notionConfig({ NOTION_API_KEY: 'k', NOTION_PERSONAS_DB_ID: 'd', NOTION_SEED_MIN_REELS: '0' }), // stocked (0 fresh >= 0)
+  };
+  const out = await importPersona(deps, 'page-123', {
+    primary_niche: 'talking', secondary_niches: 'skit', character_context: 'ctx',
+    email: 'j@x.com', password: 'strongpass123', seedKeywords: ['party girl', 'glam blonde'], addRadarTerms: true,
+  });
+  const terms = pool.sqlite.prepare('SELECT term FROM watch_terms ORDER BY term').all().map((r) => r.term);
+  assert.deepStrictEqual(terms, ['glam blonde', 'party girl'], 'radar terms registered despite stocked niche');
+  assert.deepStrictEqual(out.radarTerms, ['party girl', 'glam blonde']);
+  assert.strictEqual(out.seedReason, 'stocked', 'stocked niche → no seed run');
+  assert.strictEqual(ran, 0, 'no radar run fired on a stocked niche');
+});
+
+test('importPersona: addRadarTerms=false registers no radar terms and does not seed', async () => {
+  const pool = sqlitePool();
+  let ran = 0;
+  const deps = {
+    notionClient: { pages: { retrieve: async () => personaPage() } },
+    claude: derivedClaude(), pool, scraper: { apiKey: 'k' },
+    radar: { runRadar: async () => { ran += 1; }, getRadarStatus: () => ({ running: false }) },
+    availableNiches: ['talking', 'skit'],
+    cfg: notionConfig({ NOTION_API_KEY: 'k', NOTION_PERSONAS_DB_ID: 'd' }), // default threshold → niche would be thin
+  };
+  const out = await importPersona(deps, 'page-123', {
+    primary_niche: 'talking', secondary_niches: 'skit', character_context: 'ctx',
+    email: 'j@x.com', password: 'strongpass123', seedKeywords: ['party girl'], addRadarTerms: false,
+  });
+  assert.strictEqual(pool.sqlite.prepare('SELECT COUNT(*) c FROM watch_terms').get().c, 0, 'no terms when opted out');
+  assert.strictEqual(out.seedReason, 'radar_off');
+  assert.strictEqual(ran, 0, 'no radar run when opted out');
+});
+
 test('importPersona: rejects a non-Approved persona', async () => {
   const pool = sqlitePool();
   const deps = {
