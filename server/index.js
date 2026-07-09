@@ -601,10 +601,10 @@ app.post('/notion/personas/:pageId/preview', asyncHandler(async (req, res) => {
 
 app.post('/notion/personas/:pageId/import', asyncHandler(async (req, res) => {
   if (!notionClient) return res.status(400).json({ error: 'Notion not configured' });
-  const { primary_niche, secondary_niches, character_context, email, password, seedKeywords } = req.body || {};
+  const { primary_niche, secondary_niches, character_context, email, password, seedKeywords, addRadarTerms } = req.body || {};
   if (!primary_niche || !email || !password) return res.status(400).json({ error: 'primary_niche, email, password required' });
   try {
-    const out = await notionSync.importPersona(notionDeps(await availableNiches()), req.params.pageId, { primary_niche, secondary_niches, character_context, email, password, seedKeywords });
+    const out = await notionSync.importPersona(notionDeps(await availableNiches()), req.params.pageId, { primary_niche, secondary_niches, character_context, email, password, seedKeywords, addRadarTerms });
     res.json({ success: true, ...out });
   } catch (err) {
     if (isDuplicateEmailError(err)) return res.status(409).json({ error: 'Email already in use' });

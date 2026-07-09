@@ -60,6 +60,7 @@ export default function ModelsTab() {
       setImportForm({
         pageId: p.pageId, name: data.name, preview: data,
         primary_niche: data.proposedPrimary || '', secondary_niches: (data.proposedSecondary || []).join(','),
+        radarTerms: (data.seedKeywords || []).join(', '), addRadar: true,
         email: '', password: '',
       });
     } catch (err) { alert('Preview failed: ' + (err.response?.data?.error || err.message)); }
@@ -72,7 +73,8 @@ export default function ModelsTab() {
         secondary_niches: importForm.secondary_niches,
         character_context: importForm.preview.characterContext,
         email: importForm.email, password: importForm.password,
-        seedKeywords: importForm.preview.seedKeywords,
+        seedKeywords: importForm.radarTerms.split(',').map((s) => s.trim()).filter(Boolean),
+        addRadarTerms: importForm.addRadar,
       });
       setImportForm(null);
       setNotion((n) => ({ ...n, open: false }));
@@ -458,6 +460,12 @@ export default function ModelsTab() {
             <label className="block text-sm mb-1">Secondary niches (comma-separated)</label>
             <input value={importForm.secondary_niches} onChange={(e) => setImportForm({ ...importForm, secondary_niches: e.target.value })} className="w-full mb-3 bg-gray-800 rounded p-2" />
             {importForm.preview.unmatchedNiches?.length > 0 && <p className="text-xs text-yellow-500 mb-3">No InstaScraper niche for: {importForm.preview.unmatchedNiches.join(', ')}</p>}
+            <label className="block text-sm mb-1">🔍 Reel Radar searches (AI-recommended)</label>
+            <input value={importForm.radarTerms} onChange={(e) => setImportForm({ ...importForm, radarTerms: e.target.value })} placeholder="comma-separated keywords" className="w-full mb-2 bg-gray-800 rounded p-2" />
+            <label className="flex items-start gap-2 text-xs text-gray-300 mb-4">
+              <input type="checkbox" checked={importForm.addRadar} onChange={(e) => setImportForm({ ...importForm, addRadar: e.target.checked })} className="mt-0.5" />
+              <span>Add to Reel Radar — keep finding creators in this lane (also seeds the feed now if the niche is thin)</span>
+            </label>
             <label className="block text-sm mb-1">Login email</label>
             <input value={importForm.email} onChange={(e) => setImportForm({ ...importForm, email: e.target.value })} className="w-full mb-3 bg-gray-800 rounded p-2" />
             <label className="block text-sm mb-1">Password</label>

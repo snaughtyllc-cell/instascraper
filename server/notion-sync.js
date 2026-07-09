@@ -144,6 +144,21 @@ async function countFreshNicheReels(pool, niche) {
   return Number(res.rows[0] && res.rows[0].cnt) || 0;
 }
 
+// Register keywords as Reel Radar watch terms (idempotent). Used both by day-one seeding
+// and by the import flow's "Add to Reel Radar" option, so terms get registered whether or
+// not the niche is currently thin. Returns the cleaned keyword list actually written.
+async function registerRadarTerms(pool, keywords) {
+  const kws = (keywords || []).map((k) => String(k).trim()).filter(Boolean);
+  for (const term of kws) {
+    await pool.query(
+      `INSERT INTO watch_terms (term, kind, source, status) VALUES ($1,'keyword','notion','active')
+       ON CONFLICT (term, kind) DO UPDATE SET status = 'active'`,
+      [term]
+    );
+  }
+  return kws;
+}
+
 async function seedNicheIfThin(deps, niche, keywords, cfg) {
   const { pool, scraper, radar } = deps;
   const kws = (keywords || []).map((k) => String(k).trim()).filter(Boolean);
@@ -152,13 +167,7 @@ async function seedNicheIfThin(deps, niche, keywords, cfg) {
   if (freshCount >= threshold) return { seeded: false, freshCount, threshold, keywords: kws, reason: 'stocked' };
   if (kws.length === 0) return { seeded: false, freshCount, threshold, keywords: kws, reason: 'no_keywords' };
 
-  for (const term of kws) {
-    await pool.query(
-      `INSERT INTO watch_terms (term, kind, source, status) VALUES ($1,'keyword','notion','active')
-       ON CONFLICT (term, kind) DO UPDATE SET status = 'active'`,
-      [term]
-    );
-  }
+  await registerRadarTerms(pool, kws);
   // Fire-and-forget; runRadar is internally budget-guarded (stops on BudgetExceededError).
   if (scraper && scraper.apiKey && !(radar.getRadarStatus && radar.getRadarStatus().running)) {
     Promise.resolve(radar.runRadar(scraper)).catch((e) => console.error('[Notion] seed radar failed:', e.message));
@@ -205,11 +214,21 @@ async function importPersona(deps, pageId, confirmed) {
   await deps.pool.query(sql, params);
   const idRow = await deps.pool.query('SELECT id FROM models WHERE notion_page_id = $1', [pageId]);
   const id = idRow.rows[0] && idRow.rows[0].id;
-  const seed = await seedNicheIfThin(
-    { pool: deps.pool, scraper: deps.scraper, radar: deps.radar },
-    confirmed.primary_niche, confirmed.seedKeywords || [], deps.cfg
-  );
-  return { id, name: persona.name, seeded: seed.seeded, seedReason: seed.reason };
+  // "Add to Reel Radar" (default on): register the confirmed keywords as watch terms so Radar
+  // keeps discovering creators in this model's lane — regardless of whether the niche is thin —
+  // then fire a day-one seed run only if it IS thin. Off → no terms, no seed.
+  const addRadar = confirmed.addRadarTerms !== false;
+  const kws = (confirmed.seedKeywords || []).map((k) => String(k).trim()).filter(Boolean);
+  let radarTerms = [];
+  let seed = { seeded: false, reason: 'radar_off' };
+  if (addRadar) {
+    radarTerms = await registerRadarTerms(deps.pool, kws);
+    seed = await seedNicheIfThin(
+      { pool: deps.pool, scraper: deps.scraper, radar: deps.radar },
+      confirmed.primary_niche, kws, deps.cfg
+    );
+  }
+  return { id, name: persona.name, seeded: seed.seeded, seedReason: seed.reason, radarTerms };
 }
 
 async function resyncModel(deps, model, { confirm, confirmed } = {}) {
@@ -248,4 +267,4 @@ async function resyncModel(deps, model, { confirm, confirmed } = {}) {
   return { applied: true, offboarded };
 }
 
-module.exports = { notionConfig, normalizePersona, rankNiches, buildModelPatch, fetchApprovedPersonas, fetchPersonaById, deriveProfile, seedNicheIfThin, previewPersona, importPersona, resyncModel, DERIVE_SCHEMA };
+module.exports = { notionConfig, normalizePersona, rankNiches, buildModelPatch, fetchApprovedPersonas, fetchPersonaById, deriveProfile, registerRadarTerms, seedNicheIfThin, previewPersona, importPersona, resyncModel, DERIVE_SCHEMA };
