@@ -136,3 +136,57 @@ test('deriveProfile: sends niches to Claude and returns parsed proposal', async 
 test('deriveProfile: throws when claude is null', async () => {
   await assert.rejects(() => deriveProfile({ name: 'x' }, ['talking'], null), /ANTHROPIC/);
 });
+
+const { seedNicheIfThin } = require('./notion-sync');
+
+function fakePool(freshCount) {
+  const q = [];
+  return {
+    queries: q,
+    query: async (sql, params) => {
+      q.push({ sql, params });
+      if (/COUNT\(\*\)/i.test(sql)) return { rows: [{ cnt: freshCount }] };
+      return { rows: [] };
+    },
+  };
+}
+
+test('seedNicheIfThin: thin niche → inserts watch_terms + fires radar', async () => {
+  const pool = fakePool(3);
+  let ran = 0;
+  const radar = { runRadar: async () => { ran += 1; } };
+  const out = await seedNicheIfThin({ pool, scraper: { apiKey: 'k' }, radar }, 'talking', ['party girl', 'glam'], { seedMinReels: 15 });
+  assert.strictEqual(out.seeded, true);
+  assert.strictEqual(out.freshCount, 3);
+  const inserts = pool.queries.filter((x) => /INSERT INTO watch_terms/i.test(x.sql));
+  assert.strictEqual(inserts.length, 2);
+  assert.strictEqual(ran, 1);
+});
+
+test('seedNicheIfThin: stocked niche → no-op', async () => {
+  const pool = fakePool(40);
+  let ran = 0;
+  const radar = { runRadar: async () => { ran += 1; } };
+  const out = await seedNicheIfThin({ pool, scraper: { apiKey: 'k' }, radar }, 'talking', ['x'], { seedMinReels: 15 });
+  assert.strictEqual(out.seeded, false);
+  assert.strictEqual(out.reason, 'stocked');
+  assert.strictEqual(pool.queries.filter((x) => /INSERT INTO watch_terms/i.test(x.sql)).length, 0);
+  assert.strictEqual(ran, 0);
+});
+
+test('seedNicheIfThin: thin but no keywords → adds nothing, no radar', async () => {
+  const pool = fakePool(1);
+  let ran = 0;
+  const out = await seedNicheIfThin({ pool, scraper: { apiKey: 'k' }, radar: { runRadar: async () => { ran += 1; } } }, 'talking', [], { seedMinReels: 15 });
+  assert.strictEqual(out.seeded, false);
+  assert.strictEqual(out.reason, 'no_keywords');
+  assert.strictEqual(ran, 0);
+});
+
+test('seedNicheIfThin: no scraper api key → adds terms but skips radar run', async () => {
+  const pool = fakePool(1);
+  let ran = 0;
+  const out = await seedNicheIfThin({ pool, scraper: { apiKey: '' }, radar: { runRadar: async () => { ran += 1; } } }, 'talking', ['x'], { seedMinReels: 15 });
+  assert.strictEqual(out.seeded, true);
+  assert.strictEqual(ran, 0, 'no scrape fired without an api key');
+});

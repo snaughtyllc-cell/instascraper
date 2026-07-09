@@ -128,4 +128,43 @@ Return:
   };
 }
 
-module.exports = { notionConfig, normalizePersona, rankNiches, buildModelPatch, fetchApprovedPersonas, fetchPersonaById, deriveProfile, DERIVE_SCHEMA };
+// Count "fresh" (cached, live, non-deleted) reels in a niche — mirrors me-feed's PLAYABLE
+// definition (video_cache_status = 'cached'). Niche matches posts.content_type OR the
+// creator's default (creator_types.content_type), same COALESCE the feed/idea-agent use.
+async function countFreshNicheReels(pool, niche) {
+  const res = await pool.query(
+    `SELECT COUNT(*) AS cnt FROM posts p
+     LEFT JOIN creator_types ct ON p.account_handle = ct.account_handle
+     WHERE COALESCE(p.content_type, ct.content_type) = $1
+       AND p.video_cache_status = 'cached'
+       AND (p.soft_deleted = 0 OR p.soft_deleted IS NULL)
+       AND (p.archived = 0 OR p.archived IS NULL)`,
+    [niche]
+  );
+  return Number(res.rows[0] && res.rows[0].cnt) || 0;
+}
+
+async function seedNicheIfThin(deps, niche, keywords, cfg) {
+  const { pool, scraper, radar } = deps;
+  const kws = (keywords || []).map((k) => String(k).trim()).filter(Boolean);
+  const freshCount = await countFreshNicheReels(pool, niche);
+  const threshold = cfg.seedMinReels;
+  if (freshCount >= threshold) return { seeded: false, freshCount, threshold, keywords: kws, reason: 'stocked' };
+  if (kws.length === 0) return { seeded: false, freshCount, threshold, keywords: kws, reason: 'no_keywords' };
+
+  for (const term of kws) {
+    await pool.query(
+      `INSERT INTO watch_terms (term, kind, source, status) VALUES ($1,'keyword','notion','active')
+       ON CONFLICT (term, kind) DO UPDATE SET status = 'active'`,
+      [term]
+    );
+  }
+  // Fire-and-forget; runRadar is internally budget-guarded (stops on BudgetExceededError).
+  if (scraper && scraper.apiKey && !(radar.getRadarStatus && radar.getRadarStatus().running)) {
+    Promise.resolve(radar.runRadar(scraper)).catch((e) => console.error('[Notion] seed radar failed:', e.message));
+    console.log(`[Metric] notion_seed niche=${niche} fresh=${freshCount} terms=${kws.length}`);
+  }
+  return { seeded: true, freshCount, threshold, keywords: kws, reason: 'seeded' };
+}
+
+module.exports = { notionConfig, normalizePersona, rankNiches, buildModelPatch, fetchApprovedPersonas, fetchPersonaById, deriveProfile, seedNicheIfThin, DERIVE_SCHEMA };
