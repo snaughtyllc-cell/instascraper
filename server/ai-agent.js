@@ -25,6 +25,12 @@ const IDEAS_SCHEMA = {
   },
 };
 
+function personaBlock(model) {
+  const ctx = model && model.character_context;
+  if (!ctx || !String(ctx).trim()) return '';
+  return `\nCreator persona (honor this — match the voice/tone and respect the hard boundaries):\n${String(ctx).trim()}\n`;
+}
+
 class ContentIdeaAgent {
   constructor(apiKey) {
     this.apiKey = apiKey;
@@ -185,7 +191,7 @@ class ContentIdeaAgent {
     const system = `You are a content strategist for Instagram Reels creators. You analyze trending content performance data and generate specific, producible content ideas — never generic advice. Ground every idea in observable patterns from the data you are given (recurring hooks, formats, or topics driving high views and engagement), and cite the specific source posts that inspired each idea. Each hook line must be a literal, scroll-stopping opening for the first 3 seconds — not a topic label.`;
 
     const userPrompt = `Generate 3-5 content ideas for ${model.name}, who creates "${model.primary_niche}" content${secondaryText}.
-
+${personaBlock(model)}
 Here are the top-performing posts in their niche from the last 30 days:
 
 ${postList}
@@ -273,3 +279,4 @@ Weight "${model.primary_niche}" content (70%) over secondary niches (30%). Focus
 
 module.exports = ContentIdeaAgent;
 module.exports.IDEAS_SCHEMA = IDEAS_SCHEMA;
+ContentIdeaAgent.personaBlock = personaBlock;
