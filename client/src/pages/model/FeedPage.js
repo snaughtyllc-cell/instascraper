@@ -77,15 +77,20 @@ export default function FeedPage() {
 
   const handleToggleSave = async (post) => {
     const isSaved = savedIds.has(post.id);
+    const previousFeedback = feedbackByPost[post.id];
     // Optimistic update — flip the set immediately, revert on failure.
     setSavedIds((prev) => {
       const next = new Set(prev);
       isSaved ? next.delete(post.id) : next.add(post.id);
       return next;
     });
+    if (!isSaved) setFeedbackByPost((map) => ({ ...map, [post.id]: 'want_to_make' }));
     try {
       if (isSaved) await unsaveMyPost(post.id);
-      else await saveMyPost(post.id);
+      else {
+        await saveMyPost(post.id);
+        await sendMyPostFeedback(post.id, 'want_to_make');
+      }
     } catch (err) {
       console.error('Failed to toggle save:', err);
       setSavedIds((prev) => {
@@ -93,22 +98,36 @@ export default function FeedPage() {
         isSaved ? next.add(post.id) : next.delete(post.id);
         return next;
       });
-    }
-  };
-
-  const handleFeedback = async (post, feedback) => {
-    const prev = feedbackByPost[post.id];
-    setFeedbackByPost((map) => ({ ...map, [post.id]: feedback }));
-    try {
-      await sendMyPostFeedback(post.id, feedback);
-    } catch (err) {
-      console.error('Failed to send feedback:', err);
       setFeedbackByPost((map) => {
         const next = { ...map };
-        if (prev) next[post.id] = prev;
+        if (previousFeedback) next[post.id] = previousFeedback;
         else delete next[post.id];
         return next;
       });
+    }
+  };
+
+  const handleNotInterested = async (post) => {
+    const prevFeedback = feedbackByPost[post.id];
+    const wasSaved = savedIds.has(post.id);
+    setFeedbackByPost((map) => ({ ...map, [post.id]: 'not_my_style' }));
+    setSavedIds((prev) => {
+      const next = new Set(prev);
+      next.delete(post.id);
+      return next;
+    });
+    try {
+      await sendMyPostFeedback(post.id, 'not_my_style');
+      if (wasSaved) await unsaveMyPost(post.id);
+    } catch (err) {
+      console.error('Failed to mark not interested:', err);
+      setFeedbackByPost((map) => {
+        const next = { ...map };
+        if (prevFeedback) next[post.id] = prevFeedback;
+        else delete next[post.id];
+        return next;
+      });
+      if (wasSaved) setSavedIds((prev) => new Set(prev).add(post.id));
     }
   };
 
@@ -142,7 +161,7 @@ export default function FeedPage() {
         <section className="space-y-3">
           <div className="px-1">
             <p className="text-xs font-semibold uppercase tracking-wider text-gold">Picked for you</p>
-            <p className="text-xs text-gray-500 mt-0.5">React to these so the team knows what to script or skip.</p>
+            <p className="text-xs text-gray-500 mt-0.5">Save what fits. Tap X when it is not your style.</p>
           </div>
           <div className="flex flex-col gap-4">
             {assignedPosts.map((post) => (
@@ -156,8 +175,8 @@ export default function FeedPage() {
                 registerRef={registerRef}
                 onToggleSave={handleToggleSave}
                 isSaved={savedIds.has(post.id)}
-                onFeedback={handleFeedback}
                 feedback={feedbackByPost[post.id]}
+                onNotInterested={handleNotInterested}
               />
             ))}
           </div>
@@ -215,8 +234,8 @@ export default function FeedPage() {
               registerRef={registerRef}
               onToggleSave={handleToggleSave}
               isSaved={savedIds.has(post.id)}
-              onFeedback={handleFeedback}
               feedback={feedbackByPost[post.id]}
+              onNotInterested={handleNotInterested}
             />
           ))}
         </div>
