@@ -38,6 +38,8 @@ export default function ReelCard({
   registerRef,
   onToggleSave,
   isSaved = false,
+  onFeedback,
+  feedback,
 }) {
   const [showVideo, setShowVideo] = useState(false); // desktop tap-to-play fallback
   const [videoFailed, setVideoFailed] = useState(false);
@@ -214,6 +216,31 @@ export default function ReelCard({
           </button>
         )}
       </div>
+
+      {onFeedback && (
+        <div className="absolute left-3 right-16 bottom-[168px] z-20 flex flex-wrap gap-1.5">
+          {[
+            ['want_to_make', 'Want'],
+            ['not_my_style', 'Pass'],
+            ['too_hard', 'Hard'],
+            ['need_script', 'Script'],
+            ['done', 'Done'],
+          ].map(([value, label]) => (
+            <button
+              key={value}
+              type="button"
+              onClick={(e) => { e.stopPropagation(); onFeedback(post, value); }}
+              className={`rounded-full px-2.5 py-1 text-[11px] font-semibold backdrop-blur border ${
+                feedback === value
+                  ? 'bg-gold text-gray-950 border-gold'
+                  : 'bg-black/45 text-white border-white/20 hover:border-white/50'
+              }`}
+            >
+              {label}
+            </button>
+          ))}
+        </div>
+      )}
 
       {/* Bottom overlay: handle + meta + caption + type — pointer-events-none so
           taps fall through to the play/pause surface. */}

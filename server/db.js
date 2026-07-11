@@ -293,6 +293,31 @@ async function initDB() {
     )
   `);
 
+  // Reels explicitly picked by the team for a model to review first.
+  await db.query(`
+    CREATE TABLE IF NOT EXISTS model_assigned_posts (
+      model_id INTEGER NOT NULL,
+      post_id INTEGER NOT NULL,
+      assigned_at TEXT DEFAULT ${NOW_DEFAULT},
+      status TEXT DEFAULT 'assigned',
+      notes TEXT DEFAULT '',
+      PRIMARY KEY (model_id, post_id)
+    )
+  `);
+
+  // Latest model reaction per assigned/feed reel.
+  await db.query(`
+    CREATE TABLE IF NOT EXISTS model_post_feedback (
+      model_id INTEGER NOT NULL,
+      post_id INTEGER NOT NULL,
+      feedback TEXT NOT NULL,
+      notes TEXT DEFAULT '',
+      created_at TEXT DEFAULT ${NOW_DEFAULT},
+      updated_at TEXT DEFAULT ${NOW_DEFAULT},
+      PRIMARY KEY (model_id, post_id)
+    )
+  `);
+
   // AI-generated idea cards
   await db.query(`
     CREATE TABLE IF NOT EXISTS idea_cards (

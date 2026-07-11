@@ -1,18 +1,21 @@
 import React, { useState, useEffect, useCallback } from 'react';
-import { getMyFeed, getMySaves, saveMyPost, unsaveMyPost } from '../../api';
+import { getMyAssignments, getMyFeed, getMySaves, saveMyPost, sendMyPostFeedback, unsaveMyPost } from '../../api';
 import ReelCard from '../../components/ReelCard';
 import useActiveInView from '../../hooks/useActiveInView';
 
 export default function FeedPage() {
   const [posts, setPosts] = useState([]);
+  const [assignedPosts, setAssignedPosts] = useState([]);
   const [availableNiches, setAvailableNiches] = useState([]);
   const [activeNiche, setActiveNiche] = useState(null);
   const [page, setPage] = useState(1);
   const [loading, setLoading] = useState(false);
   const [savedIds, setSavedIds] = useState(new Set());
+  const [feedbackByPost, setFeedbackByPost] = useState({});
   const [soundOn, setSoundOn] = useState(false);
 
-  const { autoplayInView, activeCardId, registerRef } = useActiveInView(posts);
+  const playbackPosts = [...assignedPosts, ...posts];
+  const { autoplayInView, activeCardId, registerRef } = useActiveInView(playbackPosts);
 
   const loadFeed = useCallback(async () => {
     setLoading(true);
@@ -27,6 +30,21 @@ export default function FeedPage() {
     }
   }, [page, activeNiche]);
 
+  const loadAssignments = useCallback(async () => {
+    try {
+      const { data } = await getMyAssignments();
+      const assigned = data.posts || [];
+      setAssignedPosts(assigned);
+      const feedbackMap = {};
+      for (const post of assigned) {
+        if (post.feedback) feedbackMap[post.id] = post.feedback;
+      }
+      setFeedbackByPost(feedbackMap);
+    } catch (err) {
+      console.error('Failed to load assignments:', err);
+    }
+  }, []);
+
   const loadSaves = useCallback(async () => {
     try {
       const { data } = await getMySaves();
@@ -39,6 +57,10 @@ export default function FeedPage() {
   useEffect(() => {
     loadFeed();
   }, [loadFeed]);
+
+  useEffect(() => {
+    loadAssignments();
+  }, [loadAssignments]);
 
   useEffect(() => {
     loadSaves();
@@ -65,6 +87,22 @@ export default function FeedPage() {
     }
   };
 
+  const handleFeedback = async (post, feedback) => {
+    const prev = feedbackByPost[post.id];
+    setFeedbackByPost((map) => ({ ...map, [post.id]: feedback }));
+    try {
+      await sendMyPostFeedback(post.id, feedback);
+    } catch (err) {
+      console.error('Failed to send feedback:', err);
+      setFeedbackByPost((map) => {
+        const next = { ...map };
+        if (prev) next[post.id] = prev;
+        else delete next[post.id];
+        return next;
+      });
+    }
+  };
+
   const selectNiche = (value) => {
     setActiveNiche(value);
     setPage(1);
@@ -77,18 +115,41 @@ export default function FeedPage() {
 
   return (
     <div className="px-3 pt-3 pb-4 space-y-3">
+      {assignedPosts.length > 0 && (
+        <section className="space-y-3">
+          <div className="px-1">
+            <p className="text-xs font-semibold uppercase tracking-wider text-gold">Picked for you</p>
+            <p className="text-xs text-gray-500 mt-0.5">React to these so the team knows what to script or skip.</p>
+          </div>
+          <div className="flex flex-col gap-4">
+            {assignedPosts.map((post) => (
+              <ReelCard
+                key={`assigned-${post.id}`}
+                post={post}
+                autoplayInView={autoplayInView}
+                isActive={String(post.id ?? post.shortcode) === activeCardId}
+                soundOn={soundOn}
+                onToggleSound={() => setSoundOn((s) => !s)}
+                registerRef={registerRef}
+                onToggleSave={handleToggleSave}
+                isSaved={savedIds.has(post.id)}
+                onFeedback={handleFeedback}
+                feedback={feedbackByPost[post.id]}
+              />
+            ))}
+          </div>
+        </section>
+      )}
+
       <div className="no-scrollbar flex items-center gap-2 overflow-x-auto px-1 -mx-1">
         <button onClick={() => selectNiche(null)} className={chipClass(activeNiche === null)}>
-          My Feed
+          Explore
         </button>
         {availableNiches.map((n) => (
           <button key={n.value} onClick={() => selectNiche(n.value)} className={chipClass(activeNiche === n.value)}>
             {n.label}
           </button>
         ))}
-        <button onClick={() => selectNiche('all')} className={chipClass(activeNiche === 'all')}>
-          All
-        </button>
       </div>
 
       {loading ? (
@@ -117,6 +178,8 @@ export default function FeedPage() {
               registerRef={registerRef}
               onToggleSave={handleToggleSave}
               isSaved={savedIds.has(post.id)}
+              onFeedback={handleFeedback}
+              feedback={feedbackByPost[post.id]}
             />
           ))}
         </div>
