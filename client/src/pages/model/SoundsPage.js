@@ -29,6 +29,11 @@ export default function SoundsPage() {
 
   return (
     <div className="px-3 py-3 space-y-3">
+      <div className="px-1">
+        <p className="text-xs font-semibold uppercase tracking-wider text-gold">Audio</p>
+        <h2 className="text-lg font-semibold text-white">Trending sounds</h2>
+      </div>
+
       {loading ? (
         <div className="flex items-center justify-center py-20 text-gray-500">
           <svg className="w-6 h-6 animate-spin mr-2" viewBox="0 0 24 24" fill="none">

@@ -16,7 +16,7 @@ const TABS = [
   },
   {
     id: 'sounds',
-    label: 'Sounds',
+    label: 'Audio',
     icon: (active) => (
       <svg className="w-6 h-6" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={active ? 2.5 : 2}>
         <path strokeLinecap="round" strokeLinejoin="round" d="M9 19V6l12-2v13M9 19a3 3 0 11-6 0 3 3 0 016 0zM21 17a3 3 0 11-6 0 3 3 0 016 0z" />
