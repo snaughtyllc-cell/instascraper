@@ -75,6 +75,10 @@ export default function FeedPage() {
     return () => window.removeEventListener('scroll', onScroll);
   }, []);
 
+  useEffect(() => {
+    if (refreshKey > 0 && !loading) window.scrollTo({ top: 0, behavior: 'auto' });
+  }, [loading, refreshKey]);
+
   const handleToggleSave = async (post) => {
     const isSaved = savedIds.has(post.id);
     const previousFeedback = feedbackByPost[post.id];
@@ -141,7 +145,7 @@ export default function FeedPage() {
   const refreshFeed = () => {
     setPage(1);
     setRefreshKey((key) => key + 1);
-    window.scrollTo({ top: 0, behavior: 'smooth' });
+    window.scrollTo({ top: 0, behavior: 'auto' });
   };
 
   const goToPage = (nextPage) => {
@@ -151,17 +155,17 @@ export default function FeedPage() {
   };
 
   const chipClass = (on) =>
-    `shrink-0 px-3.5 py-1.5 rounded-full text-[13px] font-semibold whitespace-nowrap transition-colors ${
-      on ? 'bg-gold text-gray-950' : 'bg-gray-800/80 text-gray-400 border border-gray-700 hover:text-gray-200'
+    `shrink-0 px-3.5 py-1.5 rounded-full border text-[12px] font-bold whitespace-nowrap transition-colors ${
+      on ? 'border-model-ink bg-model-ink text-white' : 'border-model-line bg-model-surface text-model-ink hover:border-model-muted'
     }`;
 
   return (
-    <div className="px-3 pt-3 pb-4 space-y-3">
+    <div className="px-3 pt-3 pb-4 space-y-4">
       {assignedPosts.length > 0 && (
         <section className="space-y-3">
           <div className="px-1">
-            <p className="text-xs font-semibold uppercase tracking-wider text-gold">Picked for you</p>
-            <p className="text-xs text-gray-500 mt-0.5">Save what fits. Tap X when it is not your style.</p>
+            <p className="text-[10px] font-extrabold uppercase tracking-[0.14em] text-model-coral">Picked for you</p>
+            <p className="mt-0.5 text-xs font-medium text-model-muted">Selected by your team</p>
           </div>
           <div className="flex flex-col gap-4">
             {assignedPosts.map((post) => (
@@ -198,7 +202,7 @@ export default function FeedPage() {
           type="button"
           onClick={refreshFeed}
           disabled={loading}
-          className="shrink-0 w-10 h-10 rounded-full border border-gray-700 bg-gray-800/90 text-gray-300 flex items-center justify-center hover:text-white hover:border-gray-500 disabled:opacity-50"
+          className="shrink-0 w-10 h-10 rounded-full border border-model-line bg-model-surface text-model-ink shadow-sm flex items-center justify-center hover:bg-model-butter disabled:opacity-50"
           title="Refresh feed"
           aria-label="Refresh feed"
         >
@@ -209,7 +213,7 @@ export default function FeedPage() {
       </div>
 
       {loading ? (
-        <div className="flex items-center justify-center py-20 text-gray-500">
+        <div className="flex items-center justify-center py-20 text-model-muted">
           <svg className="w-6 h-6 animate-spin mr-2" viewBox="0 0 24 24" fill="none">
             <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
             <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v4a4 4 0 00-4 4H4z" />
@@ -217,9 +221,9 @@ export default function FeedPage() {
           Loading…
         </div>
       ) : posts.length === 0 ? (
-        <div className="text-center py-20">
-          <p className="text-gray-400 text-base">No reels ready yet.</p>
-          <p className="text-gray-600 text-sm mt-1.5">Fresh reels for this niche are still processing — check back shortly.</p>
+        <div className="mx-1 rounded-lg border border-model-line bg-model-surface px-6 py-16 text-center shadow-sm">
+          <p className="text-model-ink text-base font-bold">No reels ready yet</p>
+          <p className="text-model-muted text-sm mt-1.5">Fresh reels for this niche are still processing.</p>
         </div>
       ) : (
         <div className="flex flex-col gap-4">
@@ -246,15 +250,15 @@ export default function FeedPage() {
           <button
             onClick={() => goToPage(Math.max(1, page - 1))}
             disabled={page === 1}
-            className="min-h-[44px] px-5 flex items-center justify-center rounded-lg text-sm text-gray-300 bg-gray-800 hover:bg-gray-700 disabled:opacity-30"
+            className="min-h-[44px] px-5 flex items-center justify-center rounded-lg border border-model-line text-sm font-semibold text-model-ink bg-model-surface hover:bg-white disabled:opacity-30"
           >
             Previous
           </button>
-          <span className="text-sm text-gray-500">Page {page}</span>
+          <span className="text-sm font-medium text-model-muted">Page {page}</span>
           <button
             onClick={() => goToPage(page + 1)}
             disabled={posts.length < 24}
-            className="min-h-[44px] px-5 flex items-center justify-center rounded-lg text-sm text-gray-300 bg-gray-800 hover:bg-gray-700 disabled:opacity-30"
+            className="min-h-[44px] px-5 flex items-center justify-center rounded-lg border border-model-line text-sm font-semibold text-model-ink bg-model-surface hover:bg-white disabled:opacity-30"
           >
             Next
           </button>
@@ -265,7 +269,7 @@ export default function FeedPage() {
         <button
           type="button"
           onClick={() => window.scrollTo({ top: 0, behavior: 'smooth' })}
-          className="fixed bottom-24 right-4 z-40 h-11 w-11 rounded-full border border-gold/30 bg-gray-900/95 text-gold shadow-lg shadow-black/30 backdrop-blur flex items-center justify-center"
+          className="fixed bottom-24 right-4 z-40 h-11 w-11 rounded-full border border-model-line bg-model-surface/95 text-model-ink shadow-lg shadow-model-ink/10 backdrop-blur flex items-center justify-center hover:bg-model-butter"
           title="Back to top"
           aria-label="Back to top"
         >

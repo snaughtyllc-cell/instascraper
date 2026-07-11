@@ -39,9 +39,9 @@ export default function SavedPage() {
   };
 
   return (
-    <div className="px-3 pt-3 pb-4 space-y-3">
+    <div className="px-3 pt-3 pb-4 space-y-4">
       {loading ? (
-        <div className="flex items-center justify-center py-20 text-gray-500">
+        <div className="flex items-center justify-center py-20 text-model-muted">
           <svg className="w-6 h-6 animate-spin mr-2" viewBox="0 0 24 24" fill="none">
             <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
             <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v4a4 4 0 00-4 4H4z" />
@@ -49,12 +49,19 @@ export default function SavedPage() {
           Loading…
         </div>
       ) : posts.length === 0 ? (
-        <div className="text-center py-20">
-          <p className="text-gray-400 text-base">No saved reels yet.</p>
-          <p className="text-gray-600 text-sm mt-1.5">Tap the heart on a reel in your Feed to save it here.</p>
+        <div className="rounded-lg border border-model-line bg-model-surface px-6 py-16 text-center shadow-sm">
+          <div className="mx-auto mb-4 h-11 w-11 rounded-full bg-model-butter flex items-center justify-center text-model-ink">
+            <svg className="h-5 w-5" fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" d="M4.318 6.318a4.5 4.5 0 000 6.364L12 20.364l7.682-7.682a4.5 4.5 0 00-6.364-6.364L12 7.636l-1.318-1.318a4.5 4.5 0 00-6.364 0z" />
+            </svg>
+          </div>
+          <p className="text-model-ink text-base font-bold">Nothing saved yet</p>
+          <p className="text-model-muted text-sm mt-1.5">Reels you save will collect here.</p>
         </div>
       ) : (
-        <div className="flex flex-col gap-4">
+        <>
+          <div className="px-1 text-xs font-bold text-model-muted">{posts.length} saved {posts.length === 1 ? 'reel' : 'reels'}</div>
+          <div className="flex flex-col gap-4">
           {posts.map((post) => (
             <ReelCard
               key={post.id}
@@ -68,7 +75,8 @@ export default function SavedPage() {
               isSaved={true}
             />
           ))}
-        </div>
+          </div>
+        </>
       )}
     </div>
   );
