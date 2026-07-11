@@ -711,6 +711,23 @@ app.get('/admin/model-cockpit', asyncHandler(async (req, res) => {
       LIMIT 40`
   );
 
+  const actionQueue = await pool.query(
+    `SELECT a.model_id, m.name AS model_name, a.post_id, a.assigned_at,
+            f.feedback, f.notes AS feedback_notes, f.updated_at AS feedback_at,
+            p.account_handle, p.caption, p.content_type, p.post_url, p.view_count
+       FROM model_assigned_posts a
+       JOIN models m ON m.id = a.model_id
+       JOIN posts p ON p.id = a.post_id
+       JOIN model_post_feedback f ON f.model_id = a.model_id AND f.post_id = a.post_id
+      WHERE a.status = 'assigned'
+        AND m.status = 'active'
+        AND f.feedback IN ('need_script', 'want_to_make')
+        AND (p.soft_deleted = 0 OR p.soft_deleted IS NULL)
+        AND (p.archived = 0 OR p.archived IS NULL)
+      ORDER BY CASE f.feedback WHEN 'need_script' THEN 0 ELSE 1 END, f.updated_at DESC
+      LIMIT 50`
+  );
+
   const models = rows.rows.map((row) => ({
     ...row,
     assigned_count: Number(row.assigned_count || 0),
@@ -735,7 +752,7 @@ app.get('/admin/model-cockpit', asyncHandler(async (req, res) => {
     return acc;
   }, { models: 0, loginEnabled: 0, assigned: 0, reacted: 0, want: 0, script: 0, done: 0, pass: 0, hard: 0 });
 
-  res.json({ summary, models, recent: recent.rows });
+  res.json({ summary, models, recent: recent.rows, actionQueue: actionQueue.rows });
 }));
 
 // ─── Engagement Routes ──────────────────────────────────────────

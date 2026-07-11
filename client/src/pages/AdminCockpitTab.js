@@ -47,6 +47,7 @@ export default function AdminCockpitTab() {
 
   const summary = data?.summary || {};
   const models = data?.models || [];
+  const actionQueue = data?.actionQueue || [];
   const recent = data?.recent || [];
 
   return (
@@ -140,6 +141,25 @@ export default function AdminCockpitTab() {
 
       <section className="space-y-3">
         <div className="flex items-center justify-between">
+          <div>
+            <h3 className="text-lg font-semibold text-white">Action Queue</h3>
+            <p className="mt-0.5 text-xs text-gray-500">Reels models want to make or need scripted.</p>
+          </div>
+          <span className="text-xs text-gray-500">{actionQueue.length} open</span>
+        </div>
+        <div className="space-y-2">
+          {actionQueue.length === 0 ? (
+            <div className="rounded-lg border border-gray-800 bg-gray-900 px-4 py-8 text-center text-sm text-gray-500">
+              No script or make-ready requests yet.
+            </div>
+          ) : actionQueue.map((item) => (
+            <ActionQueueRow key={`${item.model_id}-${item.post_id}-${item.feedback}`} item={item} />
+          ))}
+        </div>
+      </section>
+
+      <section className="space-y-3">
+        <div className="flex items-center justify-between">
           <h3 className="text-lg font-semibold text-white">Recent Activity</h3>
           <span className="text-xs text-gray-500">{recent.length} rows</span>
         </div>
@@ -174,6 +194,42 @@ export default function AdminCockpitTab() {
           ))}
         </div>
       </section>
+    </div>
+  );
+}
+
+function ActionQueueRow({ item }) {
+  const isScript = item.feedback === 'need_script';
+  return (
+    <div className={`rounded-lg border px-4 py-3 ${
+      isScript ? 'border-blue-500/30 bg-blue-500/10' : 'border-gold/25 bg-gold/10'
+    }`}>
+      <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+        <div className="min-w-0">
+          <div className="flex flex-wrap items-center gap-2">
+            <span className="text-sm font-semibold text-white">{item.model_name}</span>
+            <span className={`rounded px-2 py-0.5 text-xs ${isScript ? 'bg-blue-500/20 text-blue-200' : 'bg-gold/20 text-gold'}`}>
+              {FEEDBACK_LABELS[item.feedback]}
+            </span>
+            {item.content_type && <span className="rounded bg-gray-800 px-2 py-0.5 text-xs text-gray-400">{item.content_type}</span>}
+            {item.view_count ? <span className="text-xs text-gray-500">{num(item.view_count)} views</span> : null}
+          </div>
+          <p className="mt-1 truncate text-xs text-gray-400">
+            @{item.account_handle || 'unknown'} {item.caption ? `- ${item.caption}` : ''}
+          </p>
+          {item.feedback_notes && (
+            <p className="mt-2 rounded bg-black/20 px-3 py-2 text-xs text-gray-300">{item.feedback_notes}</p>
+          )}
+        </div>
+        <div className="flex shrink-0 items-center gap-2">
+          <span className="text-xs text-gray-500">{shortDate(item.feedback_at || item.assigned_at)}</span>
+          {item.post_url && (
+            <a href={item.post_url} target="_blank" rel="noopener noreferrer" className="rounded bg-gray-800 px-2.5 py-1.5 text-xs text-gray-200 hover:bg-gray-700">
+              Open
+            </a>
+          )}
+        </div>
+      </div>
     </div>
   );
 }
