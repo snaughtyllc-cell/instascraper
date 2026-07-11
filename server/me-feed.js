@@ -31,7 +31,7 @@ function visibilityOnlyClause() {
 // of showing reels that only *might* play. No placeholder — a bare status check.
 const PLAYABLE_CLAUSE = `posts.video_cache_status = 'cached'`;
 
-function buildMeFeedQuery(niches, { page = 1, limit = 24, all = false } = {}) {
+function buildMeFeedQuery(niches, { page = 1, limit = 24, all = false, shuffle = false } = {}) {
   let clause, params;
   if (all) {
     clause = visibilityOnlyClause(); params = [];
@@ -47,7 +47,7 @@ function buildMeFeedQuery(niches, { page = 1, limit = 24, all = false } = {}) {
     FROM posts
     LEFT JOIN creator_types ct ON posts.account_handle = ct.account_handle
     WHERE ${clause} AND ${PLAYABLE_CLAUSE}
-    ORDER BY posts.posted_at DESC
+    ORDER BY ${shuffle ? 'RANDOM()' : 'posts.posted_at DESC'}
     LIMIT $${limIdx} OFFSET $${offIdx}`;
   return { sql, params: [...params, limit, offset] };
 }

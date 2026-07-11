@@ -13,6 +13,8 @@ export default function FeedPage() {
   const [savedIds, setSavedIds] = useState(new Set());
   const [feedbackByPost, setFeedbackByPost] = useState({});
   const [soundOn, setSoundOn] = useState(false);
+  const [refreshKey, setRefreshKey] = useState(0);
+  const [showTop, setShowTop] = useState(false);
 
   const playbackPosts = [...assignedPosts, ...posts];
   const { autoplayInView, activeCardId, registerRef } = useActiveInView(playbackPosts);
@@ -20,7 +22,7 @@ export default function FeedPage() {
   const loadFeed = useCallback(async () => {
     setLoading(true);
     try {
-      const { data } = await getMyFeed(page, activeNiche || undefined);
+      const { data } = await getMyFeed(page, activeNiche || undefined, { refresh: refreshKey > 0 });
       setPosts(data.posts || []);
       setAvailableNiches(data.availableNiches || []);
     } catch (err) {
@@ -28,7 +30,7 @@ export default function FeedPage() {
     } finally {
       setLoading(false);
     }
-  }, [page, activeNiche]);
+  }, [page, activeNiche, refreshKey]);
 
   const loadAssignments = useCallback(async () => {
     try {
@@ -65,6 +67,13 @@ export default function FeedPage() {
   useEffect(() => {
     loadSaves();
   }, [loadSaves]);
+
+  useEffect(() => {
+    const onScroll = () => setShowTop(window.scrollY > 520);
+    onScroll();
+    window.addEventListener('scroll', onScroll, { passive: true });
+    return () => window.removeEventListener('scroll', onScroll);
+  }, []);
 
   const handleToggleSave = async (post) => {
     const isSaved = savedIds.has(post.id);
@@ -106,6 +115,20 @@ export default function FeedPage() {
   const selectNiche = (value) => {
     setActiveNiche(value);
     setPage(1);
+    setRefreshKey(0);
+    window.scrollTo({ top: 0, behavior: 'smooth' });
+  };
+
+  const refreshFeed = () => {
+    setPage(1);
+    setRefreshKey((key) => key + 1);
+    window.scrollTo({ top: 0, behavior: 'smooth' });
+  };
+
+  const goToPage = (nextPage) => {
+    setRefreshKey(0);
+    setPage(nextPage);
+    window.scrollTo({ top: 0, behavior: 'smooth' });
   };
 
   const chipClass = (on) =>
@@ -141,15 +164,29 @@ export default function FeedPage() {
         </section>
       )}
 
-      <div className="no-scrollbar flex items-center gap-2 overflow-x-auto px-1 -mx-1">
-        <button onClick={() => selectNiche(null)} className={chipClass(activeNiche === null)}>
-          Explore
-        </button>
-        {availableNiches.map((n) => (
-          <button key={n.value} onClick={() => selectNiche(n.value)} className={chipClass(activeNiche === n.value)}>
-            {n.label}
+      <div className="flex items-center gap-2">
+        <div className="no-scrollbar flex min-w-0 flex-1 items-center gap-2 overflow-x-auto px-1 -mx-1">
+          <button onClick={() => selectNiche(null)} className={chipClass(activeNiche === null)}>
+            Explore
           </button>
-        ))}
+          {availableNiches.map((n) => (
+            <button key={n.value} onClick={() => selectNiche(n.value)} className={chipClass(activeNiche === n.value)}>
+              {n.label}
+            </button>
+          ))}
+        </div>
+        <button
+          type="button"
+          onClick={refreshFeed}
+          disabled={loading}
+          className="shrink-0 w-10 h-10 rounded-full border border-gray-700 bg-gray-800/90 text-gray-300 flex items-center justify-center hover:text-white hover:border-gray-500 disabled:opacity-50"
+          title="Refresh feed"
+          aria-label="Refresh feed"
+        >
+          <svg className={`w-4 h-4 ${loading ? 'animate-spin' : ''}`} fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+            <path strokeLinecap="round" strokeLinejoin="round" d="M4 4v6h6M20 20v-6h-6M5.64 18.36A9 9 0 0018.36 5.64M18.36 18.36A9 9 0 005.64 5.64" />
+          </svg>
+        </button>
       </div>
 
       {loading ? (
@@ -188,7 +225,7 @@ export default function FeedPage() {
       {posts.length > 0 && (
         <div className="flex items-center justify-center gap-3 pt-3 pb-4">
           <button
-            onClick={() => setPage((p) => Math.max(1, p - 1))}
+            onClick={() => goToPage(Math.max(1, page - 1))}
             disabled={page === 1}
             className="min-h-[44px] px-5 flex items-center justify-center rounded-lg text-sm text-gray-300 bg-gray-800 hover:bg-gray-700 disabled:opacity-30"
           >
@@ -196,13 +233,27 @@ export default function FeedPage() {
           </button>
           <span className="text-sm text-gray-500">Page {page}</span>
           <button
-            onClick={() => setPage((p) => p + 1)}
+            onClick={() => goToPage(page + 1)}
             disabled={posts.length < 24}
             className="min-h-[44px] px-5 flex items-center justify-center rounded-lg text-sm text-gray-300 bg-gray-800 hover:bg-gray-700 disabled:opacity-30"
           >
             Next
           </button>
         </div>
+      )}
+
+      {showTop && (
+        <button
+          type="button"
+          onClick={() => window.scrollTo({ top: 0, behavior: 'smooth' })}
+          className="fixed bottom-24 right-4 z-40 h-11 w-11 rounded-full border border-gold/30 bg-gray-900/95 text-gold shadow-lg shadow-black/30 backdrop-blur flex items-center justify-center"
+          title="Back to top"
+          aria-label="Back to top"
+        >
+          <svg className="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2.4}>
+            <path strokeLinecap="round" strokeLinejoin="round" d="M5 15l7-7 7 7" />
+          </svg>
+        </button>
       )}
     </div>
   );

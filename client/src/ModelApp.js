@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useLayoutEffect, useRef, useState } from 'react';
 import FeedPage from './pages/model/FeedPage';
 import SoundsPage from './pages/model/SoundsPage';
 import SavedPage from './pages/model/SavedPage';
@@ -45,6 +45,27 @@ const TABS = [
 
 export default function ModelApp({ onLogout }) {
   const [tab, setTab] = useState('feed');
+  const tabRef = useRef(tab);
+  const scrollByTabRef = useRef({ feed: 0, sounds: 0, saved: 0, ideas: 0 });
+  const pendingScrollTabRef = useRef(null);
+
+  useLayoutEffect(() => {
+    if (pendingScrollTabRef.current !== tab) return;
+    window.scrollTo({ top: scrollByTabRef.current[tab] || 0, behavior: 'auto' });
+    pendingScrollTabRef.current = null;
+  }, [tab]);
+
+  const switchTab = (nextTab) => {
+    scrollByTabRef.current[tabRef.current] = window.scrollY;
+    if (nextTab === tabRef.current) {
+      window.scrollTo({ top: 0, behavior: 'smooth' });
+      scrollByTabRef.current[nextTab] = 0;
+      return;
+    }
+    tabRef.current = nextTab;
+    pendingScrollTabRef.current = nextTab;
+    setTab(nextTab);
+  };
 
   return (
     <div className="min-h-screen bg-gray-950 flex flex-col">
@@ -77,10 +98,18 @@ export default function ModelApp({ onLogout }) {
           on larger phones; bottom padding clears the fixed nav */}
       <main className="flex-1 pb-24">
         <div className="max-w-xl mx-auto">
-          {tab === 'feed' && <FeedPage />}
-          {tab === 'sounds' && <SoundsPage />}
-          {tab === 'saved' && <SavedPage />}
-          {tab === 'ideas' && <IdeasPage />}
+          <section className={tab === 'feed' ? 'block' : 'hidden'} aria-hidden={tab !== 'feed'}>
+            <FeedPage />
+          </section>
+          <section className={tab === 'sounds' ? 'block' : 'hidden'} aria-hidden={tab !== 'sounds'}>
+            <SoundsPage />
+          </section>
+          <section className={tab === 'saved' ? 'block' : 'hidden'} aria-hidden={tab !== 'saved'}>
+            <SavedPage />
+          </section>
+          <section className={tab === 'ideas' ? 'block' : 'hidden'} aria-hidden={tab !== 'ideas'}>
+            <IdeasPage />
+          </section>
         </div>
       </main>
 
@@ -92,7 +121,7 @@ export default function ModelApp({ onLogout }) {
             return (
               <button
                 key={t.id}
-                onClick={() => setTab(t.id)}
+                onClick={() => switchTab(t.id)}
                 className={`flex-1 flex flex-col items-center justify-center gap-1 py-3.5 min-h-[60px] transition-colors ${
                   active ? 'text-gold' : 'text-gray-500 hover:text-gray-300'
                 }`}

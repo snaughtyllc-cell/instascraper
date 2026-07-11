@@ -66,6 +66,13 @@ test('buildMeFeedQuery single-niche call still scoped (dance only)', () => {
   assert.deepStrictEqual(ids, [2], 'only dance post returned');
 });
 
+test('buildMeFeedQuery shuffle mode orders by random for feed refresh', () => {
+  const { sql, params } = buildMeFeedQuery(['talking'], { page: 1, limit: 24, shuffle: true });
+  assert.match(sql, /ORDER BY RANDOM\(\)/);
+  assert.doesNotMatch(sql, /ORDER BY posts\.posted_at DESC/);
+  assert.deepStrictEqual(params, ['talking', 24, 0]);
+});
+
 test('buildMeFeedQuery all:true builds a query with NO niche IN() clause but WITH archived/soft_deleted, and executes against sqlite returning ALL visible+cached posts across niches', () => {
   const { sql, params } = buildMeFeedQuery([], { page: 1, limit: 24, all: true });
   assert.ok(sql, 'sql should not be null in all mode');

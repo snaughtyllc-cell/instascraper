@@ -1320,11 +1320,12 @@ app.get('/me/feed', asyncHandler(async (req, res) => {
   const myNiches = parseNiches(m.rows[0]);
   const page = Number(req.query.page) || 1;
   const sel = (req.query.niche || '').trim();
+  const shuffle = req.query.refresh === '1';
 
   let build, activeNiche;
   if (sel && !myNiches.includes(sel)) return res.status(403).json({ error: 'Niche not available for this model' });
-  if (sel) build = buildMeFeedQuery([sel], { page, limit: 24 });
-  else build = buildMeFeedQuery(myNiches, { page, limit: 24 });
+  if (sel) build = buildMeFeedQuery([sel], { page, limit: 24, shuffle });
+  else build = buildMeFeedQuery(myNiches, { page, limit: 24, shuffle });
   activeNiche = sel || null;
 
   // The content-type vocabulary powers the switcher (models can't hit the admin /content-types route).

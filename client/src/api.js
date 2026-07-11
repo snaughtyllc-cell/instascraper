@@ -92,7 +92,7 @@ export const exportIdeasToNotion = (modelId, pageId) => api.post(`/ideas/export-
 
 // Model (self / me) endpoints
 export const login = (email, password) => api.post('/login', email ? { email, password } : { password });
-export const getMyFeed = (page = 1, niche) => api.get('/me/feed', { params: { page, ...(niche ? { niche } : {}) } });
+export const getMyFeed = (page = 1, niche, options = {}) => api.get('/me/feed', { params: { page, ...(niche ? { niche } : {}), ...(options.refresh ? { refresh: 1 } : {}) } });
 export const getMyAssignments = () => api.get('/me/assignments');
 export const getMySaves = () => api.get('/me/saves');
 export const saveMyPost = (id) => api.post(`/me/saves/${id}`);
