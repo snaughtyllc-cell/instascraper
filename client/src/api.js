@@ -63,6 +63,9 @@ export const restorePost = (id) => api.post(`/delete-log/${id}/restore`);
 export const getSchedulerStatus = () => api.get('/scheduler/status');
 export const triggerJob = (job) => api.post(`/scheduler/run/${job}`);
 
+// Admin cockpit
+export const getModelCockpit = () => api.get('/admin/model-cockpit');
+
 // Models
 export const getModels = () => api.get('/models');
 export const createModel = (data) => api.post('/models', data);

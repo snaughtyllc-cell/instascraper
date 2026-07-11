@@ -675,6 +675,69 @@ app.get('/admin/apify-usage', async (req, res) => {
   }
 });
 
+app.get('/admin/model-cockpit', asyncHandler(async (req, res) => {
+  const rows = await pool.query(
+    `SELECT m.id, m.name, m.primary_niche, m.secondary_niches, m.login_enabled, m.status,
+            COUNT(p.id) AS assigned_count,
+            SUM(CASE WHEN p.id IS NOT NULL AND f.feedback IS NOT NULL THEN 1 ELSE 0 END) AS reacted_count,
+            SUM(CASE WHEN p.id IS NOT NULL AND f.feedback = 'want_to_make' THEN 1 ELSE 0 END) AS want_count,
+            SUM(CASE WHEN p.id IS NOT NULL AND f.feedback = 'need_script' THEN 1 ELSE 0 END) AS script_count,
+            SUM(CASE WHEN p.id IS NOT NULL AND f.feedback = 'done' THEN 1 ELSE 0 END) AS done_count,
+            SUM(CASE WHEN p.id IS NOT NULL AND f.feedback = 'not_my_style' THEN 1 ELSE 0 END) AS pass_count,
+            SUM(CASE WHEN p.id IS NOT NULL AND f.feedback = 'too_hard' THEN 1 ELSE 0 END) AS hard_count,
+            MAX(a.assigned_at) AS latest_assigned_at,
+            MAX(f.updated_at) AS latest_feedback_at
+       FROM models m
+       LEFT JOIN model_assigned_posts a ON a.model_id = m.id AND a.status = 'assigned'
+       LEFT JOIN posts p ON p.id = a.post_id AND (p.soft_deleted = 0 OR p.soft_deleted IS NULL)
+       LEFT JOIN model_post_feedback f ON f.model_id = m.id AND f.post_id = a.post_id
+      WHERE m.status = 'active'
+      GROUP BY m.id, m.name, m.primary_niche, m.secondary_niches, m.login_enabled, m.status
+      ORDER BY COALESCE(MAX(f.updated_at), MAX(a.assigned_at), m.name) DESC`
+  );
+
+  const recent = await pool.query(
+    `SELECT a.model_id, m.name AS model_name, a.post_id, a.assigned_at,
+            f.feedback, f.updated_at AS feedback_at,
+            p.account_handle, p.caption, p.content_type, p.post_url, p.view_count
+       FROM model_assigned_posts a
+       JOIN models m ON m.id = a.model_id
+       JOIN posts p ON p.id = a.post_id
+       LEFT JOIN model_post_feedback f ON f.model_id = a.model_id AND f.post_id = a.post_id
+      WHERE a.status = 'assigned'
+        AND m.status = 'active'
+        AND (p.soft_deleted = 0 OR p.soft_deleted IS NULL)
+      ORDER BY COALESCE(f.updated_at, a.assigned_at) DESC
+      LIMIT 40`
+  );
+
+  const models = rows.rows.map((row) => ({
+    ...row,
+    assigned_count: Number(row.assigned_count || 0),
+    reacted_count: Number(row.reacted_count || 0),
+    want_count: Number(row.want_count || 0),
+    script_count: Number(row.script_count || 0),
+    done_count: Number(row.done_count || 0),
+    pass_count: Number(row.pass_count || 0),
+    hard_count: Number(row.hard_count || 0),
+  }));
+
+  const summary = models.reduce((acc, model) => {
+    acc.models += 1;
+    acc.assigned += model.assigned_count;
+    acc.reacted += model.reacted_count;
+    acc.want += model.want_count;
+    acc.script += model.script_count;
+    acc.done += model.done_count;
+    acc.pass += model.pass_count;
+    acc.hard += model.hard_count;
+    if (model.login_enabled) acc.loginEnabled += 1;
+    return acc;
+  }, { models: 0, loginEnabled: 0, assigned: 0, reacted: 0, want: 0, script: 0, done: 0, pass: 0, hard: 0 });
+
+  res.json({ summary, models, recent: recent.rows });
+}));
+
 // ─── Engagement Routes ──────────────────────────────────────────
 
 // Backfill: set followers for an account and recalc ER for all posts
