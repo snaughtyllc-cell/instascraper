@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react';
-import { getContent, getCreators, exportContent, importUrls, bulkUpdateContent, getContentTypes, addContentType } from '../api';
+import { getContent, getCreators, exportContent, importUrls, bulkUpdateContent, getContentTypes, addContentType, getModels, assignPostsToModel } from '../api';
 import BulkActionBar from '../components/BulkActionBar';
 import ContentCard from '../components/ContentCard';
 import FilterBar from '../components/FilterBar';
@@ -13,6 +13,10 @@ export default function LibraryTab() {
   const [accounts, setAccounts] = useState([]);
   const [creatorTypes, setCreatorTypes] = useState({});
   const [contentTypes, setContentTypes] = useState([]);
+  const [models, setModels] = useState([]);
+  const [assignModelId, setAssignModelId] = useState('');
+  const [assigning, setAssigning] = useState(false);
+  const [assignMessage, setAssignMessage] = useState('');
   const [showImport, setShowImport] = useState(false);
   const [importText, setImportText] = useState('');
   const [importing, setImporting] = useState(false);
@@ -90,6 +94,15 @@ export default function LibraryTab() {
     } catch {}
   }, []);
 
+  const loadModels = useCallback(async () => {
+    try {
+      const { data } = await getModels();
+      setModels(data || []);
+    } catch (err) {
+      console.error('Failed to load models:', err);
+    }
+  }, []);
+
   const handleAddContentType = useCallback(async (label) => {
     const { data } = await addContentType(label);
     await loadContentTypes();
@@ -127,7 +140,8 @@ export default function LibraryTab() {
     loadContent();
     loadCreatorTypes();
     loadContentTypes();
-  }, [loadContent, loadCreatorTypes, loadContentTypes]);
+    loadModels();
+  }, [loadContent, loadCreatorTypes, loadContentTypes, loadModels]);
 
   const handleFilterChange = (key, value) => {
     setFilters((f) => ({ ...f, [key]: value }));
@@ -155,6 +169,23 @@ export default function LibraryTab() {
     } catch (err) {
       console.error('Bulk action failed:', err);
       alert('Bulk action failed: ' + (err.response?.data?.error || err.message));
+    }
+  };
+
+  const handleAssignSelected = async () => {
+    if (!assignModelId || selected.size === 0) return;
+    setAssigning(true);
+    setAssignMessage('');
+    try {
+      const { data } = await assignPostsToModel(assignModelId, [...selected]);
+      const model = models.find((m) => String(m.id) === String(assignModelId));
+      setAssignMessage(`Assigned ${data.assigned || selected.size} reel${selected.size === 1 ? '' : 's'} to ${model?.name || 'model'}.`);
+      clearSelection();
+    } catch (err) {
+      console.error('Assign failed:', err);
+      alert('Assign failed: ' + (err.response?.data?.error || err.message));
+    } finally {
+      setAssigning(false);
     }
   };
 
@@ -242,6 +273,35 @@ export default function LibraryTab() {
         onSelectAll={selectAllOnPage}
         onClear={clearSelection}
       />
+
+      {selected.size > 0 && models.length > 0 && (
+        <div className="sticky top-20 z-10 bg-gray-900 border border-gray-800 rounded-xl p-3 flex flex-wrap items-center gap-2 shadow-lg">
+          <span className="text-sm text-gray-400">Assign selected to:</span>
+          <select
+            value={assignModelId}
+            onChange={(e) => setAssignModelId(e.target.value)}
+            className="bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm text-white"
+          >
+            <option value="">Choose model...</option>
+            {models.map((model) => (
+              <option key={model.id} value={model.id}>{model.name}</option>
+            ))}
+          </select>
+          <button
+            onClick={handleAssignSelected}
+            disabled={!assignModelId || assigning}
+            className="px-3 py-2 rounded-lg text-sm font-semibold bg-gold text-gray-950 hover:bg-gold-light disabled:opacity-50 disabled:cursor-not-allowed"
+          >
+            {assigning ? 'Assigning...' : `Assign ${selected.size}`}
+          </button>
+        </div>
+      )}
+
+      {assignMessage && (
+        <div className="bg-emerald-500/10 border border-emerald-500/30 rounded-xl px-4 py-3 text-sm text-emerald-300">
+          {assignMessage}
+        </div>
+      )}
 
       {loading ? (
         <div className="flex items-center justify-center py-20 text-gray-500">

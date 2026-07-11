@@ -8,10 +8,12 @@ import SuggestedAccountsTab from './pages/SuggestedAccountsTab';
 import DeleteLogTab from './pages/DeleteLogTab';
 import ModelsTab from './pages/ModelsTab';
 import AudioTab from './pages/AudioTab';
+import AdminCockpitTab from './pages/AdminCockpitTab';
 import LoginPage from './components/LoginPage';
 import ModelApp from './ModelApp';
 
 const TABS = [
+  { id: 'cockpit', label: 'Cockpit' },
   { id: 'tracked', label: 'Tracked' },
   { id: 'scrape', label: 'Scrape' },
   { id: 'library', label: 'Library' },
@@ -23,7 +25,7 @@ const TABS = [
 ];
 
 export default function App() {
-  const [activeTab, setActiveTab] = useState('tracked');
+  const [activeTab, setActiveTab] = useState('cockpit');
   const [authState, setAuthState] = useState('loading');
   const [role, setRole] = useState(null);
   const [modelId, setModelId] = useState(null);
@@ -131,6 +133,7 @@ export default function App() {
 
       {/* Content */}
       <main className="max-w-7xl mx-auto px-4 sm:px-6 py-6">
+        {activeTab === 'cockpit' && <AdminCockpitTab />}
         {activeTab === 'tracked' && <TrackedAccountsTab />}
         {activeTab === 'scrape' && <ScrapeTab />}
         {activeTab === 'library' && <LibraryTab />}

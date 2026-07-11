@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useCallback } from 'react';
-import { getModels, createModel, updateModel, deleteModel, getAvailableNiches, generateIdeas, getIdeas, exportIdeas, exportIdeasToNotion, getNotionPersonas, previewNotionPersona, importNotionPersona, resyncNotion } from '../api';
+import { getModels, createModel, updateModel, deleteModel, getAvailableNiches, generateIdeas, getIdeas, exportIdeas, exportIdeasToNotion, getNotionPersonas, previewNotionPersona, importNotionPersona, resyncNotion, getModelActivity } from '../api';
 
 const DELIVERY_METHODS = [
   { value: 'whatsapp', label: 'WhatsApp' },
@@ -23,6 +23,8 @@ export default function ModelsTab() {
   const [showForm, setShowForm] = useState(false);
   const [editingId, setEditingId] = useState(null);
   const [expandedModel, setExpandedModel] = useState(null);
+  const [activityOpen, setActivityOpen] = useState(null);
+  const [activity, setActivity] = useState({});
   const [ideas, setIdeas] = useState({});
   const [generating, setGenerating] = useState({});
   const [exportOpen, setExportOpen] = useState(null);
@@ -145,6 +147,13 @@ export default function ModelsTab() {
     } catch (err) { console.error('Failed to load ideas:', err); }
   };
 
+  const loadActivity = async (modelId) => {
+    try {
+      const { data } = await getModelActivity(modelId);
+      setActivity(prev => ({ ...prev, [modelId]: data }));
+    } catch (err) { console.error('Failed to load model activity:', err); }
+  };
+
   const toggleExpand = (modelId) => {
     if (expandedModel === modelId) {
       setExpandedModel(null);
@@ -153,6 +162,24 @@ export default function ModelsTab() {
       if (!ideas[modelId]) loadIdeas(modelId);
     }
   };
+
+  const toggleActivity = (modelId) => {
+    if (activityOpen === modelId) {
+      setActivityOpen(null);
+    } else {
+      setActivityOpen(modelId);
+      if (!activity[modelId]) loadActivity(modelId);
+    }
+  };
+
+  const feedbackLabel = (value) => ({
+    want_to_make: 'Wants to make',
+    not_my_style: 'Not her style',
+    too_hard: 'Too hard',
+    already_done: 'Already done',
+    need_script: 'Needs script',
+    done: 'Done',
+  }[value] || 'No reaction yet');
 
   return (
     <div className="space-y-6">
@@ -331,6 +358,12 @@ export default function ModelsTab() {
                 >
                   {expandedModel === model.id ? 'Hide Ideas' : 'View Ideas'}
                 </button>
+                <button
+                  onClick={() => toggleActivity(model.id)}
+                  className="px-3 py-1.5 bg-gray-800 text-gray-300 text-sm rounded-lg hover:bg-gray-700"
+                >
+                  {activityOpen === model.id ? 'Hide Activity' : 'View Activity'}
+                </button>
                 <div className="relative">
                   <button
                     onClick={() => setExportOpen(exportOpen === model.id ? null : model.id)}
@@ -417,6 +450,62 @@ export default function ModelsTab() {
                           <span className="text-xs text-gray-600 whitespace-nowrap">
                             {idea.created_at ? new Date(idea.created_at).toLocaleDateString() : ''}
                           </span>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            )}
+
+            {activityOpen === model.id && (
+              <div className="border-t border-gray-800 p-5">
+                {!activity[model.id] ? (
+                  <div className="text-gray-500 text-sm">Loading activity...</div>
+                ) : activity[model.id].assigned.length === 0 ? (
+                  <div className="text-gray-500 text-sm">No assigned reels yet. Select reels in Library, then assign them to this model.</div>
+                ) : (
+                  <div className="space-y-3">
+                    <div className="flex items-center justify-between">
+                      <h4 className="text-sm font-medium text-gray-400">Assigned Reels</h4>
+                      <span className="text-xs text-gray-500">
+                        {activity[model.id].feedback.length} / {activity[model.id].assigned.length} reacted
+                      </span>
+                    </div>
+                    {activity[model.id].assigned.map((post) => (
+                      <div key={post.post_id} className="flex items-center gap-3 rounded-lg border border-gray-800 bg-gray-800/40 p-3">
+                        <img
+                          src={`/thumb/${post.post_id}`}
+                          alt=""
+                          className="h-14 w-10 rounded object-cover bg-gray-900"
+                          onError={(e) => { e.currentTarget.style.visibility = 'hidden'; }}
+                        />
+                        <div className="min-w-0 flex-1">
+                          <div className="flex flex-wrap items-center gap-2">
+                            <span className="text-sm font-medium text-white">@{post.account_handle || 'unknown'}</span>
+                            {post.content_type && <span className="rounded bg-gray-700 px-2 py-0.5 text-xs text-gray-300">{post.content_type}</span>}
+                            <span className={`rounded px-2 py-0.5 text-xs ${
+                              post.feedback ? 'bg-gold/20 text-gold' : 'bg-gray-700 text-gray-400'
+                            }`}>
+                              {feedbackLabel(post.feedback)}
+                            </span>
+                          </div>
+                          <p className="mt-1 truncate text-xs text-gray-500">{post.caption || post.shortcode || 'No caption'}</p>
+                        </div>
+                        <div className="flex items-center gap-2">
+                          <span className="hidden text-xs text-gray-600 sm:inline">
+                            {post.assigned_at ? new Date(post.assigned_at).toLocaleDateString() : ''}
+                          </span>
+                          {post.post_url && (
+                            <a
+                              href={post.post_url}
+                              target="_blank"
+                              rel="noopener noreferrer"
+                              className="rounded bg-gray-700 px-2.5 py-1.5 text-xs text-gray-200 hover:bg-gray-600"
+                            >
+                              Open
+                            </a>
+                          )}
                         </div>
                       </div>
                     ))}

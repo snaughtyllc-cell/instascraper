@@ -63,11 +63,16 @@ export const restorePost = (id) => api.post(`/delete-log/${id}/restore`);
 export const getSchedulerStatus = () => api.get('/scheduler/status');
 export const triggerJob = (job) => api.post(`/scheduler/run/${job}`);
 
+// Admin cockpit
+export const getModelCockpit = () => api.get('/admin/model-cockpit');
+
 // Models
 export const getModels = () => api.get('/models');
 export const createModel = (data) => api.post('/models', data);
 export const updateModel = (id, data) => api.put(`/models/${id}`, data);
 export const deleteModel = (id) => api.delete(`/models/${id}`);
+export const assignPostsToModel = (modelId, postIds) => api.post(`/models/${modelId}/assignments`, { postIds });
+export const getModelActivity = (modelId) => api.get(`/models/${modelId}/activity`);
 export const getAvailableNiches = () => api.get('/models/niches/available');
 export const getNotionPersonas = () => api.get('/notion/personas');
 export const previewNotionPersona = (pageId) => api.post(`/notion/personas/${pageId}/preview`);
@@ -88,9 +93,11 @@ export const exportIdeasToNotion = (modelId, pageId) => api.post(`/ideas/export-
 // Model (self / me) endpoints
 export const login = (email, password) => api.post('/login', email ? { email, password } : { password });
 export const getMyFeed = (page = 1, niche) => api.get('/me/feed', { params: { page, ...(niche ? { niche } : {}) } });
+export const getMyAssignments = () => api.get('/me/assignments');
 export const getMySaves = () => api.get('/me/saves');
 export const saveMyPost = (id) => api.post(`/me/saves/${id}`);
 export const unsaveMyPost = (id) => api.delete(`/me/saves/${id}`);
+export const sendMyPostFeedback = (id, feedback, notes = '') => api.post(`/me/feedback/${id}`, { feedback, notes });
 export const getMyIdeas = () => api.get('/me/ideas');
 export const getMyTrendingAudio = () => api.get('/me/audio/trending');
 export const getMyAudioReels = (audioId) => api.get(`/me/audio/${encodeURIComponent(audioId)}/reels`);

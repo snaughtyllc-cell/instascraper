@@ -156,7 +156,7 @@ app.use('/creators', requireAdmin);
 app.use('/engagement', requireAdmin);
 app.use('/export', requireAdmin);
 app.use('/thumb', requireAuth);
-app.use('/thumbnails', requireAuth);
+app.use('/thumbnails', requireAdmin);
 app.use('/video', requireAuth);
 app.use('/tracked', requireAdmin);
 app.use('/suggested', requireAdmin);
@@ -675,6 +675,86 @@ app.get('/admin/apify-usage', async (req, res) => {
   }
 });
 
+app.get('/admin/model-cockpit', asyncHandler(async (req, res) => {
+  const rows = await pool.query(
+    `SELECT m.id, m.name, m.primary_niche, m.secondary_niches, m.login_enabled, m.status,
+            COUNT(p.id) AS assigned_count,
+            SUM(CASE WHEN p.id IS NOT NULL AND f.feedback IS NOT NULL THEN 1 ELSE 0 END) AS reacted_count,
+            SUM(CASE WHEN p.id IS NOT NULL AND f.feedback = 'want_to_make' THEN 1 ELSE 0 END) AS want_count,
+            SUM(CASE WHEN p.id IS NOT NULL AND f.feedback = 'need_script' THEN 1 ELSE 0 END) AS script_count,
+            SUM(CASE WHEN p.id IS NOT NULL AND f.feedback = 'done' THEN 1 ELSE 0 END) AS done_count,
+            SUM(CASE WHEN p.id IS NOT NULL AND f.feedback = 'not_my_style' THEN 1 ELSE 0 END) AS pass_count,
+            SUM(CASE WHEN p.id IS NOT NULL AND f.feedback = 'too_hard' THEN 1 ELSE 0 END) AS hard_count,
+            MAX(a.assigned_at) AS latest_assigned_at,
+            MAX(f.updated_at) AS latest_feedback_at
+       FROM models m
+       LEFT JOIN model_assigned_posts a ON a.model_id = m.id AND a.status = 'assigned'
+       LEFT JOIN posts p ON p.id = a.post_id AND (p.soft_deleted = 0 OR p.soft_deleted IS NULL)
+       LEFT JOIN model_post_feedback f ON f.model_id = m.id AND f.post_id = a.post_id
+      WHERE m.status = 'active'
+      GROUP BY m.id, m.name, m.primary_niche, m.secondary_niches, m.login_enabled, m.status
+      ORDER BY COALESCE(MAX(f.updated_at), MAX(a.assigned_at), m.name) DESC`
+  );
+
+  const recent = await pool.query(
+    `SELECT a.model_id, m.name AS model_name, a.post_id, a.assigned_at,
+            f.feedback, f.updated_at AS feedback_at,
+            p.account_handle, p.caption, p.content_type, p.post_url, p.view_count
+       FROM model_assigned_posts a
+       JOIN models m ON m.id = a.model_id
+       JOIN posts p ON p.id = a.post_id
+       LEFT JOIN model_post_feedback f ON f.model_id = a.model_id AND f.post_id = a.post_id
+      WHERE a.status = 'assigned'
+        AND m.status = 'active'
+        AND (p.soft_deleted = 0 OR p.soft_deleted IS NULL)
+      ORDER BY COALESCE(f.updated_at, a.assigned_at) DESC
+      LIMIT 40`
+  );
+
+  const actionQueue = await pool.query(
+    `SELECT a.model_id, m.name AS model_name, a.post_id, a.assigned_at,
+            f.feedback, f.notes AS feedback_notes, f.updated_at AS feedback_at,
+            p.account_handle, p.caption, p.content_type, p.post_url, p.view_count
+       FROM model_assigned_posts a
+       JOIN models m ON m.id = a.model_id
+       JOIN posts p ON p.id = a.post_id
+       JOIN model_post_feedback f ON f.model_id = a.model_id AND f.post_id = a.post_id
+      WHERE a.status = 'assigned'
+        AND m.status = 'active'
+        AND f.feedback IN ('need_script', 'want_to_make')
+        AND (p.soft_deleted = 0 OR p.soft_deleted IS NULL)
+        AND (p.archived = 0 OR p.archived IS NULL)
+      ORDER BY CASE f.feedback WHEN 'need_script' THEN 0 ELSE 1 END, f.updated_at DESC
+      LIMIT 50`
+  );
+
+  const models = rows.rows.map((row) => ({
+    ...row,
+    assigned_count: Number(row.assigned_count || 0),
+    reacted_count: Number(row.reacted_count || 0),
+    want_count: Number(row.want_count || 0),
+    script_count: Number(row.script_count || 0),
+    done_count: Number(row.done_count || 0),
+    pass_count: Number(row.pass_count || 0),
+    hard_count: Number(row.hard_count || 0),
+  }));
+
+  const summary = models.reduce((acc, model) => {
+    acc.models += 1;
+    acc.assigned += model.assigned_count;
+    acc.reacted += model.reacted_count;
+    acc.want += model.want_count;
+    acc.script += model.script_count;
+    acc.done += model.done_count;
+    acc.pass += model.pass_count;
+    acc.hard += model.hard_count;
+    if (model.login_enabled) acc.loginEnabled += 1;
+    return acc;
+  }, { models: 0, loginEnabled: 0, assigned: 0, reacted: 0, want: 0, script: 0, done: 0, pass: 0, hard: 0 });
+
+  res.json({ summary, models, recent: recent.rows, actionQueue: actionQueue.rows });
+}));
+
 // ─── Engagement Routes ──────────────────────────────────────────
 
 // Backfill: set followers for an account and recalc ER for all posts
@@ -862,6 +942,48 @@ app.delete('/models/:id', async (req, res) => {
   await pool.query("UPDATE models SET status = 'inactive', login_enabled = 0 WHERE id = $1", [Number(req.params.id)]);
   res.json({ success: true });
 });
+
+app.post('/models/:id/assignments', asyncHandler(async (req, res) => {
+  const modelId = Number(req.params.id);
+  const postIds = Array.isArray(req.body?.postIds) ? req.body.postIds.map(Number).filter(Number.isSafeInteger) : [];
+  if (!Number.isSafeInteger(modelId) || modelId <= 0) return res.status(400).json({ error: 'Invalid model id' });
+  if (postIds.length === 0) return res.status(400).json({ error: 'postIds required' });
+
+  const m = await pool.query("SELECT id FROM models WHERE id = $1 AND status = 'active'", [modelId]);
+  if (m.rowCount === 0) return res.status(404).json({ error: 'Model not found' });
+
+  let assigned = 0;
+  for (const postId of [...new Set(postIds)]) {
+    const p = await pool.query('SELECT id FROM posts WHERE id = $1 AND (soft_deleted = 0 OR soft_deleted IS NULL)', [postId]);
+    if (p.rowCount === 0) continue;
+    const r = await pool.query(
+      `INSERT INTO model_assigned_posts (model_id, post_id, assigned_at, status)
+       VALUES ($1,$2,$3,'assigned')
+       ON CONFLICT (model_id, post_id) DO NOTHING`,
+      [modelId, postId, new Date().toISOString()]);
+    assigned += r.rowCount || 0;
+  }
+  res.json({ ok: true, assigned });
+}));
+
+app.get('/models/:id/activity', asyncHandler(async (req, res) => {
+  const modelId = Number(req.params.id);
+  if (!Number.isSafeInteger(modelId) || modelId <= 0) return res.status(400).json({ error: 'Invalid model id' });
+
+  const assigned = await pool.query(
+    `SELECT a.model_id, a.post_id, a.assigned_at, a.status AS assignment_status,
+            f.feedback, f.notes AS feedback_notes, f.updated_at AS feedback_at,
+            p.shortcode, p.account_handle, p.thumbnail_url, p.caption, p.view_count, p.post_url, p.content_type
+       FROM model_assigned_posts a
+       JOIN posts p ON p.id = a.post_id
+       LEFT JOIN model_post_feedback f ON f.model_id = a.model_id AND f.post_id = a.post_id
+      WHERE a.model_id = $1 AND (p.soft_deleted = 0 OR p.soft_deleted IS NULL)
+      ORDER BY COALESCE(f.updated_at, a.assigned_at) DESC
+      LIMIT 60`,
+    [modelId]);
+  const feedback = assigned.rows.filter((row) => row.feedback);
+  res.json({ assigned: assigned.rows, feedback });
+}));
 
 // ─── Idea Generation Routes ────────────────────────────────────
 
@@ -1084,6 +1206,11 @@ app.get('/export', async (req, res) => {
 app.use('/thumbnails', express.static(DEFAULT_THUMB_DIR));
 
 app.get('/thumb/:postId', asyncHandler(async (req, res) => {
+  const postId = Number(req.params.postId);
+  if (req.session?.user?.role === 'model') {
+    const allowed = await modelCanAccessPost(req.session.user.modelId, postId);
+    if (!allowed) return res.status(404).send('No thumbnail');
+  }
   const result = await pool.query('SELECT thumbnail_url, shortcode FROM posts WHERE id = $1', [Number(req.params.postId)]);
   const post = result.rows[0];
   if (!post || !post.thumbnail_url) return res.status(404).send('No thumbnail');
@@ -1136,6 +1263,10 @@ function serveVideo(post, { fs: fsDep = fs, videoDir = DEFAULT_VIDEO_DIR, res })
 app.get('/video/:id', asyncHandler(async (req, res) => {
   const id = Number(req.params.id);
   if (!isValidVideoId(id)) return res.status(404).send('not found');
+  if (req.session?.user?.role === 'model') {
+    const allowed = await modelCanAccessPost(req.session.user.modelId, id, { requirePlayable: true });
+    if (!allowed) return res.status(404).send('not found');
+  }
   const r = await pool.query(
     'SELECT id, video_url, video_url_refreshed_at, video_cache_status FROM posts WHERE id = $1', [id]);
   const post = r.rows[0];
@@ -1156,6 +1287,32 @@ app.get('/suggested/reels/:id/thumb', asyncHandler(async (req, res) => {
 
 // [R2-#3] THE single top-level me-feed import — Task 6 reuses these, never re-requires.
 const { buildMeFeedQuery, nicheVisibilityClause, parseNiches } = require('./me-feed');
+
+async function modelCanAccessPost(modelId, postId, { requirePlayable = false } = {}) {
+  if (!Number.isSafeInteger(Number(modelId)) || !Number.isSafeInteger(Number(postId))) return false;
+  const m = await pool.query('SELECT primary_niche, secondary_niches FROM models WHERE id = $1', [modelId]);
+  if (m.rowCount === 0) return false;
+  const niches = parseNiches(m.rows[0]);
+  const params = [postId, modelId, ...niches];
+  const nicheClause = niches.length
+    ? ` OR COALESCE(posts.content_type, ct.content_type) IN (${niches.map((_, i) => `$${i + 3}`).join(', ')})`
+    : '';
+  const playableClause = requirePlayable ? ` AND posts.video_cache_status = 'cached'` : '';
+  const r = await pool.query(
+    `SELECT posts.id
+       FROM posts
+       LEFT JOIN creator_types ct ON posts.account_handle = ct.account_handle
+       LEFT JOIN model_assigned_posts a ON a.post_id = posts.id AND a.model_id = $2 AND a.status = 'assigned'
+      WHERE posts.id = $1
+        AND (posts.soft_deleted = 0 OR posts.soft_deleted IS NULL)
+        AND (posts.archived = 0 OR posts.archived IS NULL)
+        AND (a.model_id IS NOT NULL${nicheClause})
+        ${playableClause}
+      LIMIT 1`,
+    params);
+  return r.rowCount > 0;
+}
+
 app.get('/me/feed', asyncHandler(async (req, res) => {
   const modelId = req.session.user.modelId; // requireModel guarantees this
   const m = await pool.query('SELECT primary_niche, secondary_niches FROM models WHERE id = $1', [modelId]);
@@ -1165,9 +1322,10 @@ app.get('/me/feed', asyncHandler(async (req, res) => {
   const sel = (req.query.niche || '').trim();
 
   let build, activeNiche;
-  if (sel === 'all') { build = buildMeFeedQuery([], { page, limit: 24, all: true }); activeNiche = 'all'; }
-  else if (sel)      { build = buildMeFeedQuery([sel], { page, limit: 24 }); activeNiche = sel; }
-  else               { build = buildMeFeedQuery(myNiches, { page, limit: 24 }); activeNiche = null; }
+  if (sel && !myNiches.includes(sel)) return res.status(403).json({ error: 'Niche not available for this model' });
+  if (sel) build = buildMeFeedQuery([sel], { page, limit: 24 });
+  else build = buildMeFeedQuery(myNiches, { page, limit: 24 });
+  activeNiche = sel || null;
 
   // The content-type vocabulary powers the switcher (models can't hit the admin /content-types route).
   const av = await pool.query('SELECT value, label FROM content_types ORDER BY sort_order, label');
@@ -1180,9 +1338,29 @@ app.get('/me/feed', asyncHandler(async (req, res) => {
 
 const { saveParams } = require('./me-saves');
 
+app.get('/me/assignments', asyncHandler(async (req, res) => {
+  const r = await pool.query(
+    `SELECT posts.*, COALESCE(posts.content_type, ct.content_type) AS niche,
+            a.assigned_at, a.status AS assignment_status,
+            f.feedback, f.notes AS feedback_notes, f.updated_at AS feedback_at
+       FROM model_assigned_posts a
+       JOIN posts ON posts.id = a.post_id
+       LEFT JOIN creator_types ct ON posts.account_handle = ct.account_handle
+       LEFT JOIN model_post_feedback f ON f.model_id = a.model_id AND f.post_id = a.post_id
+      WHERE a.model_id = $1
+        AND a.status = 'assigned'
+        AND (posts.soft_deleted = 0 OR posts.soft_deleted IS NULL)
+        AND (posts.archived = 0 OR posts.archived IS NULL)
+      ORDER BY a.assigned_at DESC
+      LIMIT 30`,
+    [req.session.user.modelId]);
+  res.json({ posts: r.rows });
+}));
+
 app.post('/me/saves/:postId', asyncHandler(async (req, res) => {
   const p = saveParams(req.session.user.modelId, req.params.postId);
   if (!p) return res.status(400).json({ error: 'Invalid post id' });
+  if (!(await modelCanAccessPost(p.modelId, p.postId))) return res.status(404).json({ error: 'Post not available' });
   await pool.query(
     'INSERT INTO model_saved_posts (model_id, post_id, saved_at) VALUES ($1,$2,$3) ON CONFLICT (model_id, post_id) DO NOTHING',
     [p.modelId, p.postId, new Date().toISOString()]);
@@ -1197,12 +1375,42 @@ app.delete('/me/saves/:postId', asyncHandler(async (req, res) => {
 }));
 
 app.get('/me/saves', asyncHandler(async (req, res) => {
+  const modelId = req.session.user.modelId;
+  const m = await pool.query('SELECT primary_niche, secondary_niches FROM models WHERE id = $1', [modelId]);
+  if (m.rowCount === 0) return res.status(404).json({ error: 'Model not found' });
+  const niches = parseNiches(m.rows[0]);
+  const nicheClause = niches.length
+    ? ` OR COALESCE(posts.content_type, ct.content_type) IN (${niches.map((_, i) => `$${i + 2}`).join(', ')})`
+    : '';
   const r = await pool.query(
     `SELECT posts.* FROM model_saved_posts s
        JOIN posts ON posts.id = s.post_id
-     WHERE s.model_id = $1 AND (posts.soft_deleted = 0 OR posts.soft_deleted IS NULL)
-     ORDER BY s.saved_at DESC`, [req.session.user.modelId]);
+       LEFT JOIN creator_types ct ON posts.account_handle = ct.account_handle
+       LEFT JOIN model_assigned_posts a ON a.post_id = posts.id AND a.model_id = s.model_id AND a.status = 'assigned'
+     WHERE s.model_id = $1
+       AND (posts.soft_deleted = 0 OR posts.soft_deleted IS NULL)
+       AND (posts.archived = 0 OR posts.archived IS NULL)
+       AND (a.model_id IS NOT NULL${nicheClause})
+     ORDER BY s.saved_at DESC`, [modelId, ...niches]);
   res.json({ posts: r.rows });
+}));
+
+app.post('/me/feedback/:postId', asyncHandler(async (req, res) => {
+  const p = saveParams(req.session.user.modelId, req.params.postId);
+  if (!p) return res.status(400).json({ error: 'Invalid post id' });
+  const feedback = String(req.body?.feedback || '').trim();
+  const notes = String(req.body?.notes || '').trim();
+  const allowed = new Set(['want_to_make', 'not_my_style', 'too_hard', 'already_done', 'need_script', 'done']);
+  if (!allowed.has(feedback)) return res.status(400).json({ error: 'Invalid feedback' });
+
+  if (!(await modelCanAccessPost(p.modelId, p.postId))) return res.status(404).json({ error: 'Post not available' });
+
+  await pool.query(
+    `INSERT INTO model_post_feedback (model_id, post_id, feedback, notes, created_at, updated_at)
+     VALUES ($1,$2,$3,$4,$5,$6)
+     ON CONFLICT (model_id, post_id) DO UPDATE SET feedback = excluded.feedback, notes = excluded.notes, updated_at = excluded.updated_at`,
+    [p.modelId, p.postId, feedback, notes, new Date().toISOString(), new Date().toISOString()]);
+  res.json({ ok: true, feedback });
 }));
 
 const { parseSourceShortcodes } = require('./idea-reels');
