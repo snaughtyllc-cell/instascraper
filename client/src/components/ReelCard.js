@@ -42,6 +42,9 @@ export default function ReelCard({
   onNotInterested,
   actionPending = false,
   pageActive = true,
+  reelMode = false,
+  pickedForYou = false,
+  accessiblePosition,
 }) {
   const [showVideo, setShowVideo] = useState(false); // desktop tap-to-play fallback
   const [videoFailed, setVideoFailed] = useState(false);
@@ -102,7 +105,18 @@ export default function ReelCard({
     el.muted = !soundOn;
     if (playing && !manualPaused) {
       const p = el.play();
-      if (p && typeof p.catch === 'function') p.catch(() => setManualPaused(true));
+      if (p && typeof p.catch === 'function') p.catch(() => {
+        if (!soundOn) {
+          setManualPaused(true);
+          return;
+        }
+        // Browsers commonly reject unmuted autoplay after a swipe. Fall back to
+        // muted playback so the next reel keeps moving instead of freezing.
+        el.muted = true;
+        onToggleSound?.();
+        const retry = el.play();
+        if (retry && typeof retry.catch === 'function') retry.catch(() => setManualPaused(true));
+      });
     } else if (!el.paused) {
       el.pause();
     }
@@ -144,7 +158,11 @@ export default function ReelCard({
   return (
     <div
       ref={cardRef}
-      className="relative w-full h-[calc(100svh-205px)] min-h-[440px] max-h-[720px] rounded-lg overflow-hidden bg-black ring-1 ring-model-ink/10 shadow-[0_14px_34px_rgba(32,33,31,0.14)]"
+      className={`relative w-full overflow-hidden bg-black ${reelMode
+        ? 'h-full rounded-none sm:rounded-lg sm:ring-1 sm:ring-model-ink/10'
+        : 'h-[calc(100svh-205px)] min-h-[440px] max-h-[720px] rounded-lg ring-1 ring-model-ink/10 shadow-[0_14px_34px_rgba(32,33,31,0.14)]'}`}
+      role="group"
+      aria-label={`${accessiblePosition ? `${accessiblePosition}. ` : ''}Reel by @${post.account_handle || 'creator'}`}
     >
       {/* Media — true aspect, no crop */}
       <video
@@ -200,6 +218,12 @@ export default function ReelCard({
         </div>
       )}
 
+      {pickedForYou && (
+        <div className="pointer-events-none absolute left-3 top-12 z-20 rounded-full border border-white/30 bg-model-coral/95 px-2.5 py-1 text-[10px] font-extrabold text-white shadow-sm backdrop-blur">
+          Picked for you
+        </div>
+      )}
+
       {videoFailed && (
         <div className="pointer-events-none absolute left-3 top-3 z-20 rounded-full bg-model-surface/95 px-2.5 py-1 text-[11px] font-bold text-model-ink shadow-sm backdrop-blur">
           Video unavailable
@@ -207,7 +231,7 @@ export default function ReelCard({
       )}
 
       {/* Right action rail */}
-      <div className="absolute right-3 bottom-[102px] z-20 flex flex-col items-center gap-2.5">
+      <div className={`absolute right-3 bottom-[102px] z-20 flex flex-col items-center gap-2.5 ${reelMode ? 'model-reel-actions' : ''}`}>
         {onToggleSave && (
           <button
             onClick={(e) => { e.stopPropagation(); onToggleSave(post); }}
@@ -218,6 +242,7 @@ export default function ReelCard({
             }`}
             title={isSaved ? 'Unsave' : 'Save'}
             aria-label={isSaved ? 'Unsave' : 'Save'}
+            aria-pressed={isSaved}
           >
             <svg
               className="w-[21px] h-[21px]"
@@ -271,6 +296,7 @@ export default function ReelCard({
             className="w-11 h-11 rounded-full border border-model-ink/15 bg-model-sage/95 text-model-ink shadow-lg backdrop-blur flex items-center justify-center transition-transform active:scale-95 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white"
             title={soundOn ? 'Mute' : 'Unmute'}
             aria-label={soundOn ? 'Mute' : 'Unmute'}
+            aria-pressed={soundOn}
           >
             <svg className="w-[21px] h-[21px]" fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24">
               <path strokeLinecap="round" strokeLinejoin="round" d="M11 5L6 9H2v6h4l5 4V5z" />
