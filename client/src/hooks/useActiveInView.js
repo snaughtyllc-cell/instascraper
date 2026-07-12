@@ -15,9 +15,9 @@ import { useState, useEffect, useCallback, useRef } from 'react';
 //     registerRef={registerRef}
 //     ...
 //   />
-export default function useActiveInView(items) {
-  const autoplayInView = typeof window !== 'undefined'
-    && window.matchMedia && window.matchMedia('(pointer: coarse)').matches;
+export default function useActiveInView(items, { rootRef, forceAutoplay = false } = {}) {
+  const autoplayInView = forceAutoplay || (typeof window !== 'undefined'
+    && window.matchMedia && window.matchMedia('(pointer: coarse)').matches);
   const [activeCardId, setActiveCardId] = useState(null);
   const nodeMap = useRef(new Map());       // id -> DOM node
   const ratioMap = useRef(new Map());      // id -> intersectionRatio
@@ -40,6 +40,7 @@ export default function useActiveInView(items) {
 
   useEffect(() => {
     if (!autoplayInView) return;
+    ratioMap.current.clear();
     const obs = new IntersectionObserver((entries) => {
       for (const e of entries) {
         const id = e.target.dataset.cardId;
@@ -50,11 +51,11 @@ export default function useActiveInView(items) {
         if (r > best) { best = r; bestId = id; }
       }
       setActiveCardId(best >= 0.6 ? bestId : null);
-    }, { threshold: [0, 0.6, 1] });
+    }, { root: rootRef?.current || null, threshold: [0, 0.6, 1] });
     observerRef.current = obs;
     for (const node of nodeMap.current.values()) obs.observe(node);
     return () => obs.disconnect();
-  }, [autoplayInView, items]);
+  }, [autoplayInView, items, rootRef]);
 
   return { autoplayInView, activeCardId, registerRef };
 }

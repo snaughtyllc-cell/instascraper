@@ -62,6 +62,27 @@ export default function ModelApp({ onLogout }) {
   const tabRef = useRef(tab);
   const scrollByTabRef = useRef({ feed: 0, sounds: 0, saved: 0, ideas: 0 });
   const pendingScrollTabRef = useRef(null);
+  const headerRef = useRef(null);
+  const navRef = useRef(null);
+  const [feedViewportHeight, setFeedViewportHeight] = useState(null);
+  const [feedResetSignal, setFeedResetSignal] = useState(0);
+
+  useLayoutEffect(() => {
+    const measure = () => {
+      const headerHeight = headerRef.current?.getBoundingClientRect().height || 0;
+      const navHeight = navRef.current?.getBoundingClientRect().height || 0;
+      setFeedViewportHeight(Math.max(1, window.innerHeight - headerHeight - navHeight));
+    };
+    measure();
+    const observer = typeof ResizeObserver === 'undefined' ? null : new ResizeObserver(measure);
+    if (headerRef.current) observer?.observe(headerRef.current);
+    if (navRef.current) observer?.observe(navRef.current);
+    window.addEventListener('resize', measure);
+    return () => {
+      observer?.disconnect();
+      window.removeEventListener('resize', measure);
+    };
+  }, []);
 
   useLayoutEffect(() => {
     if (pendingScrollTabRef.current !== tab) return;
@@ -76,6 +97,10 @@ export default function ModelApp({ onLogout }) {
   const switchTab = (nextTab) => {
     scrollByTabRef.current[tabRef.current] = window.scrollY;
     if (nextTab === tabRef.current) {
+      if (nextTab === 'feed') {
+        setFeedResetSignal((signal) => signal + 1);
+        return;
+      }
       window.scrollTo({ top: 0, behavior: 'smooth' });
       scrollByTabRef.current[nextTab] = 0;
       return;
@@ -90,7 +115,7 @@ export default function ModelApp({ onLogout }) {
   return (
     <div className="model-app min-h-screen bg-model-canvas text-model-ink flex flex-col">
       {/* Top bar — light, uncluttered: one accent mark, restrained title weight */}
-      <header className="sticky top-0 z-40 border-b border-model-line/80 bg-model-surface/95 backdrop-blur-xl">
+      <header ref={headerRef} className="sticky top-0 z-40 border-b border-model-line/80 bg-model-surface/95 backdrop-blur-xl">
         <div className="max-w-xl mx-auto px-4 pt-[max(14px,env(safe-area-inset-top))] pb-3 flex items-center justify-between">
           <div className="min-w-0">
             <p className="text-[11px] font-extrabold uppercase tracking-[0.16em] text-model-coral-ink">{pageMeta.eyebrow}</p>
@@ -111,10 +136,14 @@ export default function ModelApp({ onLogout }) {
 
       {/* Active page — a calm max-width so content doesn't stretch edge-to-edge
           on larger phones; bottom padding clears the fixed nav */}
-      <main className="flex-1 pb-24">
+      <main className={tab === 'feed' ? 'flex-1 min-h-0' : 'flex-1 pb-24'}>
         <div className="max-w-xl mx-auto">
-          <section className={tab === 'feed' ? 'block' : 'hidden'} aria-hidden={tab !== 'feed'}>
-            <FeedPage active={tab === 'feed'} />
+          <section
+            className={tab === 'feed' ? 'block overflow-hidden' : 'hidden'}
+            style={feedViewportHeight ? { height: `${feedViewportHeight}px` } : { height: 'calc(100svh - 144px)' }}
+            aria-hidden={tab !== 'feed'}
+          >
+            <FeedPage active={tab === 'feed'} resetSignal={feedResetSignal} />
           </section>
           <section className={tab === 'sounds' ? 'block' : 'hidden'} aria-hidden={tab !== 'sounds'}>
             <SoundsPage active={tab === 'sounds'} />
@@ -128,7 +157,7 @@ export default function ModelApp({ onLogout }) {
         </div>
       </main>
 
-      <nav className="fixed bottom-0 left-0 right-0 z-40 border-t border-model-line bg-model-surface/95 backdrop-blur-xl pb-[env(safe-area-inset-bottom)]">
+      <nav ref={navRef} className="fixed bottom-0 left-0 right-0 z-40 border-t border-model-line bg-model-surface/95 backdrop-blur-xl pb-[env(safe-area-inset-bottom)]">
         <div className="max-w-xl mx-auto grid grid-cols-4 px-2">
           {TABS.map((t) => {
             const active = tab === t.id;

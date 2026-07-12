@@ -57,16 +57,19 @@ The codebase received a full model-portal audit before the first real-model test
 
 ## Feed behavior
 
-- Feed combines team-picked assignments with the model's discovery feed.
+- Feed is a dedicated full-height reel viewer between the persistent header and bottom navigation.
+- One vertical swipe snaps exactly one full reel into place. Arrow Up/Down and Page Up/Down provide the same one-reel navigation for keyboard users.
+- Feed combines team-picked assignments with discovery in one ordered stream; picked reels carry a small `Picked for you` label instead of rendering in a separate section.
 - Niche chips switch the discovery feed and return the page to the top.
 - Save is optimistic, adds the post to Saved, and records `want_to_make` feedback.
 - X records `not_my_style` feedback and removes the post from Saved if needed.
-- Each tab remembers its own scroll position. Moving from Feed to another tab and back restores the previous Feed position.
+- Feed owns its scroll surface and restores the active reel by stable reel ID. The other tabs retain their existing page-scroll restoration.
 - Tapping the already-active bottom tab scrolls that tab to the top.
-- A floating up-arrow appears after the user scrolls down and returns to the top.
 - Refresh requests a fresh feed order, resets pagination to page 1, and returns to the top.
-- Reel playback starts muted on first tap. A visible sound button lets the model turn audio on or off.
-- Only the active in-view reel should autoplay.
+- The active reel autoplays muted on touch and desktop; a visible sound button lets the model turn audio on or off.
+- Only the active snapped reel plays. Hidden tabs, offscreen reels, and backgrounded pages pause playback.
+- Save and X remain overlaid on the reel. X anchors the intended successor and announces the change to assistive technology; failed actions restore the reel and show an error.
+- Short landscape viewports use a compact action rail so controls do not collide with the filter strip.
 
 Relevant implementation: `src/ModelApp.js`, `src/pages/model/FeedPage.js`, and `src/components/ReelCard.js`.
 
@@ -136,6 +139,17 @@ client/tailwind.config.js
 ```
 
 ## Verification completed
+
+### Full-height reel viewer verification on 2026-07-12
+
+- Client production build compiled successfully (`main.3e74500d.js`, `main.67d19cb2.css`).
+- Full server suite passed: 291/291 tests.
+- Browser smoke passed at 390x844, 844x390, and 1280x800 with no body scroll or incoherent control overlap.
+- At 390x844, the measured reel viewport was 711px and one physical scroll gesture landed the next reel at exactly 710.5px (subpixel layout rounding).
+- Feed-to-Saved-to-Feed restored the second reel at the exact prior snap point; tapping the active Feed tab returned to reel one.
+- Keyboard Arrow/Page navigation resolved to the target reel boundary within 0.5px subpixel rounding.
+- Team-picked and discovery responses were deliberately gated on initial load so an asynchronously arriving assignment cannot shift the first visible reel.
+- The temporary local model, three posts, session, and copied media fixtures were removed after browser verification.
 
 - Client production build passed with `npm run build`.
 - Full server suite passed: 291/291 tests.
