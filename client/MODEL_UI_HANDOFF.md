@@ -9,6 +9,7 @@ The model-facing portal is implemented, deployed, and ready for real-model phone
 - Live app: https://instascraper-production-7281.up.railway.app
 - Production branch: `main`
 - Latest redesign commit: `9e4de6e` (`Redesign model creator experience`)
+- Latest hardening commit: `87d13d9` (`Harden model portal before pilot`)
 - Health checks verified: `/live` is live and `/ready` reports the database is up.
 
 ## Pre-pilot hardening completed on 2026-07-12
@@ -164,6 +165,7 @@ client/tailwind.config.js
 - Direct API smoke confirmed the creator-safe post fields and no internal notes, tags, scrape queries, raw media URLs, or cache errors.
 - The two-stage production Docker build passed. The 113 MB runtime image contains `client/build/index.html` and does not contain `client/node_modules`.
 - A PostgreSQL-backed production container passed `/live`, `/ready`, and static-client checks with no MemoryStore warning. A login session remained authenticated after restarting only the app container.
+- Railway deployed the hardening successfully with bundle `main.8efccee9.js`. Production logs show PostgreSQL, a writable media volume, and no MemoryStore warning; the 390px deployed login smoke had no overflow or browser console errors.
 - Final dependency audit: server has one moderate Anthropic SDK advisory in an unused filesystem-memory feature; client reports 28 Create React App build/test advisories (9 low, 6 moderate, 13 high, 0 critical), and that toolchain is excluded from the runtime image.
 - All 11 disposable posts, both disposable models, cookies, and generated media were removed; follow-up database counts were zero.
 
@@ -186,8 +188,7 @@ client/tailwind.config.js
 ## Remaining non-model checks
 
 1. Run and document a Railway PostgreSQL backup/restore drill before relying on the portal for irreplaceable model feedback.
-2. After this hardening deploy, confirm Railway logs contain no MemoryStore warning and that `/live`, `/ready`, login, and one cached video pass in production.
-3. Plan a future migration away from Create React App to clear its old build-tool advisories; the current multi-stage image keeps that toolchain out of production runtime.
-4. Upgrade the Anthropic SDK in a separate compatibility change. The remaining moderate advisory concerns an optional filesystem-backed memory tool that InstaScraper does not use.
+2. Plan a future migration away from Create React App to clear its old build-tool advisories; the current multi-stage image keeps that toolchain out of production runtime.
+3. Upgrade the Anthropic SDK in a separate compatibility change. The remaining moderate advisory concerns an optional filesystem-backed memory tool that InstaScraper does not use.
 
 Do not expand the reaction model or merge admin controls into this UI before that real-model test. The next product decisions should be driven by observed use, not additional speculative controls.
