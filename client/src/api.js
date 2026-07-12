@@ -1,9 +1,12 @@
 import axios from 'axios';
+import API_URL from './api-base';
 
 const api = axios.create({
-  baseURL: process.env.REACT_APP_API_URL || 'http://localhost:4000',
+  baseURL: API_URL,
   withCredentials: true,
 });
+
+const MODEL_API_TIMEOUT = 20000;
 
 export const triggerScrape = (data) => api.post('/scrape', data);
 export const getScrapeJobs = () => api.get('/scrape/jobs');
@@ -91,16 +94,16 @@ export const exportIdeas = (modelId, format = 'csv') => {
 export const exportIdeasToNotion = (modelId, pageId) => api.post(`/ideas/export-notion/${modelId}`, { pageId });
 
 // Model (self / me) endpoints
-export const login = (email, password) => api.post('/login', email ? { email, password } : { password });
-export const getMyFeed = (page = 1, niche, options = {}) => api.get('/me/feed', { params: { page, ...(niche ? { niche } : {}), ...(options.refresh ? { refresh: 1 } : {}) } });
-export const getMyAssignments = () => api.get('/me/assignments');
-export const getMySaves = () => api.get('/me/saves');
-export const saveMyPost = (id) => api.post(`/me/saves/${id}`);
-export const unsaveMyPost = (id) => api.delete(`/me/saves/${id}`);
-export const sendMyPostFeedback = (id, feedback, notes = '') => api.post(`/me/feedback/${id}`, { feedback, notes });
-export const getMyIdeas = () => api.get('/me/ideas');
-export const getMyTrendingAudio = () => api.get('/me/audio/trending');
-export const getMyAudioReels = (audioId) => api.get(`/me/audio/${encodeURIComponent(audioId)}/reels`);
+export const login = (email, password) => api.post('/login', email ? { email, password } : { password }, { timeout: MODEL_API_TIMEOUT });
+export const getMyFeed = (page = 1, niche, options = {}) => api.get('/me/feed', { timeout: MODEL_API_TIMEOUT, params: { page, ...(niche ? { niche } : {}), ...(options.refresh ? { refresh: 1 } : {}) } });
+export const getMyAssignments = () => api.get('/me/assignments', { timeout: MODEL_API_TIMEOUT });
+export const getMySaves = () => api.get('/me/saves', { timeout: MODEL_API_TIMEOUT });
+export const saveMyPost = (id) => api.post(`/me/saves/${id}`, undefined, { timeout: MODEL_API_TIMEOUT });
+export const unsaveMyPost = (id) => api.delete(`/me/saves/${id}`, { timeout: MODEL_API_TIMEOUT });
+export const sendMyPostFeedback = (id, feedback, notes = '') => api.post(`/me/feedback/${id}`, { feedback, notes }, { timeout: MODEL_API_TIMEOUT });
+export const getMyIdeas = () => api.get('/me/ideas', { timeout: MODEL_API_TIMEOUT });
+export const getMyTrendingAudio = () => api.get('/me/audio/trending', { timeout: MODEL_API_TIMEOUT });
+export const getMyAudioReels = (audioId) => api.get(`/me/audio/${encodeURIComponent(audioId)}/reels`, { timeout: MODEL_API_TIMEOUT });
 
 // Trending audio (admin, roster-wide)
 export const getTrendingAudio = () => api.get('/audio/trending');

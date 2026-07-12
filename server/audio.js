@@ -93,13 +93,14 @@ function buildAudioReelsQuery(audioId, niches, { all = false, limit = 12 } = {})
   params.push(limit);
   const sql = `
     SELECT posts.id, posts.shortcode, posts.audio_id, posts.view_count, posts.account_handle,
-           posts.caption, posts.post_url, posts.posted_at, posts.video_cache_status,
+           posts.caption, posts.post_url, posts.posted_at,
            COALESCE(posts.content_type, ct.content_type) AS niche
     FROM posts
     LEFT JOIN creator_types ct ON posts.account_handle = ct.account_handle
     WHERE posts.audio_id = $1
       AND (posts.soft_deleted = 0 OR posts.soft_deleted IS NULL)
-      AND (posts.archived = 0 OR posts.archived IS NULL)${nicheClause}
+      AND (posts.archived = 0 OR posts.archived IS NULL)
+      AND posts.video_cache_status = 'cached'${nicheClause}
     ORDER BY posts.view_count DESC NULLS LAST
     LIMIT $${limIdx}`;
   return { sql, params };
@@ -133,7 +134,8 @@ async function trendingAudio(db, { niches = [], all = false, cfg = audioConfig()
     LEFT JOIN creator_types ct ON posts.account_handle = ct.account_handle
     WHERE posts.audio_id IN (${ph})
       AND (posts.soft_deleted = 0 OR posts.soft_deleted IS NULL)
-      AND (posts.archived = 0 OR posts.archived IS NULL)${nicheClause}
+      AND (posts.archived = 0 OR posts.archived IS NULL)
+      AND posts.video_cache_status = 'cached'${nicheClause}
     ORDER BY posts.view_count DESC NULLS LAST`;
   const exRows = (await db.query(exSql, exParams)).rows || [];
   const byAudio = {};

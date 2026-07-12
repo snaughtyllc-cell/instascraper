@@ -179,7 +179,9 @@ export default function LibraryTab() {
     try {
       const { data } = await assignPostsToModel(assignModelId, [...selected]);
       const model = models.find((m) => String(m.id) === String(assignModelId));
-      setAssignMessage(`Assigned ${data.assigned || selected.size} reel${selected.size === 1 ? '' : 's'} to ${model?.name || 'model'}.`);
+      const assigned = Number(data.assigned || 0);
+      const skipped = Number(data.skipped || 0);
+      setAssignMessage(`Assigned ${assigned} reel${assigned === 1 ? '' : 's'} to ${model?.name || 'model'}${skipped ? `; skipped ${skipped} unavailable reel${skipped === 1 ? '' : 's'}` : ''}.`);
       clearSelection();
     } catch (err) {
       console.error('Assign failed:', err);

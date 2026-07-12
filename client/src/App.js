@@ -1,4 +1,5 @@
 import React, { useState, useEffect } from 'react';
+import * as Sentry from '@sentry/react';
 import api from './api';
 import ScrapeTab from './pages/ScrapeTab';
 import LibraryTab from './pages/LibraryTab';
@@ -29,29 +30,73 @@ export default function App() {
   const [authState, setAuthState] = useState('loading');
   const [role, setRole] = useState(null);
   const [modelId, setModelId] = useState(null);
+  const [loginNotice, setLoginNotice] = useState('');
 
   useEffect(() => {
     checkAuth();
+  }, []);
+
+  useEffect(() => {
+    const interceptor = api.interceptors.response.use(
+      (response) => response,
+      (error) => {
+        const status = error.response?.status;
+        const url = String(error.config?.url || '');
+        const responseError = String(error.response?.data?.error || '');
+        if (url.startsWith('/me/') && (!status || status >= 500)) {
+          Sentry.captureException(new Error(`Model API request failed: ${url}`), {
+            tags: { api_status: String(status || 'network') },
+            extra: { code: error.code || null },
+          });
+        }
+        const sessionEnded = url !== '/login' && (status === 401 || (status === 403 && responseError === 'Account disabled'));
+        if (sessionEnded) {
+          setRole(null);
+          setModelId(null);
+          setLoginNotice(status === 403 ? 'Your model access is no longer active.' : 'Your session expired. Sign in again.');
+          setAuthState('login');
+          Sentry.setUser(null);
+        }
+        return Promise.reject(error);
+      }
+    );
+    return () => api.interceptors.response.eject(interceptor);
   }, []);
 
   const checkAuth = async () => {
     try {
       const { data } = await api.get('/auth/check');
       if (!data.authRequired || data.authenticated) {
-        setRole(data.role || 'admin');
-        setModelId(data.modelId || null);
+        const nextRole = data.role || 'admin';
+        const nextModelId = data.modelId || null;
+        setRole(nextRole);
+        setModelId(nextModelId);
+        setLoginNotice('');
+        Sentry.setUser({ id: nextRole === 'model' ? `model:${nextModelId}` : 'admin' });
         setAuthState('app');
       } else {
+        setRole(null);
+        setModelId(null);
         setAuthState('login');
       }
-    } catch {
+    } catch (error) {
+      setLoginNotice(error.code === 'ECONNABORTED'
+        ? 'InstaScraper took too long to respond. Try again.'
+        : 'We could not reach InstaScraper. Check your connection and try again.');
       setAuthState('login');
     }
   };
 
   const handleLogout = async () => {
-    await api.post('/logout');
-    setAuthState('login');
+    try {
+      await api.post('/logout');
+    } finally {
+      setRole(null);
+      setModelId(null);
+      setLoginNotice('');
+      setAuthState('login');
+      Sentry.setUser(null);
+    }
   };
 
   if (authState === 'loading') {
@@ -63,11 +108,11 @@ export default function App() {
   }
 
   if (authState === 'login') {
-    return <LoginPage onLogin={checkAuth} />;
+    return <LoginPage onLogin={checkAuth} notice={loginNotice} />;
   }
 
   if (role === 'model') {
-    return <ModelApp onLogout={handleLogout} />;
+    return <ModelApp key={modelId || 'model'} onLogout={handleLogout} />;
   }
 
   return (

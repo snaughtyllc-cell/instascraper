@@ -166,8 +166,8 @@ async function deliverBatch(modelId, batchId) {
   if (!model) throw new Error(`Model ${modelId} not found`);
 
   const ideasResult = await pool.query(
-    'SELECT * FROM idea_cards WHERE batch_id = $1 ORDER BY id',
-    [batchId]
+    'SELECT * FROM idea_cards WHERE batch_id = $1 AND model_id = $2 ORDER BY id',
+    [batchId, modelId]
   );
   const ideas = ideasResult.rows;
   if (ideas.length === 0) return { status: 'empty', message: 'No ideas in batch' };
@@ -196,7 +196,7 @@ async function deliverBatch(modelId, batchId) {
 
     // Mark ideas as delivered
     const now = new Date().toISOString();
-    await pool.query("UPDATE idea_cards SET status = 'delivered', delivered_at = $1 WHERE batch_id = $2", [now, batchId]);
+    await pool.query("UPDATE idea_cards SET status = 'delivered', delivered_at = $1 WHERE batch_id = $2 AND model_id = $3", [now, batchId, modelId]);
   } catch (err) {
     deliveryStatus = 'failed';
     error = err.message;

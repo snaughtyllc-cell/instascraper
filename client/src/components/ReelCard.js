@@ -1,4 +1,6 @@
 import React, { useState, useEffect, useRef } from 'react';
+import * as Sentry from '@sentry/react';
+import API_URL from '../api-base';
 
 // Lean, model-only reel card (Feed + Saved). The reel fills the screen and every
 // piece of context — @handle, ER, views, caption, and the Save / Open / Sound
@@ -11,8 +13,6 @@ import React, { useState, useEffect, useRef } from 'react';
 // leaving a frozen poster. We therefore set `muted` on the element imperatively
 // and call play() ourselves, and make the whole reel tap-to-play/pause so a
 // blocked autoplay (e.g. iOS Low Power Mode) is always recoverable by tapping.
-
-const API_URL = process.env.REACT_APP_API_URL || 'http://localhost:4000';
 
 function formatCount(n) {
   if (!n) return '0';
@@ -40,10 +40,13 @@ export default function ReelCard({
   isSaved = false,
   feedback,
   onNotInterested,
+  actionPending = false,
+  pageActive = true,
 }) {
   const [showVideo, setShowVideo] = useState(false); // desktop tap-to-play fallback
   const [videoFailed, setVideoFailed] = useState(false);
   const [manualPaused, setManualPaused] = useState(false);
+  const [documentVisible, setDocumentVisible] = useState(() => typeof document === 'undefined' || !document.hidden);
   const cardRef = useRef(null);
   const videoRef = useRef(null);
 
@@ -54,7 +57,32 @@ export default function ReelCard({
   const typeLabel = post.niche || post.content_type;
 
   // Reset per-reel playback flags when the underlying reel changes.
-  useEffect(() => { setVideoFailed(false); setManualPaused(false); }, [cardId]);
+  useEffect(() => { setVideoFailed(false); setManualPaused(false); setShowVideo(false); }, [cardId]);
+
+  useEffect(() => {
+    const onVisibility = () => setDocumentVisible(!document.hidden);
+    document.addEventListener('visibilitychange', onVisibility);
+    return () => document.removeEventListener('visibilitychange', onVisibility);
+  }, []);
+
+  useEffect(() => {
+    if (pageActive) return;
+    setShowVideo(false);
+    setManualPaused(false);
+    if (videoRef.current && !videoRef.current.paused) videoRef.current.pause();
+  }, [pageActive]);
+
+  useEffect(() => {
+    if (!cardRef.current || !showVideo || typeof IntersectionObserver === 'undefined') return undefined;
+    const observer = new IntersectionObserver(([entry]) => {
+      if (!entry.isIntersecting || entry.intersectionRatio < 0.1) {
+        setShowVideo(false);
+        setManualPaused(false);
+      }
+    }, { threshold: [0, 0.1] });
+    observer.observe(cardRef.current);
+    return () => observer.disconnect();
+  }, [showVideo]);
 
   // Register with the shared in-view observer so only the most-visible reel plays.
   useEffect(() => {
@@ -64,19 +92,21 @@ export default function ReelCard({
     return () => registerRef(cardId, null);
   }, [autoplayInView, registerRef, cardId]);
 
-  const playing = (showVideo || (autoplayInView && isActive)) && !videoFailed && cardId != null;
+  const playing = pageActive && documentVisible && (showVideo || (autoplayInView && isActive)) && !videoFailed && cardId != null;
 
   // Drive playback imperatively (see file header). Runs whenever the reel becomes
   // the active/playing one, or when mute/pause state changes.
   useEffect(() => {
     const el = videoRef.current;
-    if (!el || !playing) return;
+    if (!el) return;
     el.muted = !soundOn;
-    if (!manualPaused) {
+    if (playing && !manualPaused) {
       const p = el.play();
       if (p && typeof p.catch === 'function') p.catch(() => setManualPaused(true));
+    } else if (!el.paused) {
+      el.pause();
     }
-  }, [playing, autoplayInView, soundOn, manualPaused]);
+  }, [playing, soundOn, manualPaused]);
 
   // Tap the reel surface. If the <video> isn't mounted yet (this reel is showing
   // its poster because it isn't the active/autoplaying one, or a prior load
@@ -88,13 +118,11 @@ export default function ReelCard({
     if (!el) return;
     if (!playing || !el.currentSrc) {
       setVideoFailed(false);
-      setShowVideo(true);
-      el.src = videoSrc;
-      el.load();
-      el.muted = !soundOn;
-      const p = el.play();
-      if (p && typeof p.catch === 'function') p.catch(() => setManualPaused(true));
       setManualPaused(false);
+      // Let React attach the src before the playback effect calls play(). Setting
+      // src/load/play here and then rendering the same src can interrupt the
+      // first play request, leaving a ready video paused after one tap.
+      setShowVideo(true);
       return;
     }
     if (el.paused) {
@@ -130,7 +158,10 @@ export default function ReelCard({
         controls={false}
         preload="metadata"
         className={`absolute inset-0 w-full h-full object-contain ${playing ? 'block' : 'hidden'}`}
-        onError={() => setVideoFailed(true)}
+        onError={() => {
+          setVideoFailed(true);
+          Sentry.captureMessage('Model reel playback failed', { level: 'warning', tags: { surface: 'model-feed', post_id: String(cardId) } });
+        }}
       />
       {!playing && (
         <img
@@ -149,7 +180,7 @@ export default function ReelCard({
       <button
         type="button"
         onClick={handleSurfaceTap}
-        className="absolute inset-0 z-[5] w-full h-full"
+        className="absolute inset-0 z-[5] w-full h-full focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-white"
         aria-label={playing && !manualPaused ? 'Pause' : 'Play'}
       >
         {showCenterPlay && (
@@ -169,12 +200,20 @@ export default function ReelCard({
         </div>
       )}
 
+      {videoFailed && (
+        <div className="pointer-events-none absolute left-3 top-3 z-20 rounded-full bg-model-surface/95 px-2.5 py-1 text-[11px] font-bold text-model-ink shadow-sm backdrop-blur">
+          Video unavailable
+        </div>
+      )}
+
       {/* Right action rail */}
       <div className="absolute right-3 bottom-[102px] z-20 flex flex-col items-center gap-2.5">
         {onToggleSave && (
           <button
             onClick={(e) => { e.stopPropagation(); onToggleSave(post); }}
-            className={`w-11 h-11 rounded-full border flex items-center justify-center shadow-lg backdrop-blur transition-transform active:scale-95 ${
+            disabled={actionPending}
+            aria-busy={actionPending}
+            className={`w-11 h-11 rounded-full border flex items-center justify-center shadow-lg backdrop-blur transition-transform active:scale-95 disabled:opacity-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white ${
               isSaved ? 'border-white/50 bg-model-coral text-white' : 'border-model-ink/15 bg-model-surface/95 text-model-ink'
             }`}
             title={isSaved ? 'Unsave' : 'Save'}
@@ -194,7 +233,9 @@ export default function ReelCard({
         {onNotInterested && (
           <button
             onClick={(e) => { e.stopPropagation(); onNotInterested(post); }}
-            className={`w-11 h-11 rounded-full border flex items-center justify-center shadow-lg backdrop-blur transition-transform active:scale-95 ${
+            disabled={actionPending}
+            aria-busy={actionPending}
+            className={`w-11 h-11 rounded-full border flex items-center justify-center shadow-lg backdrop-blur transition-transform active:scale-95 disabled:opacity-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white ${
               feedback === 'not_my_style'
                 ? 'border-white/50 bg-model-coral text-white'
                 : 'border-model-ink/15 bg-model-surface/95 text-model-ink'
@@ -213,7 +254,7 @@ export default function ReelCard({
             target="_blank"
             rel="noopener noreferrer"
             onClick={(e) => e.stopPropagation()}
-            className="w-11 h-11 rounded-full border border-model-ink/15 bg-model-surface/95 text-model-ink shadow-lg backdrop-blur flex items-center justify-center transition-transform active:scale-95"
+            className="w-11 h-11 rounded-full border border-model-ink/15 bg-model-surface/95 text-model-ink shadow-lg backdrop-blur flex items-center justify-center transition-transform active:scale-95 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white"
             title="Open on Instagram"
             aria-label="Open on Instagram"
           >
@@ -227,7 +268,7 @@ export default function ReelCard({
         {onToggleSound && (
           <button
             onClick={(e) => { e.stopPropagation(); onToggleSound && onToggleSound(); }}
-            className="w-11 h-11 rounded-full border border-model-ink/15 bg-model-sage/95 text-model-ink shadow-lg backdrop-blur flex items-center justify-center transition-transform active:scale-95"
+            className="w-11 h-11 rounded-full border border-model-ink/15 bg-model-sage/95 text-model-ink shadow-lg backdrop-blur flex items-center justify-center transition-transform active:scale-95 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white"
             title={soundOn ? 'Mute' : 'Unmute'}
             aria-label={soundOn ? 'Mute' : 'Unmute'}
           >

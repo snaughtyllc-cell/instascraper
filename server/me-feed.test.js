@@ -2,7 +2,7 @@
 const { test } = require('node:test');
 const assert = require('node:assert');
 const Database = require('better-sqlite3');
-const { buildMeFeedQuery, nicheVisibilityClause, parseNiches, visibilityOnlyClause, PLAYABLE_CLAUSE } = require('./me-feed');
+const { buildMeFeedQuery, nicheVisibilityClause, parseNiches, allowedNicheOptions, visibilityOnlyClause, PLAYABLE_CLAUSE } = require('./me-feed');
 
 // posts table with the columns the feed query now reads (incl. video playability).
 function makePostsDb() {
@@ -12,6 +12,9 @@ function makePostsDb() {
     soft_deleted INTEGER DEFAULT 0, archived INTEGER DEFAULT 0,
     video_url TEXT, video_url_refreshed_at TEXT, video_cache_status TEXT)`);
   sqlite.exec(`CREATE TABLE creator_types (account_handle TEXT, content_type TEXT)`);
+  sqlite.exec(`CREATE TABLE model_assigned_posts (model_id INTEGER, post_id INTEGER, status TEXT)`);
+  sqlite.exec(`CREATE TABLE model_post_feedback (model_id INTEGER, post_id INTEGER, feedback TEXT)`);
+  sqlite.exec(`CREATE TABLE model_saved_posts (model_id INTEGER, post_id INTEGER)`);
   return sqlite;
 }
 
@@ -43,8 +46,19 @@ test('parseNiches builds a flat list from primary + comma-separated secondary ni
     ['talking', 'dance', 'skit']
   );
   assert.deepStrictEqual(
+    parseNiches({ primary_niche: 'talking', secondary_niches: 'talking, dance' }),
+    ['talking', 'dance']
+  );
+  assert.deepStrictEqual(
     parseNiches({ primary_niche: 'talking' }),
     ['talking']
+  );
+});
+
+test('allowedNicheOptions returns only model niches with labels and a readable fallback', () => {
+  assert.deepStrictEqual(
+    allowedNicheOptions(['talking', 'photo-dump'], [{ value: 'talking', label: 'Talking' }, { value: 'dance', label: 'Dance' }]),
+    [{ value: 'talking', label: 'Talking' }, { value: 'photo-dump', label: 'Photo Dump' }]
   );
 });
 
@@ -71,6 +85,12 @@ test('buildMeFeedQuery shuffle mode orders by random for feed refresh', () => {
   assert.match(sql, /ORDER BY RANDOM\(\)/);
   assert.doesNotMatch(sql, /ORDER BY posts\.posted_at DESC/);
   assert.deepStrictEqual(params, ['talking', 24, 0]);
+});
+
+test('buildMeFeedQuery can fetch one extra row without skipping between 24-item pages', () => {
+  const { sql, params } = buildMeFeedQuery(['talking'], { page: 2, limit: 25, pageSize: 24 });
+  assert.match(sql, /LIMIT \$2 OFFSET \$3/);
+  assert.deepStrictEqual(params, ['talking', 25, 24]);
 });
 
 test('buildMeFeedQuery all:true builds a query with NO niche IN() clause but WITH archived/soft_deleted, and executes against sqlite returning ALL visible+cached posts across niches', () => {
@@ -110,4 +130,21 @@ test('the feed is cached-only: uncached reels are hidden even with a fresh raw U
   const { sql, params } = buildMeFeedQuery(['talking'], {});
   const rows = sqlite.prepare(sql.replace(/\$\d+/g, '?')).all(...params);
   assert.deepStrictEqual(rows.map(r => r.id), [1], 'only the cached reel is surfaced');
+});
+
+test('model feed excludes assigned, saved, and not-interested reels without hiding other models records', () => {
+  const sqlite = makePostsDb();
+  sqlite.prepare(`INSERT INTO posts (id, content_type, posted_at, video_cache_status) VALUES
+    (1,'talking','2026-07-04','cached'),
+    (2,'talking','2026-07-03','cached'),
+    (3,'talking','2026-07-02','cached'),
+    (4,'talking','2026-07-01','cached')`).run();
+  sqlite.prepare("INSERT INTO model_assigned_posts (model_id, post_id, status) VALUES (7,1,'assigned'), (8,4,'assigned')").run();
+  sqlite.prepare("INSERT INTO model_post_feedback (model_id, post_id, feedback) VALUES (7,2,'not_my_style'), (7,3,'want_to_make'), (8,4,'not_my_style')").run();
+  sqlite.prepare('INSERT INTO model_saved_posts (model_id, post_id) VALUES (7,3), (8,4)').run();
+
+  const { sql, params } = buildMeFeedQuery(['talking'], { modelId: 7, limit: 24 });
+  const rows = sqlite.prepare(sql.replace(/\$\d+/g, '?')).all(...params);
+  assert.deepStrictEqual(rows.map((row) => row.id), [4]);
+  assert.deepStrictEqual(params, ['talking', 7, 7, 7, 24, 0]);
 });

@@ -2,8 +2,16 @@
 // [R2-#2] parseNiches lives HERE (Task 5) — the /me/feed route uses it immediately, and
 // /me/saves (Task 6) reuses it. One definition, one import site.
 function parseNiches(modelRow = {}) {
-  return [modelRow.primary_niche, ...String(modelRow.secondary_niches || '').split(',')]
-    .map(s => (s || '').trim()).filter(Boolean);
+  return [...new Set([modelRow.primary_niche, ...String(modelRow.secondary_niches || '').split(',')]
+    .map(s => (s || '').trim()).filter(Boolean))];
+}
+
+function allowedNicheOptions(niches, contentTypes) {
+  const labels = new Map((Array.isArray(contentTypes) ? contentTypes : []).map((row) => [row.value, row.label]));
+  return [...new Set(Array.isArray(niches) ? niches : [])].filter(Boolean).map((value) => ({
+    value,
+    label: labels.get(value) || value.split('-').map((word) => word ? word[0].toUpperCase() + word.slice(1) : '').join(' '),
+  }));
 }
 
 function nicheVisibilityClause(niches, startIdx = 1) {
@@ -31,7 +39,7 @@ function visibilityOnlyClause() {
 // of showing reels that only *might* play. No placeholder — a bare status check.
 const PLAYABLE_CLAUSE = `posts.video_cache_status = 'cached'`;
 
-function buildMeFeedQuery(niches, { page = 1, limit = 24, all = false, shuffle = false } = {}) {
+function buildMeFeedQuery(niches, { page = 1, limit = 24, pageSize = limit, all = false, shuffle = false, modelId = null } = {}) {
   let clause, params;
   if (all) {
     clause = visibilityOnlyClause(); params = [];
@@ -40,15 +48,38 @@ function buildMeFeedQuery(niches, { page = 1, limit = 24, all = false, shuffle =
     if (!clause) return { sql: null, params: [] };
   }
 
-  const offset = (Math.max(1, Number(page)) - 1) * limit;
+  let modelClause = '';
+  if (Number.isSafeInteger(Number(modelId)) && Number(modelId) > 0) {
+    const assignmentModelIdx = params.length + 1;
+    params.push(Number(modelId));
+    const feedbackModelIdx = params.length + 1;
+    params.push(Number(modelId));
+    const savedModelIdx = params.length + 1;
+    params.push(Number(modelId));
+    modelClause = `
+      AND NOT EXISTS (
+        SELECT 1 FROM model_assigned_posts a
+        WHERE a.model_id = $${assignmentModelIdx} AND a.post_id = posts.id AND a.status = 'assigned'
+      )
+      AND NOT EXISTS (
+        SELECT 1 FROM model_post_feedback f
+        WHERE f.model_id = $${feedbackModelIdx} AND f.post_id = posts.id AND f.feedback = 'not_my_style'
+      )
+      AND NOT EXISTS (
+        SELECT 1 FROM model_saved_posts s
+        WHERE s.model_id = $${savedModelIdx} AND s.post_id = posts.id
+      )`;
+  }
+
+  const offset = (Math.max(1, Number(page)) - 1) * pageSize;
   const limIdx = params.length + 1, offIdx = params.length + 2;
   const sql = `
     SELECT posts.*, COALESCE(posts.content_type, ct.content_type) AS niche
     FROM posts
     LEFT JOIN creator_types ct ON posts.account_handle = ct.account_handle
-    WHERE ${clause} AND ${PLAYABLE_CLAUSE}
+    WHERE ${clause} AND ${PLAYABLE_CLAUSE}${modelClause}
     ORDER BY ${shuffle ? 'RANDOM()' : 'posts.posted_at DESC'}
     LIMIT $${limIdx} OFFSET $${offIdx}`;
   return { sql, params: [...params, limit, offset] };
 }
-module.exports = { buildMeFeedQuery, nicheVisibilityClause, parseNiches, visibilityOnlyClause, PLAYABLE_CLAUSE };
+module.exports = { buildMeFeedQuery, nicheVisibilityClause, parseNiches, allowedNicheOptions, visibilityOnlyClause, PLAYABLE_CLAUSE };

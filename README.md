@@ -66,7 +66,7 @@ pm2 save && pm2 startup
 
 1. Push to GitHub
 2. Connect repo on Railway or Render
-3. Set env vars: `APIFY_API_KEY`, `AUTH_PASSWORD`, `SESSION_SECRET`, `PORT=4000`, `NODE_ENV=production`
+3. Set env vars: `DATABASE_URL`, `APIFY_API_KEY`, `AUTH_PASSWORD`, `SESSION_SECRET`, `PORT=4000`, `NODE_ENV=production`
 4. Build command: `npm run install:all && npm run build`
 5. Start command: `npm run production`
 
@@ -77,12 +77,16 @@ pm2 save && pm2 startup
 | `APIFY_API_KEY` | Yes | Your Apify API key for Instagram scraping |
 | `AUTH_PASSWORD` | Yes | Shared team password for login (≥8 chars, not a common value) |
 | `SESSION_SECRET` | Yes | Random string for session encryption (≥16 chars) |
+| `DATABASE_URL` | Production | PostgreSQL connection used for app data and durable login sessions |
 | `PORT` | No | Server port (default: 4000) |
+| `CORS_ORIGINS` | No | Comma-separated additional browser origins; same-origin is allowed automatically |
+| `SENTRY_DSN` | No | Server-side Sentry error reporting |
+| `REACT_APP_SENTRY_DSN` | No | Client-side Sentry DSN, supplied at client build time |
 
 > **Production security:** when `NODE_ENV=production`, the server refuses to boot
-> if `SESSION_SECRET` is missing/short/the dev default, or if `AUTH_PASSWORD` is
-> missing/weak. Set strong values before deploying, and rotate any key that has
-> ever been shared or committed.
+> without `DATABASE_URL`, if `SESSION_SECRET` is missing/short/the dev default,
+> or if `AUTH_PASSWORD` is missing/weak. Set strong values before deploying, and
+> rotate any key that has ever been shared or committed.
 
 ## Features
 

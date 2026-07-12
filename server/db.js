@@ -49,6 +49,20 @@ if (USE_PG) {
   db = {
     query: (sql, params) => pool.query(sql, params),
     _pool: pool,
+    transaction: async (work) => {
+      const client = await pool.connect();
+      try {
+        await client.query('BEGIN');
+        const result = await work({ query: (sql, params) => client.query(sql, params) });
+        await client.query('COMMIT');
+        return result;
+      } catch (error) {
+        await client.query('ROLLBACK');
+        throw error;
+      } finally {
+        client.release();
+      }
+    },
   };
 } else {
   // SQLite (local dev)
@@ -112,6 +126,17 @@ if (USE_PG) {
         throw e;
       }
     },
+  };
+  db.transaction = async (work) => {
+    sqlite.exec('BEGIN');
+    try {
+      const result = await work(db);
+      sqlite.exec('COMMIT');
+      return result;
+    } catch (error) {
+      sqlite.exec('ROLLBACK');
+      throw error;
+    }
   };
 }
 

@@ -1,7 +1,7 @@
 // server/auth.test.js
 const { test } = require('node:test');
 const assert = require('node:assert');
-const { hashPassword, verifyPassword, resolveLogin, LoginThrottle } = require('./auth');
+const { hashPassword, verifyPassword, resolveLogin, modelAccessErrorStatus, LoginThrottle } = require('./auth');
 
 test('hash/verify round-trips and rejects wrong password', () => {
   const h = hashPassword('s3cret!');
@@ -37,6 +37,13 @@ test('resolveLogin: a stored role=admin on a model row does NOT grant admin [R1-
   assert.deepStrictEqual(r, { ok: true, user: { id: 9, role: 'model', modelId: 9 } });
 });
 
+test('model access distinguishes an expired session from a disabled or wrong-role account', () => {
+  assert.strictEqual(modelAccessErrorStatus(null, { authEnabled: true }), 401);
+  assert.strictEqual(modelAccessErrorStatus(null, { authEnabled: false }), 403);
+  assert.strictEqual(modelAccessErrorStatus({ role: 'admin', modelId: null }, { authEnabled: true }), 403);
+  assert.strictEqual(modelAccessErrorStatus({ role: 'model', modelId: 7 }, { authEnabled: true }), null);
+});
+
 test('LoginThrottle blocks after max failures and resets', () => {
   const t = new LoginThrottle({ max: 2, windowMs: 60000, now: () => 1000 });
   assert.strictEqual(t.check('a').blocked, false);
@@ -44,4 +51,11 @@ test('LoginThrottle blocks after max failures and resets', () => {
   assert.strictEqual(t.check('a').blocked, true);
   t.reset('a');
   assert.strictEqual(t.check('a').blocked, false);
+});
+
+test('LoginThrottle bounds random-email memory growth', () => {
+  const throttle = new LoginThrottle({ maxEntries: 3 });
+  for (const key of ['a', 'b', 'c', 'd', 'e']) throttle.fail(key);
+  assert.ok(throttle.hits.size <= 3);
+  assert.ok(throttle.hits.has('e'));
 });

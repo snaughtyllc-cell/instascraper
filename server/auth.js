@@ -19,9 +19,15 @@ function resolveLogin({ email, password } = {}, ctx = {}) {
   return { ok: false, error: 'Invalid credentials' };
 }
 
+function modelAccessErrorStatus(user, { authEnabled = false } = {}) {
+  if (!user) return authEnabled ? 401 : 403;
+  if (user.role !== 'model' || !user.modelId) return 403;
+  return null;
+}
+
 class LoginThrottle {
-  constructor({ max = 5, windowMs = 15 * 60000, now = () => Date.now() } = {}) {
-    this.max = max; this.windowMs = windowMs; this.now = now; this.hits = new Map();
+  constructor({ max = 5, windowMs = 15 * 60000, maxEntries = 5000, now = () => Date.now() } = {}) {
+    this.max = max; this.windowMs = windowMs; this.maxEntries = maxEntries; this.now = now; this.hits = new Map();
   }
   _fresh(key) {
     const e = this.hits.get(key);
@@ -34,10 +40,17 @@ class LoginThrottle {
     return { blocked: false, retryInSec: 0 };
   }
   fail(key) {
+    if (!this.hits.has(key) && this.hits.size >= this.maxEntries) {
+      const now = this.now();
+      for (const [candidate, entry] of this.hits) {
+        if (now - entry.first > this.windowMs) this.hits.delete(candidate);
+      }
+      while (this.hits.size >= this.maxEntries) this.hits.delete(this.hits.keys().next().value);
+    }
     const e = this._fresh(key) || { count: 0, first: this.now() };
     e.count += 1; this.hits.set(key, e);
   }
   reset(key) { this.hits.delete(key); }
 }
 
-module.exports = { hashPassword, verifyPassword, resolveLogin, LoginThrottle };
+module.exports = { hashPassword, verifyPassword, resolveLogin, modelAccessErrorStatus, LoginThrottle };

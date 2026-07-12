@@ -95,6 +95,9 @@ export default function ModelsTab() {
 
   const handleSubmit = async (e) => {
     e.preventDefault();
+    if (form.login_enabled && !form.email.trim()) return alert('Email is required when model login is enabled.');
+    if (form.login_enabled && !editingId && !form.password) return alert('Set a temporary password before enabling model login.');
+    if (form.password && form.password.length < 8) return alert('Model passwords must be at least 8 characters.');
     try {
       if (editingId) {
         await updateModel(editingId, form);
@@ -273,6 +276,8 @@ export default function ModelsTab() {
                 <input
                   type="email" value={form.email}
                   onChange={e => setForm({ ...form, email: e.target.value })}
+                  required={form.login_enabled}
+                  autoComplete="off"
                   className="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-white focus:border-gold focus:outline-none"
                   placeholder="Email (for model login)"
                 />
@@ -282,10 +287,13 @@ export default function ModelsTab() {
                 <input
                   type="password" value={form.password}
                   onChange={e => setForm({ ...form, password: e.target.value })}
+                  required={form.login_enabled && !editingId}
+                  minLength={8}
                   className="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-white focus:border-gold focus:outline-none"
-                  placeholder="Set / reset password — blank keeps current"
+                  placeholder="Set / reset password; blank keeps current"
                   autoComplete="new-password"
                 />
+                <p className="mt-1 text-xs text-gray-500">At least 8 characters.</p>
               </div>
             </div>
             <label className="flex items-center gap-2 mt-3 text-sm text-gray-400">

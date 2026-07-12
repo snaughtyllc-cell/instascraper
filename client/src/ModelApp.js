@@ -1,4 +1,4 @@
-import React, { useLayoutEffect, useRef, useState } from 'react';
+import React, { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import FeedPage from './pages/model/FeedPage';
 import SoundsPage from './pages/model/SoundsPage';
 import SavedPage from './pages/model/SavedPage';
@@ -51,7 +51,14 @@ const TABS = [
 ];
 
 export default function ModelApp({ onLogout }) {
-  const [tab, setTab] = useState('feed');
+  const [tab, setTab] = useState(() => {
+    try {
+      const saved = window.sessionStorage.getItem('instascraper:model-tab');
+      return TABS.some((item) => item.id === saved) ? saved : 'feed';
+    } catch {
+      return 'feed';
+    }
+  });
   const tabRef = useRef(tab);
   const scrollByTabRef = useRef({ feed: 0, sounds: 0, saved: 0, ideas: 0 });
   const pendingScrollTabRef = useRef(null);
@@ -60,6 +67,10 @@ export default function ModelApp({ onLogout }) {
     if (pendingScrollTabRef.current !== tab) return;
     window.scrollTo({ top: scrollByTabRef.current[tab] || 0, behavior: 'auto' });
     pendingScrollTabRef.current = null;
+  }, [tab]);
+
+  useEffect(() => {
+    try { window.sessionStorage.setItem('instascraper:model-tab', tab); } catch { /* storage may be unavailable */ }
   }, [tab]);
 
   const switchTab = (nextTab) => {
@@ -82,7 +93,7 @@ export default function ModelApp({ onLogout }) {
       <header className="sticky top-0 z-40 border-b border-model-line/80 bg-model-surface/95 backdrop-blur-xl">
         <div className="max-w-xl mx-auto px-4 pt-[max(14px,env(safe-area-inset-top))] pb-3 flex items-center justify-between">
           <div className="min-w-0">
-            <p className="text-[10px] font-extrabold uppercase tracking-[0.16em] text-model-coral">{pageMeta.eyebrow}</p>
+            <p className="text-[11px] font-extrabold uppercase tracking-[0.16em] text-model-coral-ink">{pageMeta.eyebrow}</p>
             <h1 className="mt-0.5 text-[25px] leading-none font-black text-model-ink">{pageMeta.title}</h1>
           </div>
           <button
@@ -103,16 +114,16 @@ export default function ModelApp({ onLogout }) {
       <main className="flex-1 pb-24">
         <div className="max-w-xl mx-auto">
           <section className={tab === 'feed' ? 'block' : 'hidden'} aria-hidden={tab !== 'feed'}>
-            <FeedPage />
+            <FeedPage active={tab === 'feed'} />
           </section>
           <section className={tab === 'sounds' ? 'block' : 'hidden'} aria-hidden={tab !== 'sounds'}>
-            <SoundsPage />
+            <SoundsPage active={tab === 'sounds'} />
           </section>
           <section className={tab === 'saved' ? 'block' : 'hidden'} aria-hidden={tab !== 'saved'}>
-            <SavedPage />
+            <SavedPage active={tab === 'saved'} onExplore={() => switchTab('feed')} />
           </section>
           <section className={tab === 'ideas' ? 'block' : 'hidden'} aria-hidden={tab !== 'ideas'}>
-            <IdeasPage />
+            <IdeasPage active={tab === 'ideas'} />
           </section>
         </div>
       </main>
@@ -125,7 +136,7 @@ export default function ModelApp({ onLogout }) {
               <button
                 key={t.id}
                 onClick={() => switchTab(t.id)}
-                className={`flex min-w-0 flex-col items-center justify-center gap-1 py-2 min-h-[62px] transition-colors focus:outline-none ${
+                className={`flex min-w-0 flex-col items-center justify-center gap-1 py-2 min-h-[62px] transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-model-coral/50 ${
                   active ? 'text-model-ink' : 'text-model-muted hover:text-model-ink'
                 }`}
                 aria-current={active ? 'page' : undefined}
@@ -133,7 +144,7 @@ export default function ModelApp({ onLogout }) {
                 <span className={`h-7 min-w-[34px] px-2 flex items-center justify-center rounded-full transition-colors ${active ? 'bg-model-butter ring-1 ring-model-ink/15' : ''}`}>
                   {t.icon(active)}
                 </span>
-                <span className={`text-[10px] leading-none ${active ? 'font-bold' : 'font-medium'}`}>{t.label}</span>
+                <span className={`text-[11px] leading-none ${active ? 'font-bold' : 'font-medium'}`}>{t.label}</span>
               </button>
             );
           })}

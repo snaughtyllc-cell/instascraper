@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { getMyTrendingAudio } from '../../api';
 import IdeaReel from '../../components/IdeaReel';
 
@@ -21,27 +21,39 @@ function formatCount(value) {
   return String(count);
 }
 
-export default function SoundsPage() {
+export default function SoundsPage({ active = true }) {
   const [audio, setAudio] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
+  const [refreshError, setRefreshError] = useState('');
   const [filter, setFilter] = useState('all');
+  const [activePreview, setActivePreview] = useState(null);
+  const hasLoadedRef = useRef(false);
 
   const load = useCallback(async () => {
-    setLoading(true);
+    if (!hasLoadedRef.current) setLoading(true);
     setError('');
+    setRefreshError('');
     try {
       const { data } = await getMyTrendingAudio();
       setAudio(data.audio || []);
+      hasLoadedRef.current = true;
     } catch (err) {
       console.error('Failed to load trending audio:', err);
-      setError(err.response?.data?.error || 'We could not load your trending sounds.');
+      const message = err.code === 'ECONNABORTED'
+        ? 'This is taking longer than expected. Try again.'
+        : err.response?.data?.error || 'We could not load your trending sounds.';
+      if (hasLoadedRef.current) setRefreshError(message);
+      else setError(message);
     } finally {
       setLoading(false);
     }
   }, []);
 
-  useEffect(() => { load(); }, [load]);
+  useEffect(() => {
+    if (active) load();
+    else setActivePreview(null);
+  }, [active, load]);
 
   const visibleAudio = audio.filter((sound) => {
     if (filter === 'original') return Boolean(sound.is_original_audio);
@@ -58,6 +70,11 @@ export default function SoundsPage() {
   return (
     <div className="min-h-[calc(100vh-9rem)] bg-model-canvas text-model-ink">
       <div className="mx-auto max-w-xl px-3 pb-6 pt-4 sm:px-4">
+        {refreshError && (
+          <div className="mb-3 rounded-lg border border-red-200 bg-red-50 px-3 py-2.5 text-sm font-medium text-red-800" role="alert">
+            {refreshError}
+          </div>
+        )}
         <header className="mb-4">
           <div className="flex items-end justify-between gap-4 px-1">
             <div className="min-w-0">
@@ -215,6 +232,9 @@ export default function SoundsPage() {
                           <IdeaReel
                             key={`${soundKey}-${reel.id ?? reel.shortcode ?? reelIndex}`}
                             reel={reel}
+                            active={activePreview === `${soundKey}-${reel.id ?? reel.shortcode ?? reelIndex}`}
+                            onPlay={() => setActivePreview(`${soundKey}-${reel.id ?? reel.shortcode ?? reelIndex}`)}
+                            pageActive={active}
                           />
                         ))}
                       </div>

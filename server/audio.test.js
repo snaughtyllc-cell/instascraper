@@ -80,8 +80,9 @@ test('buildTrendingAudioQuery niche-scoped: only reels in the niche counted', ()
 
 test('buildAudioReelsQuery returns reels for one audio, ordered by views', () => {
   const db = makeDb();
-  db.sqlite.prepare(`INSERT INTO posts (id, account_handle, posted_at, view_count, audio_id) VALUES
-    (1,'a','${daysAgo(1)}',100,'A'),(2,'b','${daysAgo(1)}',900,'A'),(3,'c','${daysAgo(1)}',50,'B')`).run();
+  db.sqlite.prepare(`INSERT INTO posts (id, account_handle, posted_at, view_count, audio_id, video_cache_status) VALUES
+    (1,'a','${daysAgo(1)}',100,'A','cached'),(2,'b','${daysAgo(1)}',900,'A','cached'),
+    (3,'c','${daysAgo(1)}',50,'B','cached'),(4,'d','${daysAgo(1)}',9999,'A','pending')`).run();
   const { sql, params } = buildAudioReelsQuery('A', [], { all: true, limit: 12 });
   const rows = db.query(sql, params).rows;
   assert.deepStrictEqual(rows.map(r => r.id), [2, 1], 'only audio A, highest views first');
@@ -89,12 +90,12 @@ test('buildAudioReelsQuery returns reels for one audio, ordered by views', () =>
 
 test('trendingAudio end-to-end: ranks by score and attaches example reels', async () => {
   const db = makeDb();
-  db.sqlite.prepare(`INSERT INTO posts (id, shortcode, account_handle, posted_at, view_count, audio_id, audio_title, audio_author) VALUES
-    (1,'s1','a','${daysAgo(1)}',1000,'HOT','Viral Sound','DJ X'),
-    (2,'s2','b','${daysAgo(1)}',2000,'HOT','Viral Sound','DJ X'),
-    (3,'s3','c','${daysAgo(1)}',3000,'HOT','Viral Sound','DJ X'),
-    (4,'s4','a','${daysAgo(2)}',500,'MILD','Okay Sound','DJ Y'),
-    (5,'s5','a','${daysAgo(2)}',400,'MILD','Okay Sound','DJ Y')`).run();
+  db.sqlite.prepare(`INSERT INTO posts (id, shortcode, account_handle, posted_at, view_count, audio_id, audio_title, audio_author, video_cache_status) VALUES
+    (1,'s1','a','${daysAgo(1)}',1000,'HOT','Viral Sound','DJ X','cached'),
+    (2,'s2','b','${daysAgo(1)}',2000,'HOT','Viral Sound','DJ X','cached'),
+    (3,'s3','c','${daysAgo(1)}',3000,'HOT','Viral Sound','DJ X','cached'),
+    (4,'s4','a','${daysAgo(2)}',500,'MILD','Okay Sound','DJ Y','cached'),
+    (5,'s5','a','${daysAgo(2)}',400,'MILD','Okay Sound','DJ Y','cached')`).run();
   const out = await trendingAudio(db, { all: true, nowMs: NOW, examples: 2 });
   assert.strictEqual(out.length, 2);
   assert.strictEqual(out[0].audio_id, 'HOT', 'HOT (3 creators) ranks above MILD (1 creator)');
@@ -107,10 +108,10 @@ test('trendingAudio end-to-end: ranks by score and attaches example reels', asyn
 
 test('trendingAudio niche-scoped: aggregation AND example reels stay within the niche', async () => {
   const db = makeDb();
-  db.sqlite.prepare(`INSERT INTO posts (id, shortcode, account_handle, posted_at, view_count, audio_id, audio_title, content_type) VALUES
-    (1,'s1','a','${daysAgo(1)}',100,'A','Song A','talking'),
-    (2,'s2','b','${daysAgo(1)}',200,'A','Song A','talking'),
-    (3,'s3','c','${daysAgo(1)}',9999,'A','Song A','dance')`).run();
+  db.sqlite.prepare(`INSERT INTO posts (id, shortcode, account_handle, posted_at, view_count, audio_id, audio_title, content_type, video_cache_status) VALUES
+    (1,'s1','a','${daysAgo(1)}',100,'A','Song A','talking','cached'),
+    (2,'s2','b','${daysAgo(1)}',200,'A','Song A','talking','cached'),
+    (3,'s3','c','${daysAgo(1)}',9999,'A','Song A','dance','cached')`).run();
   const out = await trendingAudio(db, { niches: ['talking'], nowMs: NOW, examples: 3 });
   assert.strictEqual(out.length, 1);
   assert.strictEqual(out[0].reel_count, 2, 'dance reel excluded from the count');

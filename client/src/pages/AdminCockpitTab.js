@@ -212,6 +212,7 @@ function ActionQueueRow({ item }) {
               {FEEDBACK_LABELS[item.feedback]}
             </span>
             {item.content_type && <span className="rounded bg-gray-800 px-2 py-0.5 text-xs text-gray-400">{item.content_type}</span>}
+            {item.source === 'discovery' && <span className="rounded bg-emerald-900/40 px-2 py-0.5 text-xs text-emerald-300">From feed</span>}
             {item.view_count ? <span className="text-xs text-gray-500">{num(item.view_count)} views</span> : null}
           </div>
           <p className="mt-1 truncate text-xs text-gray-400">

@@ -1,14 +1,9 @@
-FROM node:20-slim
+FROM node:20-slim AS client-build
 
 WORKDIR /app
 
-# Install server deps
-COPY server/package*.json ./server/
-RUN cd server && npm install --legacy-peer-deps --omit=dev
-
-# Install client deps + build
 COPY client/package*.json ./client/
-ARG REACT_APP_API_URL=https://instascraper-production-7281.up.railway.app
+ARG REACT_APP_API_URL=
 ENV REACT_APP_API_URL=$REACT_APP_API_URL
 # Frontend Sentry DSN must be present at BUILD time (CRA inlines REACT_APP_* into
 # the bundle). A frontend DSN is public by design — it ships in the client JS and
@@ -20,10 +15,17 @@ RUN cd client && npm install --legacy-peer-deps
 COPY client/ ./client/
 RUN cd client && npm run build
 
-# Copy server code
-COPY server/ ./server/
+FROM node:20-slim
 
-# Copy root files
+WORKDIR /app
+
+# The runtime image gets only server dependencies and compiled client assets;
+# Create React App's legacy build/test toolchain stays in the build stage.
+COPY server/package*.json ./server/
+RUN cd server && npm install --legacy-peer-deps --omit=dev
+COPY server/ ./server/
+COPY --from=client-build /app/client/build ./client/build
+
 COPY .env.example ./
 
 EXPOSE 4000

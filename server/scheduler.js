@@ -344,8 +344,9 @@ async function runIdeaGeneration() {
         generated++;
         if (result.batchId && result.ideaCount > 0 && model.delivery_contact) {
           try {
-            await deliverBatch(model.id, result.batchId);
-            delivered++;
+            const delivery = await deliverBatch(model.id, result.batchId);
+            if (delivery.status === 'sent') delivered++;
+            else console.error(`[Scheduler] Delivery failed for ${model.name}:`, delivery.error || delivery.status);
           } catch (delErr) { console.error(`[Scheduler] Delivery failed for ${model.name}:`, delErr.message); }
         }
       } catch (err) { console.error(`[Scheduler] Idea gen failed for ${model.name}:`, err.message); }

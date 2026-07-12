@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { getMyIdeas } from '../../api';
 import IdeaReel from '../../components/IdeaReel';
 
@@ -7,28 +7,49 @@ function formatDate(d) {
   return new Date(d).toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
 }
 
-export default function IdeasPage() {
+function requestError(err, fallback) {
+  if (err.code === 'ECONNABORTED') return 'This is taking longer than expected. Try again.';
+  return err.response?.data?.error || fallback;
+}
+
+export default function IdeasPage({ active = true }) {
   const [ideas, setIdeas] = useState([]);
-  const [loading, setLoading] = useState(false);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState('');
+  const [refreshError, setRefreshError] = useState('');
+  const [activePreview, setActivePreview] = useState(null);
+  const hasLoadedRef = useRef(false);
 
   const loadIdeas = useCallback(async () => {
-    setLoading(true);
+    if (!hasLoadedRef.current) setLoading(true);
+    setError('');
+    setRefreshError('');
     try {
       const { data } = await getMyIdeas();
       setIdeas(data.ideas || []);
+      hasLoadedRef.current = true;
     } catch (err) {
       console.error('Failed to load ideas:', err);
+      const message = requestError(err, 'We could not load your ideas.');
+      if (hasLoadedRef.current) setRefreshError(message);
+      else setError(message);
     } finally {
       setLoading(false);
     }
   }, []);
 
   useEffect(() => {
-    loadIdeas();
-  }, [loadIdeas]);
+    if (active) loadIdeas();
+    else setActivePreview(null);
+  }, [active, loadIdeas]);
 
   return (
     <div className="px-3 py-3 space-y-3">
+      {refreshError && (
+        <div className="rounded-lg border border-red-200 bg-red-50 px-3 py-2.5 text-sm font-medium text-red-800" role="alert">
+          {refreshError}
+        </div>
+      )}
       {loading ? (
         <div className="flex items-center justify-center py-20 text-model-muted">
           <svg className="w-6 h-6 animate-spin mr-2" viewBox="0 0 24 24" fill="none">
@@ -36,6 +57,14 @@ export default function IdeasPage() {
             <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v4a4 4 0 00-4 4H4z" />
           </svg>
           Loading…
+        </div>
+      ) : error ? (
+        <div className="rounded-lg border border-red-200 bg-red-50 px-6 py-12 text-center" role="alert">
+          <p className="text-base font-bold text-model-ink">Ideas did not load</p>
+          <p className="mt-1.5 text-sm text-model-muted">{error}</p>
+          <button type="button" onClick={loadIdeas} className="mt-4 min-h-[44px] rounded-lg bg-model-ink px-5 text-sm font-bold text-white">
+            Try again
+          </button>
         </div>
       ) : ideas.length === 0 ? (
         <div className="rounded-lg border border-model-line bg-model-surface px-6 py-16 text-center shadow-sm">
@@ -77,9 +106,18 @@ export default function IdeasPage() {
               <div className="mt-3.5">
                 <p className="mb-2 text-[10px] font-extrabold uppercase tracking-[0.12em] text-model-muted">Reels that inspired this</p>
                 <div className="grid grid-cols-2 gap-2.5">
-                  {idea.sourceReels.slice(0, 4).map((reel) => (
-                    <IdeaReel key={`${idea.id}-${reel.id ?? reel.shortcode}`} reel={reel} />
-                  ))}
+                  {idea.sourceReels.slice(0, 4).map((reel) => {
+                    const previewKey = `${idea.id}-${reel.id ?? reel.shortcode}`;
+                    return (
+                      <IdeaReel
+                        key={previewKey}
+                        reel={reel}
+                        active={activePreview === previewKey}
+                        onPlay={() => setActivePreview(previewKey)}
+                        pageActive={active}
+                      />
+                    );
+                  })}
                 </div>
               </div>
             )}

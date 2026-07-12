@@ -4,6 +4,7 @@ const Sentry = require('@sentry/node');
 const express = require('express');
 const cors = require('cors');
 const session = require('express-session');
+const PgSession = require('connect-pg-simple')(session);
 const bcrypt = require('bcryptjs');
 const path = require('path');
 const fs = require('fs');
@@ -24,9 +25,13 @@ const { videoFilePath, DEFAULT_VIDEO_DIR } = require('./videos');
 const { buildBulkUpdate } = require('./content-bulk');
 const { calcViewER, engagementLabel, enrichViewsVsMedian, medianViewsByAccount } = require('./engagement-metrics');
 const { validateTypeLabel } = require('./content-types');
-const { buildCredentialFields, MODEL_WRITE_FIELDS, buildModelWriteColumns, buildModelInsert, buildModelUpdate, isDuplicateEmailError } = require('./model-credentials');
+const { buildCredentialFields, validateModelCredentials, modelCredentialsChanged, MODEL_WRITE_FIELDS, buildModelWriteColumns, buildModelInsert, buildModelUpdate, isDuplicateEmailError } = require('./model-credentials');
+const { corsOptionsForRequest, browserSecurityHeaders } = require('./security');
+const { MODEL_ASSIGNMENT_FIELDS, toModelPosts } = require('./model-post');
+const { applyModelReaction, upsertFeedback } = require('./model-reactions');
 
 const app = express();
+app.disable('x-powered-by');
 // Trust the first proxy hop (Railway) so req.ip is the real client IP, not the
 // proxy's. The login throttle keys on req.ip; without this, all clients collapse
 // to one bucket and the admin-login key degrades to a single global bucket an
@@ -53,6 +58,9 @@ const WEAK_PASSWORDS = new Set(['test123', 'password', 'admin', 'changeme', 'ins
 function checkProdSecrets(env = process.env) {
   if (env.NODE_ENV !== 'production') return [];
   const problems = [];
+  if (!env.DATABASE_URL) {
+    problems.push('DATABASE_URL is missing - production requires PostgreSQL for durable sessions and app data.');
+  }
   const secret = env.SESSION_SECRET || '';
   if (!secret || secret === DEV_SESSION_SECRET) {
     problems.push('SESSION_SECRET is missing or still the dev default — set a long random string.');
@@ -68,36 +76,86 @@ function checkProdSecrets(env = process.env) {
   return problems;
 }
 
-app.use(cors({ origin: true, credentials: true }));
+app.use(cors((req, callback) => callback(null, corsOptionsForRequest(req))));
+app.use(browserSecurityHeaders);
 app.use(express.json());
 
-app.use(session({
+const SESSION_COOKIE_NAME = 'instascraper.sid';
+const sessionOptions = {
+  name: SESSION_COOKIE_NAME,
   secret: process.env.SESSION_SECRET || DEV_SESSION_SECRET,
   resave: false,
   saveUninitialized: false,
+  rolling: true,
   cookie: {
-    secure: IS_PROD && process.env.FORCE_HTTPS === 'true',
+    secure: IS_PROD,
     httpOnly: true,
+    sameSite: 'lax',
     maxAge: 7 * 24 * 60 * 60 * 1000,
   },
-}));
+};
+if (pool._pool) {
+  sessionOptions.store = new PgSession({
+    pool: pool._pool,
+    createTableIfMissing: true,
+    pruneSessionInterval: 15 * 60,
+  });
+}
+app.use(session(sessionOptions));
 
 app.get('/live', health.liveHandler);
 app.get('/ready', health.readyHandler());
 
-const { resolveLogin, LoginThrottle } = require('./auth');
+const { resolveLogin, modelAccessErrorStatus, LoginThrottle } = require('./auth');
 const loginThrottle = new LoginThrottle({ max: 5, windowMs: 15 * 60000 });
 
-app.get('/auth/check', (req, res) => {
+function destroySession(req) {
+  return new Promise((resolve) => {
+    if (!req.session) return resolve();
+    req.session.destroy(() => resolve());
+  });
+}
+
+function establishSession(req, user) {
+  return new Promise((resolve, reject) => {
+    req.session.regenerate((regenerateError) => {
+      if (regenerateError) return reject(regenerateError);
+      req.session.user = user;
+      req.session.save((saveError) => saveError ? reject(saveError) : resolve());
+    });
+  });
+}
+
+async function activeSessionUser(req) {
+  const user = req.session && req.session.user;
+  if (!user) return null;
+  if (user.role === 'admin') return user;
+  if (user.role !== 'model' || !user.modelId) return null;
+  const result = await pool.query('SELECT status, login_enabled FROM models WHERE id = $1', [user.modelId]);
+  const model = result.rows[0];
+  return model && model.status === 'active' && model.login_enabled ? user : null;
+}
+
+async function revokeModelSessions(modelId) {
+  if (!pool._pool) return;
+  await pool.query(
+    `DELETE FROM "session"
+      WHERE sess->'user'->>'role' = 'model'
+        AND sess->'user'->>'modelId' = $1`,
+    [String(modelId)]);
+}
+
+app.get('/auth/check', async (req, res) => {
   if (!passwordHash) return res.json({ authenticated: true, authRequired: false, role: 'admin', modelId: null });
-  const u = req.session.user;
+  const u = await activeSessionUser(req);
+  if (!u && req.session?.user) await destroySession(req);
   res.json({ authenticated: !!u, authRequired: true, role: u ? u.role : null, modelId: u ? u.modelId : null });
 });
 
 app.post('/login', async (req, res) => {
   const { email, password } = req.body || {};
   if (!passwordHash) { // auth disabled (dev) → admin
-    req.session.user = { id: 0, role: 'admin', modelId: null };
+    await establishSession(req, { id: 0, role: 'admin', modelId: null });
     return res.json({ success: true, role: 'admin' });
   }
   const key = (email ? String(email).toLowerCase() : 'admin') + '|' + (req.ip || '');
@@ -112,42 +170,47 @@ app.post('/login', async (req, res) => {
   const out = resolveLogin({ email, password }, { adminPasswordHash: passwordHash, models });
   if (!out.ok) { loginThrottle.fail(key); return res.status(401).json({ error: 'Invalid credentials' }); }
   loginThrottle.reset(key);
-  req.session.user = out.user;
+  await establishSession(req, out.user);
   res.json({ success: true, role: out.user.role });
 });
 
-app.post('/logout', (req, res) => { req.session.destroy(() => res.json({ success: true })); });
+app.post('/logout', async (req, res) => {
+  await destroySession(req);
+  res.clearCookie(SESSION_COOKIE_NAME, { path: '/', sameSite: 'lax', secure: IS_PROD });
+  res.json({ success: true });
+});
 
-function requireAuth(req, res, next) {
+const requireAuth = asyncHandler(async (req, res, next) => {
   if (!passwordHash) return next();
   if (API_KEY && req.headers['x-api-key'] === API_KEY) return next();
-  if (req.session && req.session.user) return next();
+  const user = await activeSessionUser(req);
+  if (user) return next();
+  if (req.session?.user) await destroySession(req);
   res.status(401).json({ error: 'Not authenticated' });
-}
+});
 function requireAdmin(req, res, next) {
   if (!passwordHash) return next();
   if (API_KEY && req.headers['x-api-key'] === API_KEY) return next();
   if (req.session && req.session.user && req.session.user.role === 'admin') return next();
   res.status(403).json({ error: 'Admin only' });
 }
-async function requireModel(req, res, next) {
+const requireModel = asyncHandler(async (req, res, next) => {
   const u = req.session && req.session.user;
-  if (!u || u.role !== 'model' || !u.modelId) {
-    // In no-auth dev mode there is no model context; 403 is correct.
-    return res.status(403).json({ error: 'Model account required' });
+  const accessErrorStatus = modelAccessErrorStatus(u, { authEnabled: Boolean(passwordHash) });
+  if (accessErrorStatus) {
+    const error = accessErrorStatus === 401 ? 'Not authenticated' : 'Model account required';
+    return res.status(accessErrorStatus).json({ error });
   }
   // [R1-#5] Re-verify the model is still active + login-enabled on EVERY request, so an
   // admin disabling/deleting a model revokes access promptly despite the 7-day session
   // cookie. One indexed PK lookup per /me/* request.
-  try {
-    const r = await pool.query('SELECT status, login_enabled FROM models WHERE id = $1', [u.modelId]);
-    const m = r.rows[0];
-    if (!m || m.status !== 'active' || !m.login_enabled) {
-      return req.session.destroy(() => res.status(403).json({ error: 'Account disabled' }));
-    }
-  } catch (e) { return res.status(503).json({ error: 'auth check failed' }); }
+  const active = await activeSessionUser(req);
+  if (!active) {
+    await destroySession(req);
+    return res.status(403).json({ error: 'Account disabled' });
+  }
   next();
-}
+});
 
 app.use('/scrape', requireAdmin);
 app.use('/content', requireAdmin);
@@ -572,7 +635,19 @@ app.get('/me/audio/trending', asyncHandler(async (req, res) => {
   if (m.rows.length === 0) return res.status(404).json({ error: 'Model not found' });
   const niches = parseNiches(m.rows[0]);
   const rows = await audio.trendingAudio(pool, { niches });
-  res.json({ audio: rows, niches });
+  res.json({
+    audio: rows.filter((row) => row.exampleReels?.length).map((row) => ({
+      audio_id: row.audio_id,
+      audio_title: row.audio_title,
+      audio_author: row.audio_author,
+      is_original_audio: row.is_original_audio,
+      reel_count: row.reel_count,
+      creator_count: row.creator_count,
+      total_views: row.total_views,
+      exampleReels: toModelPosts(row.exampleReels),
+    })),
+    niches,
+  });
 }));
 app.get('/me/audio/:audioId/reels', asyncHandler(async (req, res) => {
   const m = await pool.query('SELECT primary_niche, secondary_niches FROM models WHERE id = $1', [req.session.user.modelId]);
@@ -580,7 +655,7 @@ app.get('/me/audio/:audioId/reels', asyncHandler(async (req, res) => {
   const { sql, params } = audio.buildAudioReelsQuery(String(req.params.audioId), niches, { limit: 24 });
   if (!sql) return res.json({ reels: [] });
   const r = await pool.query(sql, params);
-  res.json({ reels: r.rows });
+  res.json({ reels: toModelPosts(r.rows) });
 }));
 
 // ─── Notion Onboarding Routes ──────────────────────────────────
@@ -603,6 +678,8 @@ app.post('/notion/personas/:pageId/import', asyncHandler(async (req, res) => {
   if (!notionClient) return res.status(400).json({ error: 'Notion not configured' });
   const { primary_niche, secondary_niches, character_context, email, password, seedKeywords, addRadarTerms } = req.body || {};
   if (!primary_niche || !email || !password) return res.status(400).json({ error: 'primary_niche, email, password required' });
+  const credentialError = validateModelCredentials({ email, password, login_enabled: true });
+  if (credentialError) return res.status(400).json({ error: credentialError });
   try {
     const out = await notionSync.importPersona(notionDeps(await availableNiches()), req.params.pageId, { primary_niche, secondary_niches, character_context, email, password, seedKeywords, addRadarTerms });
     res.json({ success: true, ...out });
@@ -680,7 +757,8 @@ app.get('/admin/model-cockpit', asyncHandler(async (req, res) => {
     `SELECT m.id, m.name, m.primary_niche, m.secondary_niches, m.login_enabled, m.status,
             COUNT(p.id) AS assigned_count,
             SUM(CASE WHEN p.id IS NOT NULL AND f.feedback IS NOT NULL THEN 1 ELSE 0 END) AS reacted_count,
-            SUM(CASE WHEN p.id IS NOT NULL AND f.feedback = 'want_to_make' THEN 1 ELSE 0 END) AS want_count,
+            (SELECT COUNT(*) FROM model_post_feedback all_feedback
+              WHERE all_feedback.model_id = m.id AND all_feedback.feedback = 'want_to_make') AS want_count,
             SUM(CASE WHEN p.id IS NOT NULL AND f.feedback = 'need_script' THEN 1 ELSE 0 END) AS script_count,
             SUM(CASE WHEN p.id IS NOT NULL AND f.feedback = 'done' THEN 1 ELSE 0 END) AS done_count,
             SUM(CASE WHEN p.id IS NOT NULL AND f.feedback = 'not_my_style' THEN 1 ELSE 0 END) AS pass_count,
@@ -712,15 +790,15 @@ app.get('/admin/model-cockpit', asyncHandler(async (req, res) => {
   );
 
   const actionQueue = await pool.query(
-    `SELECT a.model_id, m.name AS model_name, a.post_id, a.assigned_at,
+    `SELECT f.model_id, m.name AS model_name, f.post_id, a.assigned_at,
+            CASE WHEN a.post_id IS NULL THEN 'discovery' ELSE 'assigned' END AS source,
             f.feedback, f.notes AS feedback_notes, f.updated_at AS feedback_at,
             p.account_handle, p.caption, p.content_type, p.post_url, p.view_count
-       FROM model_assigned_posts a
-       JOIN models m ON m.id = a.model_id
-       JOIN posts p ON p.id = a.post_id
-       JOIN model_post_feedback f ON f.model_id = a.model_id AND f.post_id = a.post_id
-      WHERE a.status = 'assigned'
-        AND m.status = 'active'
+       FROM model_post_feedback f
+       JOIN models m ON m.id = f.model_id
+       JOIN posts p ON p.id = f.post_id
+       LEFT JOIN model_assigned_posts a ON a.model_id = f.model_id AND a.post_id = f.post_id AND a.status = 'assigned'
+      WHERE m.status = 'active'
         AND f.feedback IN ('need_script', 'want_to_make')
         AND (p.soft_deleted = 0 OR p.soft_deleted IS NULL)
         AND (p.archived = 0 OR p.archived IS NULL)
@@ -881,6 +959,14 @@ app.get('/models/niches/available', async (req, res) => {
 const MODEL_BASE_FIELDS = ['name', 'primary_niche', 'secondary_niches', 'delivery_method', 'delivery_contact', 'delivery_day'];
 const MODEL_ALL_WRITE_FIELDS = [...MODEL_BASE_FIELDS, ...MODEL_WRITE_FIELDS];
 
+async function validateRequestedNiches(primaryNiche, secondaryNiches) {
+  const known = new Set(await availableNiches());
+  if (!known.has(String(primaryNiche || '').trim())) return 'Choose a valid primary niche';
+  const secondary = [...new Set(String(secondaryNiches || '').split(',').map((value) => value.trim()).filter(Boolean))];
+  const invalid = secondary.find((value) => !known.has(value));
+  return invalid ? `Unknown secondary niche: ${invalid}` : null;
+}
+
 // [R1-#9] Explicit column list — deliberately excludes password_hash so it can never
 // reach the admin client. Includes email/role/login_enabled so the admin UI can show
 // login status. This is the ONLY `SELECT * FROM models` that serialized a raw row
@@ -898,8 +984,12 @@ app.get('/models', async (req, res) => {
 app.post('/models', async (req, res) => {
   const { name, primary_niche, secondary_niches, delivery_method, delivery_contact, delivery_day } = req.body;
   if (!name || !primary_niche) return res.status(400).json({ error: 'name and primary_niche required' });
+  const credentialError = validateModelCredentials(req.body);
+  if (credentialError) return res.status(400).json({ error: credentialError });
+  const nicheError = await validateRequestedNiches(primary_niche, secondary_niches);
+  if (nicheError) return res.status(400).json({ error: nicheError });
   const merged = {
-    name, primary_niche,
+    name: String(name).trim(), primary_niche: String(primary_niche).trim(),
     secondary_niches: secondary_niches || '',
     delivery_method: delivery_method || 'whatsapp',
     delivery_contact: delivery_contact || '',
@@ -918,17 +1008,27 @@ app.post('/models', async (req, res) => {
 
 app.put('/models/:id', async (req, res) => {
   const { name, primary_niche, secondary_niches, delivery_method, delivery_contact, delivery_day } = req.body;
+  const modelId = Number(req.params.id);
+  if (!Number.isSafeInteger(modelId) || modelId <= 0) return res.status(400).json({ error: 'Invalid model id' });
+  if (!name || !primary_niche) return res.status(400).json({ error: 'name and primary_niche required' });
+  const current = await pool.query("SELECT email, password_hash, login_enabled FROM models WHERE id = $1 AND status = 'active'", [modelId]);
+  if (current.rowCount === 0) return res.status(404).json({ error: 'Model not found' });
+  const credentialError = validateModelCredentials(req.body, current.rows[0]);
+  if (credentialError) return res.status(400).json({ error: credentialError });
+  const nicheError = await validateRequestedNiches(primary_niche, secondary_niches);
+  if (nicheError) return res.status(400).json({ error: nicheError });
   const merged = {
-    name, primary_niche,
+    name: String(name).trim(), primary_niche: String(primary_niche).trim(),
     secondary_niches: secondary_niches || '',
     delivery_method: delivery_method || 'whatsapp',
     delivery_contact: delivery_contact || '',
     delivery_day: delivery_day || 'monday',
     ...buildCredentialFields(req.body),
   };
-  const { sql, params } = buildModelUpdate(merged, MODEL_ALL_WRITE_FIELDS, req.params.id);
+  const { sql, params } = buildModelUpdate(merged, MODEL_ALL_WRITE_FIELDS, modelId);
   try {
     await pool.query(sql, params);
+    if (modelCredentialsChanged(req.body, current.rows[0])) await revokeModelSessions(modelId);
     res.json({ success: true });
   } catch (err) {
     if (isDuplicateEmailError(err)) return res.status(409).json({ error: 'Email already in use' });
@@ -940,30 +1040,37 @@ app.delete('/models/:id', async (req, res) => {
   // [R1-#5] Also disable login so a deleted model fails BOTH resolveLogin (status check)
   // AND the per-request requireModel re-check — belt and suspenders for prompt revocation.
   await pool.query("UPDATE models SET status = 'inactive', login_enabled = 0 WHERE id = $1", [Number(req.params.id)]);
+  await revokeModelSessions(Number(req.params.id));
   res.json({ success: true });
 });
 
 app.post('/models/:id/assignments', asyncHandler(async (req, res) => {
   const modelId = Number(req.params.id);
-  const postIds = Array.isArray(req.body?.postIds) ? req.body.postIds.map(Number).filter(Number.isSafeInteger) : [];
+  const postIds = Array.isArray(req.body?.postIds) ? req.body.postIds.map(Number).filter((id) => Number.isSafeInteger(id) && id > 0) : [];
   if (!Number.isSafeInteger(modelId) || modelId <= 0) return res.status(400).json({ error: 'Invalid model id' });
   if (postIds.length === 0) return res.status(400).json({ error: 'postIds required' });
+  if (postIds.length > 100) return res.status(400).json({ error: 'Assign at most 100 reels at once' });
 
   const m = await pool.query("SELECT id FROM models WHERE id = $1 AND status = 'active'", [modelId]);
   if (m.rowCount === 0) return res.status(404).json({ error: 'Model not found' });
 
   let assigned = 0;
+  let skipped = 0;
   for (const postId of [...new Set(postIds)]) {
-    const p = await pool.query('SELECT id FROM posts WHERE id = $1 AND (soft_deleted = 0 OR soft_deleted IS NULL)', [postId]);
-    if (p.rowCount === 0) continue;
+    const p = await pool.query(
+      `SELECT id FROM posts WHERE id = $1
+       AND (soft_deleted = 0 OR soft_deleted IS NULL)
+       AND (archived = 0 OR archived IS NULL)
+       AND video_cache_status = 'cached'`, [postId]);
+    if (p.rowCount === 0) { skipped++; continue; }
     const r = await pool.query(
       `INSERT INTO model_assigned_posts (model_id, post_id, assigned_at, status)
        VALUES ($1,$2,$3,'assigned')
-       ON CONFLICT (model_id, post_id) DO NOTHING`,
+       ON CONFLICT (model_id, post_id) DO UPDATE SET assigned_at = excluded.assigned_at, status = 'assigned'`,
       [modelId, postId, new Date().toISOString()]);
     assigned += r.rowCount || 0;
   }
-  res.json({ ok: true, assigned });
+  res.json({ ok: true, assigned, skipped });
 }));
 
 app.get('/models/:id/activity', asyncHandler(async (req, res) => {
@@ -1286,7 +1393,7 @@ app.get('/suggested/reels/:id/thumb', asyncHandler(async (req, res) => {
 // ─── Model (Me) Routes ──────────────────────────────────────────
 
 // [R2-#3] THE single top-level me-feed import — Task 6 reuses these, never re-requires.
-const { buildMeFeedQuery, nicheVisibilityClause, parseNiches } = require('./me-feed');
+const { buildMeFeedQuery, nicheVisibilityClause, parseNiches, allowedNicheOptions } = require('./me-feed');
 
 async function modelCanAccessPost(modelId, postId, { requirePlayable = false } = {}) {
   if (!Number.isSafeInteger(Number(modelId)) || !Number.isSafeInteger(Number(postId))) return false;
@@ -1322,19 +1429,26 @@ app.get('/me/feed', asyncHandler(async (req, res) => {
   const sel = (req.query.niche || '').trim();
   const shuffle = req.query.refresh === '1';
 
+  const pageSize = 24;
   let build, activeNiche;
   if (sel && !myNiches.includes(sel)) return res.status(403).json({ error: 'Niche not available for this model' });
-  if (sel) build = buildMeFeedQuery([sel], { page, limit: 24, shuffle });
-  else build = buildMeFeedQuery(myNiches, { page, limit: 24, shuffle });
+  if (sel) build = buildMeFeedQuery([sel], { page, limit: pageSize + 1, pageSize, shuffle, modelId });
+  else build = buildMeFeedQuery(myNiches, { page, limit: pageSize + 1, pageSize, shuffle, modelId });
   activeNiche = sel || null;
 
   // The content-type vocabulary powers the switcher (models can't hit the admin /content-types route).
   const av = await pool.query('SELECT value, label FROM content_types ORDER BY sort_order, label');
-  const availableNiches = av.rows;
+  const availableNiches = allowedNicheOptions(myNiches, av.rows);
 
-  if (!build.sql) return res.json({ posts: [], niches: myNiches, availableNiches, activeNiche });
+  if (!build.sql) return res.json({ posts: [], niches: myNiches, availableNiches, activeNiche, hasMore: false });
   const r = await pool.query(build.sql, build.params);
-  res.json({ posts: r.rows, niches: myNiches, availableNiches, activeNiche });
+  res.json({
+    posts: toModelPosts(r.rows.slice(0, pageSize)),
+    niches: myNiches,
+    availableNiches,
+    activeNiche,
+    hasMore: r.rows.length > pageSize,
+  });
 }));
 
 const { saveParams } = require('./me-saves');
@@ -1350,29 +1464,29 @@ app.get('/me/assignments', asyncHandler(async (req, res) => {
        LEFT JOIN model_post_feedback f ON f.model_id = a.model_id AND f.post_id = a.post_id
       WHERE a.model_id = $1
         AND a.status = 'assigned'
+        AND f.feedback IS NULL
         AND (posts.soft_deleted = 0 OR posts.soft_deleted IS NULL)
         AND (posts.archived = 0 OR posts.archived IS NULL)
+        AND posts.video_cache_status = 'cached'
       ORDER BY a.assigned_at DESC
       LIMIT 30`,
     [req.session.user.modelId]);
-  res.json({ posts: r.rows });
+  res.json({ posts: toModelPosts(r.rows, MODEL_ASSIGNMENT_FIELDS) });
 }));
 
 app.post('/me/saves/:postId', asyncHandler(async (req, res) => {
   const p = saveParams(req.session.user.modelId, req.params.postId);
   if (!p) return res.status(400).json({ error: 'Invalid post id' });
   if (!(await modelCanAccessPost(p.modelId, p.postId))) return res.status(404).json({ error: 'Post not available' });
-  await pool.query(
-    'INSERT INTO model_saved_posts (model_id, post_id, saved_at) VALUES ($1,$2,$3) ON CONFLICT (model_id, post_id) DO NOTHING',
-    [p.modelId, p.postId, new Date().toISOString()]);
-  res.json({ ok: true });
+  const state = await applyModelReaction(pool, { modelId: p.modelId, postId: p.postId, reaction: 'save' });
+  res.json({ ok: true, ...state });
 }));
 
 app.delete('/me/saves/:postId', asyncHandler(async (req, res) => {
   const p = saveParams(req.session.user.modelId, req.params.postId);
   if (!p) return res.status(400).json({ error: 'Invalid post id' });
-  await pool.query('DELETE FROM model_saved_posts WHERE model_id = $1 AND post_id = $2', [p.modelId, p.postId]);
-  res.json({ ok: true });
+  const state = await applyModelReaction(pool, { modelId: p.modelId, postId: p.postId, reaction: 'unsave' });
+  res.json({ ok: true, ...state });
 }));
 
 app.get('/me/saves', asyncHandler(async (req, res) => {
@@ -1393,7 +1507,7 @@ app.get('/me/saves', asyncHandler(async (req, res) => {
        AND (posts.archived = 0 OR posts.archived IS NULL)
        AND (a.model_id IS NOT NULL${nicheClause})
      ORDER BY s.saved_at DESC`, [modelId, ...niches]);
-  res.json({ posts: r.rows });
+  res.json({ posts: toModelPosts(r.rows) });
 }));
 
 app.post('/me/feedback/:postId', asyncHandler(async (req, res) => {
@@ -1406,11 +1520,15 @@ app.post('/me/feedback/:postId', asyncHandler(async (req, res) => {
 
   if (!(await modelCanAccessPost(p.modelId, p.postId))) return res.status(404).json({ error: 'Post not available' });
 
-  await pool.query(
-    `INSERT INTO model_post_feedback (model_id, post_id, feedback, notes, created_at, updated_at)
-     VALUES ($1,$2,$3,$4,$5,$6)
-     ON CONFLICT (model_id, post_id) DO UPDATE SET feedback = excluded.feedback, notes = excluded.notes, updated_at = excluded.updated_at`,
-    [p.modelId, p.postId, feedback, notes, new Date().toISOString(), new Date().toISOString()]);
+  if (feedback === 'want_to_make') {
+    const state = await applyModelReaction(pool, { modelId: p.modelId, postId: p.postId, reaction: 'save' });
+    return res.json({ ok: true, ...state });
+  }
+  if (feedback === 'not_my_style') {
+    const state = await applyModelReaction(pool, { modelId: p.modelId, postId: p.postId, reaction: 'not_interested' });
+    return res.json({ ok: true, ...state });
+  }
+  await upsertFeedback(pool, { modelId: p.modelId, postId: p.postId, feedback, notes });
   res.json({ ok: true, feedback });
 }));
 
@@ -1426,14 +1544,25 @@ app.get('/me/ideas', asyncHandler(async (req, res) => {
   if (all.length) {
     const ph = all.map((_, i) => `$${i + 1}`).join(', ');
     const pr = await pool.query(
-      `SELECT id, shortcode, video_url, thumbnail_url, view_count, caption, post_url, content_type, account_handle, posted_at
+      `SELECT id, shortcode, view_count, caption, post_url, content_type, account_handle, posted_at,
+              content_type AS niche
        FROM posts WHERE shortcode IN (${ph})
          AND (soft_deleted = 0 OR soft_deleted IS NULL)
-         AND (archived = 0 OR archived IS NULL)`, all);
-    byCode = Object.fromEntries(pr.rows.map(p => [p.shortcode, p]));
+         AND (archived = 0 OR archived IS NULL)
+         AND video_cache_status = 'cached'`, all);
+    byCode = Object.fromEntries(toModelPosts(pr.rows).map(p => [p.shortcode, p]));
   }
   const enriched = ideas.map((idea, k) => ({
-    ...idea,
+    id: idea.id,
+    concept: idea.concept,
+    format: idea.format,
+    why_working: idea.why_working,
+    hook_line: idea.hook_line,
+    source_niche: idea.source_niche,
+    stale_warning: idea.stale_warning,
+    status: idea.status,
+    delivered_at: idea.delivered_at,
+    created_at: idea.created_at,
     sourceReels: perIdea[k].map(code => byCode[code]).filter(Boolean),
   }));
   res.json({ ideas: enriched });
@@ -1463,7 +1592,12 @@ process.on('unhandledRejection', (err) => {
 });
 
 async function boot() {
-  health.assertThumbDirWritable(DEFAULT_THUMB_DIR);
+  const storageWritable = health.assertThumbDirWritable(DEFAULT_THUMB_DIR);
+  if (!storageWritable && IS_PROD) {
+    console.error('[Boot] fatal media-volume error; exiting rather than serving unplayable model feeds');
+    process.exit(1);
+    return;
+  }
   try {
     await initWithRetry(() => pool.initDB());
     health.markReady();

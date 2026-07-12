@@ -2,7 +2,7 @@
 const { test } = require('node:test');
 const assert = require('node:assert');
 const Database = require('better-sqlite3');
-const { buildCredentialFields, buildModelWriteColumns, buildModelUpdate } = require('./model-credentials');
+const { buildCredentialFields, validateModelCredentials, modelCredentialsChanged, buildModelWriteColumns, buildModelUpdate } = require('./model-credentials');
 const { buildModelInsert, MODEL_WRITE_FIELDS, MODEL_NOTION_FIELDS } = require('./model-credentials');
 
 test('password provided → includes a bcrypt hash, never plaintext', () => {
@@ -15,6 +15,24 @@ test('password provided → includes a bcrypt hash, never plaintext', () => {
 test('no password → no password_hash key (leave existing untouched)', () => {
   const f = buildCredentialFields({ email: 'a@b.com' });
   assert.ok(!('password_hash' in f));
+});
+
+test('model login provisioning requires a valid email and a password of at least 8 characters', () => {
+  assert.strictEqual(validateModelCredentials({ login_enabled: true, email: '', password: 'password1' }), 'Email is required when model login is enabled');
+  assert.strictEqual(validateModelCredentials({ login_enabled: true, email: 'bad', password: 'password1' }), 'Enter a valid model email');
+  assert.strictEqual(validateModelCredentials({ login_enabled: true, email: 'model@example.com', password: 'short' }), 'Model passwords must be at least 8 characters');
+  assert.strictEqual(validateModelCredentials({ login_enabled: true, email: 'model@example.com' }), 'Set a password before enabling model login');
+  assert.strictEqual(validateModelCredentials({ login_enabled: true, email: 'model@example.com' }, { password_hash: 'existing' }), null);
+});
+
+test('session revocation only treats actual credential edits as changes', () => {
+  const existing = { email: 'model@example.com', login_enabled: 1 };
+  assert.strictEqual(modelCredentialsChanged({ name: 'Updated name' }, existing), false);
+  assert.strictEqual(modelCredentialsChanged({ email: ' MODEL@example.com ' }, existing), false);
+  assert.strictEqual(modelCredentialsChanged({ login_enabled: true }, existing), false);
+  assert.strictEqual(modelCredentialsChanged({ email: 'new@example.com' }, existing), true);
+  assert.strictEqual(modelCredentialsChanged({ login_enabled: false }, existing), true);
+  assert.strictEqual(modelCredentialsChanged({ password: 'new-password' }, existing), true);
 });
 
 test('role is NEVER settable from the model form [R1-#7]', () => {

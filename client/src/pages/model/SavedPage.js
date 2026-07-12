@@ -1,45 +1,79 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { getMySaves, unsaveMyPost } from '../../api';
 import ReelCard from '../../components/ReelCard';
 import useActiveInView from '../../hooks/useActiveInView';
 
-export default function SavedPage() {
+function requestError(err, fallback) {
+  if (err.code === 'ECONNABORTED') return 'This is taking longer than expected. Try again.';
+  return err.response?.data?.error || fallback;
+}
+
+export default function SavedPage({ active = true, onExplore }) {
   const [posts, setPosts] = useState([]);
-  const [loading, setLoading] = useState(false);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState('');
+  const [actionError, setActionError] = useState('');
+  const [pendingIds, setPendingIds] = useState(new Set());
   const [soundOn, setSoundOn] = useState(false);
+  const hasLoadedRef = useRef(false);
 
   const { autoplayInView, activeCardId, registerRef } = useActiveInView(posts);
 
   const loadSaves = useCallback(async () => {
-    setLoading(true);
+    if (!hasLoadedRef.current) setLoading(true);
+    setError('');
     try {
       const { data } = await getMySaves();
       setPosts(data.posts || []);
+      hasLoadedRef.current = true;
     } catch (err) {
       console.error('Failed to load saved posts:', err);
+      const message = requestError(err, 'We could not load your saved reels.');
+      if (hasLoadedRef.current) setActionError(message);
+      else setError(message);
     } finally {
       setLoading(false);
     }
   }, []);
 
   useEffect(() => {
-    loadSaves();
-  }, [loadSaves]);
+    if (active) loadSaves();
+  }, [active, loadSaves]);
 
   const handleUnsave = async (post) => {
-    // Optimistic remove — this list only ever shows saved posts, so toggling
-    // here always means "unsave and drop from view".
+    if (pendingIds.has(post.id)) return;
+    const index = posts.findIndex((candidate) => candidate.id === post.id);
+    setActionError('');
+    setPendingIds((prev) => new Set(prev).add(post.id));
     setPosts((prev) => prev.filter((p) => p.id !== post.id));
     try {
       await unsaveMyPost(post.id);
     } catch (err) {
       console.error('Failed to unsave post:', err);
-      loadSaves(); // reconcile with the server if the call failed
+      setActionError(requestError(err, 'We could not remove that reel. Try again.'));
+      setPosts((current) => {
+        if (current.some((candidate) => candidate.id === post.id)) return current;
+        const next = [...current];
+        next.splice(Math.max(0, Math.min(index, next.length)), 0, post);
+        return next;
+      });
+    } finally {
+      setPendingIds((prev) => {
+        const next = new Set(prev);
+        next.delete(post.id);
+        return next;
+      });
     }
   };
 
   return (
     <div className="px-3 pt-3 pb-4 space-y-4">
+      {actionError && (
+        <div className="flex items-start justify-between gap-3 rounded-lg border border-red-200 bg-red-50 px-3 py-2.5 text-sm font-medium text-red-800" role="alert">
+          <span>{actionError}</span>
+          <button type="button" onClick={() => setActionError('')} className="shrink-0 font-bold" aria-label="Dismiss error">X</button>
+        </div>
+      )}
       {loading ? (
         <div className="flex items-center justify-center py-20 text-model-muted">
           <svg className="w-6 h-6 animate-spin mr-2" viewBox="0 0 24 24" fill="none">
@@ -47,6 +81,14 @@ export default function SavedPage() {
             <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v4a4 4 0 00-4 4H4z" />
           </svg>
           Loading…
+        </div>
+      ) : error ? (
+        <div className="rounded-lg border border-red-200 bg-red-50 px-6 py-12 text-center" role="alert">
+          <p className="text-base font-bold text-model-ink">Saved reels did not load</p>
+          <p className="mt-1.5 text-sm text-model-muted">{error}</p>
+          <button type="button" onClick={loadSaves} className="mt-4 min-h-[44px] rounded-lg bg-model-ink px-5 text-sm font-bold text-white">
+            Try again
+          </button>
         </div>
       ) : posts.length === 0 ? (
         <div className="rounded-lg border border-model-line bg-model-surface px-6 py-16 text-center shadow-sm">
@@ -57,6 +99,11 @@ export default function SavedPage() {
           </div>
           <p className="text-model-ink text-base font-bold">Nothing saved yet</p>
           <p className="text-model-muted text-sm mt-1.5">Reels you save will collect here.</p>
+          {onExplore && (
+            <button type="button" onClick={onExplore} className="mt-4 min-h-[44px] rounded-lg bg-model-ink px-5 text-sm font-bold text-white">
+              Explore reels
+            </button>
+          )}
         </div>
       ) : (
         <>
@@ -73,6 +120,8 @@ export default function SavedPage() {
               registerRef={registerRef}
               onToggleSave={handleUnsave}
               isSaved={true}
+              actionPending={pendingIds.has(post.id)}
+              pageActive={active}
             />
           ))}
           </div>

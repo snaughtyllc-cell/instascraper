@@ -17,6 +17,32 @@ function buildCredentialFields(body = {}) {
   return f; // role is intentionally never included
 }
 
+function validateModelCredentials(body = {}, existing = {}) {
+  const email = body.email !== undefined
+    ? String(body.email || '').trim().toLowerCase()
+    : String(existing.email || '').trim().toLowerCase();
+  const enabled = body.login_enabled !== undefined ? Boolean(body.login_enabled) : Boolean(existing.login_enabled);
+  const password = body.password ? String(body.password) : '';
+  const hasPassword = Boolean(password || existing.password_hash);
+
+  if (email && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) return 'Enter a valid model email';
+  if (password && password.length < 8) return 'Model passwords must be at least 8 characters';
+  if (enabled && !email) return 'Email is required when model login is enabled';
+  if (enabled && !hasPassword) return 'Set a password before enabling model login';
+  return null;
+}
+
+function modelCredentialsChanged(body = {}, existing = {}) {
+  if (body.password) return true;
+  const currentEmail = String(existing.email || '').trim().toLowerCase();
+  const nextEmail = body.email !== undefined
+    ? String(body.email || '').trim().toLowerCase()
+    : currentEmail;
+  const currentEnabled = Boolean(existing.login_enabled);
+  const nextEnabled = body.login_enabled !== undefined ? Boolean(body.login_enabled) : currentEnabled;
+  return nextEmail !== currentEmail || nextEnabled !== currentEnabled;
+}
+
 // [R1-#8] Build INSERT/UPDATE columns/placeholders/params from a fixed allowlist
 // (`fieldList`), reading values ONLY from `merged` — never from raw request-body keys.
 // A field is included only if it is present as an own key on `merged`, so optional
@@ -77,4 +103,4 @@ function isDuplicateEmailError(err) {
   return msg.includes('unique') && msg.includes('email');
 }
 
-module.exports = { buildCredentialFields, MODEL_WRITE_FIELDS, MODEL_NOTION_FIELDS, buildModelWriteColumns, buildModelInsert, buildModelUpdate, isDuplicateEmailError };
+module.exports = { buildCredentialFields, validateModelCredentials, modelCredentialsChanged, MODEL_WRITE_FIELDS, MODEL_NOTION_FIELDS, buildModelWriteColumns, buildModelInsert, buildModelUpdate, isDuplicateEmailError };

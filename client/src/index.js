@@ -14,14 +14,12 @@ if (process.env.REACT_APP_SENTRY_DSN) {
     tracesSampleRate: 0, // errors only — no perf tracing
     integrations: [
       Sentry.replayIntegration({
-        // Deliberate privacy choices for this internal tool: the models are our
-        // own users and the feed is public Instagram content, so text is left
-        // readable. Login inputs are always masked so credentials never reach a
-        // replay, and media is shown so we can actually SEE reel playback — the
-        // thing we most want to debug on real phones.
-        maskAllText: false,
+        // Replays include admin pages and private model ideas, so default to the
+        // privacy-preserving mode. Error metadata and breadcrumbs still make the
+        // session useful without sending captions, ideas, names, or reel media.
+        maskAllText: true,
         maskAllInputs: true,
-        blockAllMedia: false,
+        blockAllMedia: true,
       }),
     ],
     // Always capture the session that hit an error; spot-check ~10% of the rest.
@@ -34,9 +32,14 @@ const root = ReactDOM.createRoot(document.getElementById('root'));
 root.render(
   <Sentry.ErrorBoundary
     fallback={
-      <div style={{ padding: 24, color: '#e5e7eb', background: '#0a0a0c', minHeight: '100vh', fontFamily: 'system-ui, sans-serif' }}>
-        <h1 style={{ fontSize: 18, marginBottom: 8 }}>Something went wrong.</h1>
-        <p style={{ color: '#9ca3af', fontSize: 14 }}>Try reloading the app. If it keeps happening, let us know.</p>
+      <div style={{ padding: 24, color: '#20211F', background: '#EFEFEB', minHeight: '100vh', fontFamily: 'system-ui, sans-serif', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+        <div style={{ width: '100%', maxWidth: 360, padding: 24, background: '#FAFAF7', border: '1px solid #DCDDD7', borderRadius: 8, textAlign: 'center' }}>
+          <h1 style={{ fontSize: 18, margin: '0 0 8px', fontWeight: 800 }}>Something went wrong</h1>
+          <p style={{ color: '#62645F', fontSize: 14, margin: '0 0 18px' }}>Reload the app to get back to your feed.</p>
+          <button type="button" onClick={() => window.location.reload()} style={{ minHeight: 44, padding: '0 20px', border: 0, borderRadius: 8, color: '#fff', background: '#20211F', fontWeight: 700, cursor: 'pointer' }}>
+            Reload app
+          </button>
+        </div>
       </div>
     }
   >
