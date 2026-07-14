@@ -1,7 +1,6 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import { getSuggestedAccounts, approveSuggested, dismissSuggested, snoozeSuggested, triggerJob, approveSuggestedBulk, scrapeTrackedBulk, getRadarTerms, addRadarTerm, removeRadarTerm, triggerRadar } from '../api';
-
-const API_URL = process.env.REACT_APP_API_URL || 'http://localhost:4000';
+import API_URL from '../api-base';
 
 function formatCount(n) {
   if (!n) return '0';

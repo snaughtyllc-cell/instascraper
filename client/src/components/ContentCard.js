@@ -1,7 +1,6 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { tagPost, saveNotes, archivePost, setCreatorType, setPostContentType } from '../api';
-
-const API_URL = process.env.REACT_APP_API_URL || 'http://localhost:4000';
+import API_URL from '../api-base';
 
 const TAG_OPTIONS = [
   { value: 'recreate', label: 'Recreate', icon: '\u2705', color: 'bg-green-600' },
