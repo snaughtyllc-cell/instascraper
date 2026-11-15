@@ -9,7 +9,7 @@ function makePostsDb() {
   const sqlite = new Database(':memory:');
   sqlite.exec(`CREATE TABLE posts (
     id INTEGER PRIMARY KEY, content_type TEXT, account_handle TEXT, posted_at TEXT,
-    sort_status TEXT DEFAULT 'auto',
+    sort_status TEXT DEFAULT 'auto', ai_look_tags TEXT,
     soft_deleted INTEGER DEFAULT 0, archived INTEGER DEFAULT 0,
     video_url TEXT, video_url_refreshed_at TEXT, video_cache_status TEXT)`);
   sqlite.exec(`CREATE TABLE creator_types (account_handle TEXT, content_type TEXT)`);
@@ -187,4 +187,73 @@ test("own creator's reel outside her niches hidden", () => {
   sqlite.exec("INSERT INTO model_creators VALUES (7,'mia.talks'); INSERT INTO posts (id,account_handle,content_type,video_cache_status) VALUES (1,'mia.talks','dance','cached')");
   const { sql, params } = buildMeFeedQuery(['talking'], { modelId: 7 });
   assert.deepStrictEqual(sqlite.prepare(sql.replace(/\$\d+/g, '?')).all(...params), []);
+});
+
+function rankedReels(sqlite, options) {
+  const { sql, params } = buildMeFeedQuery(['talking'], options);
+  const numbers = [...sql.matchAll(/\$(\d+)/g)].map(match => Number(match[1]));
+  assert.deepStrictEqual(numbers, params.map((_, i) => i + 1), 'ascending SQLite placeholders');
+  return sqlite.prepare(sql.replace(/\$\d+/g, '?')).all(...params).map(row => row.id);
+}
+
+test('look tags rank matching reels first without filtering unmatched reels', () => {
+  const sqlite = makePostsDb();
+  sqlite.exec(`INSERT INTO posts (id,content_type,posted_at,video_cache_status,ai_look_tags) VALUES
+    (1,'talking','2026-07-01','cached','["brunette","bedroom"]'),
+    (2,'talking','2026-07-02','cached','["brunette"]'),
+    (3,'talking','2026-07-03','cached',NULL)`);
+  assert.deepStrictEqual(rankedReels(sqlite, { lookTags: ['brunette', 'bedroom'], modelId: 7 }), [1, 2, 3]);
+  sqlite.close();
+});
+
+test('no model tags → order unchanged', () => {
+  assert.deepStrictEqual(buildMeFeedQuery(['talking'], { lookTags: [] }), buildMeFeedQuery(['talking']));
+  assert.match(buildMeFeedQuery(['talking'], { lookTags: [] }).sql, /ORDER BY posts\.posted_at DESC/);
+});
+
+test('shuffle ignores look tags', () => {
+  assert.deepStrictEqual(buildMeFeedQuery(['talking'], { shuffle: true, lookTags: ['alt'] }),
+    buildMeFeedQuery(['talking'], { shuffle: true }));
+});
+
+test('quoted match avoids substring hits', () => {
+  const sqlite = makePostsDb();
+  sqlite.exec(`INSERT INTO posts (id,content_type,posted_at,video_cache_status,ai_look_tags) VALUES
+    (1,'talking','2026-07-01','cached','["alt"]'),
+    (2,'talking','2026-07-03','cached','["alt-girl"]'),
+    (3,'talking','2026-07-02','cached',NULL)`);
+  assert.deepStrictEqual(rankedReels(sqlite, { lookTags: ['alt'] }), [1, 2, 3]);
+  sqlite.close();
+});
+
+test('feed ranks reels from liked creator and liked tag above disliked type', () => {
+  const sqlite = makePostsDb();
+  sqlite.exec(`INSERT INTO posts (id,account_handle,content_type,posted_at,video_cache_status,ai_look_tags) VALUES
+    (1,'Mia','talking','2026-07-01','cached','["brunette"]'),
+    (2,'other','talking','2026-07-03','cached','["brunette"]'),
+    (3,'other','talking','2026-07-04','cached','[]')`);
+  const taste = { types: [['talking', -0.3]], tags: [['brunette', 0.5]], creators: [['mia', 0.5]] };
+  assert.match(buildMeFeedQuery(['talking'], { taste }).sql, /THEN CAST\(\$\d+ AS REAL\) ELSE 0 END/,
+    'fractional affinities must not be inferred as integer parameters by Postgres');
+  assert.deepStrictEqual(rankedReels(sqlite, { modelId: 7, lookTags: ['bedroom'], taste }), [1, 2, 3]);
+  sqlite.close();
+});
+
+test('disliked reels sink but remain in results; only exact rejected reel stays hidden', () => {
+  const sqlite = makePostsDb();
+  sqlite.exec(`INSERT INTO posts (id,account_handle,content_type,posted_at,video_cache_status) VALUES
+    (1,'disliked','talking','2026-07-04','cached'),(2,'disliked','talking','2026-07-03','cached'),
+    (3,'neutral','talking','2026-07-01','cached');
+    INSERT INTO model_post_feedback VALUES (7,1,'not_my_style')`);
+  assert.deepStrictEqual(rankedReels(sqlite, { modelId: 7, taste: { creators: [['disliked', -0.5]] } }), [3, 2]);
+  sqlite.close();
+});
+
+test("empty taste and no look tags → today's order", () => {
+  assert.deepStrictEqual(buildMeFeedQuery(['talking'], { lookTags: [], taste: { types: [], tags: [], creators: [] } }), buildMeFeedQuery(['talking']));
+});
+
+test('shuffle ignores taste', () => {
+  assert.deepStrictEqual(buildMeFeedQuery(['talking'], { shuffle: true, taste: { tags: [['alt', 0.5]] } }),
+    buildMeFeedQuery(['talking'], { shuffle: true }));
 });

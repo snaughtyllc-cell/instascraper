@@ -1,3 +1,5 @@
+const { refreshTaste } = require('./model-taste');
+
 async function upsertFeedback(db, { modelId, postId, feedback, notes = '', nowIso = new Date().toISOString() }) {
   await db.query(
     `INSERT INTO model_post_feedback (model_id, post_id, feedback, notes, created_at, updated_at)
@@ -8,7 +10,7 @@ async function upsertFeedback(db, { modelId, postId, feedback, notes = '', nowIs
 
 async function applyModelReaction(db, { modelId, postId, reaction, nowIso = new Date().toISOString() }) {
   if (!['save', 'unsave', 'not_interested'].includes(reaction)) throw new Error('Invalid model reaction');
-  return db.transaction(async (tx) => {
+  const result = await db.transaction(async (tx) => {
     if (reaction === 'save') {
       await tx.query(
         'INSERT INTO model_saved_posts (model_id, post_id, saved_at) VALUES ($1,$2,$3) ON CONFLICT (model_id, post_id) DO UPDATE SET saved_at = excluded.saved_at',
@@ -28,6 +30,8 @@ async function applyModelReaction(db, { modelId, postId, reaction, nowIso = new 
     await upsertFeedback(tx, { modelId, postId, feedback: 'not_my_style', nowIso });
     return { saved: false, feedback: 'not_my_style' };
   });
+  await refreshTaste(db, modelId);
+  return result;
 }
 
 module.exports = { applyModelReaction, upsertFeedback };

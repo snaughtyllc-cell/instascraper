@@ -1,4 +1,5 @@
 const { getCreators } = require('./creators-mix');
+const { creatorLookProfiles, creatorLookList } = require('./look-match');
 
 function normalizeUsername(username) {
   return typeof username === 'string' ? username.trim().replace(/^@/, '').toLowerCase() : '';
@@ -62,7 +63,8 @@ async function listWorkspaceCreators(pool, modelId) {
     FROM model_creators mc LEFT JOIN tracked_accounts ta ON LOWER(ta.username) = mc.username
     WHERE mc.model_id = $1 ORDER BY mc.added_at DESC, mc.username`, [modelId]);
   const mixes = new Map((await getCreators(pool)).map(creator => [creator.account_handle, creator.mix]));
-  return result.rows.map(row => ({ ...row, mix: mixes.get(row.username) || [] }));
+  const profiles = await creatorLookProfiles(pool, result.rows.map(row => row.username));
+  return result.rows.map(row => ({ ...row, mix: mixes.get(row.username) || [], look: creatorLookList(profiles.get(row.username)) }));
 }
 
 module.exports = { addCreator, removeCreator, listWorkspaceCreators, approveForModel, normalizeUsername };

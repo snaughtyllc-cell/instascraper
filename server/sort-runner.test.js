@@ -175,3 +175,15 @@ test('candidate sorts count toward usage totals and the post-sort daily cap', as
   assert.deepEqual(await sortUsage(deps.pool, deps.cfg), { reels30d: 2, usd30d: 0.005, today: 2, dailyMax: 2 });
   assert.equal((await runAutoSort(deps)).classified, 0);
 });
+test('auto-sort stores ai_look_tags as JSON array', async t => {
+  const deps = await setup(t, 1);
+  deps.pool.sqlite.exec(`CREATE TABLE IF NOT EXISTS look_tags(value TEXT, label TEXT, category TEXT, sort_order INTEGER);
+    DELETE FROM look_tags;
+    INSERT INTO look_tags(value,label,category) VALUES('brunette','Brunette','hair'),('private-custom','Private custom','custom')`);
+  deps.describe = async input => {
+    assert.deepEqual(input.lookTags.map(tag => tag.value), ['brunette']);
+    return { ...ai, lookTags: ['brunette'] };
+  };
+  await runAutoSort(deps);
+  assert.equal(deps.pool.sqlite.prepare('SELECT ai_look_tags FROM posts').get().ai_look_tags, '["brunette"]');
+});

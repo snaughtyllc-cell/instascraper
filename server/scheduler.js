@@ -7,6 +7,7 @@ const { deliverBatch } = require('./delivery');
 const radar = require('./radar');
 const { runAutoSort } = require('./sort-runner');
 const { computeProposals } = require('./proposals');
+const { refreshTaste } = require('./model-taste');
 
 function cadenceConfig(env = process.env) {
   const num = (v, d) => { const n = Number(v); return Number.isFinite(n) && n >= 0 ? n : d; };
@@ -417,12 +418,20 @@ async function runWorkspaceProposals() {
   } catch (error) { console.error('[Workspaces] proposals failed:', error.message); }
 }
 
+async function runTasteRecompute() {
+  try {
+    const { rows } = await pool.query("SELECT id FROM models WHERE status = 'active'");
+    for (const model of rows) await refreshTaste(pool, model.id);
+  } catch (error) { console.error('[Taste] nightly recompute failed:', error.message); }
+}
+
 function startScheduler(scraper) {
   scraperInstance = scraper;
   cron.schedule('0 3 * * *', () => runAutoScrape()); // daily; cadence interval + per-cycle cap control actual spend
   cron.schedule('30 3 * * *', () =>
     require('./videos').pruneOldVideos({ maxAgeDays: 30 })
       .catch(e => console.error('[Cron] video prune failed:', e.message)));
+  cron.schedule('45 3 * * *', () => runTasteRecompute());
   cron.schedule('0 0 * * 0', () => runEngagementRollup());
   cron.schedule('0 2 * * *', () => runAutoCleanup());
   cron.schedule('0 4 * * 1', () => runDiscovery());

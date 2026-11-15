@@ -41,7 +41,7 @@ function visibilityOnlyClause() {
 // of showing reels that only *might* play. No placeholder — a bare status check.
 const PLAYABLE_CLAUSE = `posts.video_cache_status = 'cached'`;
 
-function buildMeFeedQuery(niches, { page = 1, limit = 24, pageSize = limit, all = false, shuffle = false, modelId = null } = {}) {
+function buildMeFeedQuery(niches, { page = 1, limit = 24, pageSize = limit, all = false, shuffle = false, modelId = null, lookTags = [], taste = {} } = {}) {
   let clause, params;
   if (all) {
     clause = visibilityOnlyClause(); params = [];
@@ -78,6 +78,24 @@ function buildMeFeedQuery(niches, { page = 1, limit = 24, pageSize = limit, all 
       )`;
   }
 
+  const lookTerms = shuffle ? [] : [...new Set(lookTags)].map(tag => {
+    params.push(`%"${tag}"%`);
+    return `CASE WHEN posts.ai_look_tags LIKE $${params.length} THEN 1 ELSE 0 END`;
+  });
+  const tasteTerms = [];
+  if (!shuffle) {
+    for (const [kind, column] of [['types', 'posts.content_type'], ['tags', 'posts.ai_look_tags'], ['creators', 'LOWER(posts.account_handle)']]) {
+      for (const [value, score] of taste[kind] || []) {
+        params.push(kind === 'tags' ? `%"${value}"%` : value);
+        const valueIdx = params.length;
+        params.push(score);
+        tasteTerms.push(`CASE WHEN ${column} ${kind === 'tags' ? 'LIKE' : '='} $${valueIdx} THEN CAST($${params.length} AS REAL) ELSE 0 END`);
+      }
+    }
+  }
+  const rankTerms = [...lookTerms, ...tasteTerms];
+  const order = shuffle ? 'RANDOM()' : rankTerms.length
+    ? `(${rankTerms.join(' + ')}) DESC, posts.posted_at DESC` : 'posts.posted_at DESC';
   const offset = (Math.max(1, Number(page)) - 1) * pageSize;
   const limIdx = params.length + 1, offIdx = params.length + 2;
   const sql = `
@@ -85,7 +103,7 @@ function buildMeFeedQuery(niches, { page = 1, limit = 24, pageSize = limit, all 
     FROM posts
     LEFT JOIN creator_types ct ON posts.account_handle = ct.account_handle
     WHERE ${clause} AND ${PLAYABLE_CLAUSE}${modelClause}
-    ORDER BY ${shuffle ? 'RANDOM()' : 'posts.posted_at DESC'}
+    ORDER BY ${order}
     LIMIT $${limIdx} OFFSET $${offIdx}`;
   return { sql, params: [...params, limit, offset] };
 }

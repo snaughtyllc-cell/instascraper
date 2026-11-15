@@ -1,6 +1,7 @@
 const { slugifyTypeLabel, validateTypeLabel } = require('./content-types');
 const { decideSort, sortConfig } = require('./sort-status');
-const { redecideFromDescription, makeGeminiClient, estimateCostUsd } = require('./gemini-sort');
+const { redecideFromDescription, makeGeminiClient, estimateCostUsd, cleanAiLookTags } = require('./gemini-sort');
+const { withSortLock, attemptsToday } = require('./sort-runner');
 
 const LIVE = '(soft_deleted = 0 OR soft_deleted IS NULL) AND (archived = 0 OR archived IS NULL)';
 const redecideQueues = new WeakMap();
@@ -31,36 +32,56 @@ function redecideNeedsLook({ pool, redecide, cfg = sortConfig() }) {
   }
   const state = { pending: true, redecide, cfg, promise: null };
   redecideQueues.set(pool, state);
-  state.promise = (async () => {
+  state.promise = withSortLock(async () => {
     let client;
     const totals = { redecided: 0, promoted: 0 };
     while (state.pending) {
       state.pending = false;
       const currentCfg = state.cfg;
+      const available = Math.max(0, currentCfg.dailyMax - await attemptsToday(pool));
+      if (!available) break;
       const types = (await pool.query('SELECT value, label FROM content_types ORDER BY sort_order, label')).rows;
+      const lookTags = (await pool.query("SELECT value,label,category FROM look_tags WHERE category <> 'custom' ORDER BY category,sort_order,label")).rows;
       const rows = (await pool.query(`SELECT id, caption, ai_description FROM posts
-        WHERE sort_status = 'needs_look' AND ai_description IS NOT NULL AND ai_description <> '' AND ${LIVE}`)).rows;
+        WHERE sort_status = 'needs_look' AND ai_description IS NOT NULL AND ai_description <> '' AND ${LIVE}
+        ORDER BY id LIMIT $1`, [available])).rows;
       for (const row of rows) {
+        let attemptId;
+        let cost = estimateCostUsd({ inTokens: 1000, outTokens: 100 }, currentCfg);
         try {
-          const input = { description: row.ai_description, caption: row.caption || '', types };
+          const input = { description: row.ai_description, caption: row.caption || '', types, lookTags };
+          const attempt = await pool.query(`INSERT INTO look_backfill_attempts(post_id,attempted_at,cost_usd)
+            VALUES($1,$2,$3) RETURNING id`, [row.id, new Date().toISOString(), cost]);
+          attemptId = attempt.rows[0].id;
           const ai = state.redecide
             ? await state.redecide(input, { model: currentCfg.model })
             : await redecideFromDescription(input, { client: client || (client = makeGeminiClient(process.env.GEMINI_API_KEY)), model: currentCfg.model });
           const decision = decideSort({ ai, typeValues: types.map((type) => type.value), threshold: currentCfg.minConfidence });
-          const cost = estimateCostUsd(ai.usage || { inTokens: 0, outTokens: 0 }, currentCfg);
-          const update = await pool.query(`UPDATE posts SET content_type = $1, sort_status = $2,
-            ai_type = $3, ai_confidence = $4, ai_description = $5, ai_suggested_type = $6,
-            ai_model = $7, ai_classified_at = $8, ai_error = NULL,
-            ai_cost_usd = COALESCE(ai_cost_usd, 0) + $9
-            WHERE id = $10 AND sort_status = 'needs_look' AND ${LIVE}`,
-          [decision.contentType, decision.sortStatus, ai.type, ai.confidence, ai.description,
-            ai.suggestedType || null, currentCfg.model, new Date().toISOString(), cost, row.id]);
+          cost = ai.usage ? estimateCostUsd(ai.usage, currentCfg) : cost;
+          const update = await pool.transaction(async db => {
+            const update = await db.query(`UPDATE posts SET content_type = $1, sort_status = $2,
+              ai_type = $3, ai_confidence = $4, ai_description = $5, ai_suggested_type = $6,
+              ai_model = $7, ai_classified_at = $8, ai_error = NULL,
+              ai_cost_usd = COALESCE(ai_cost_usd, 0) + $9,
+              ai_look_tags = COALESCE($10, ai_look_tags)
+              WHERE id = $11 AND sort_status = 'needs_look' AND ${LIVE}`,
+            [decision.contentType, decision.sortStatus, ai.type, ai.confidence, ai.description,
+              ai.suggestedType || null, currentCfg.model, new Date().toISOString(), cost,
+              Array.isArray(ai.lookTags) ? JSON.stringify(cleanAiLookTags(ai.lookTags, lookTags)) : null, row.id]);
+            // The post already accumulates successful text-call spend; the ledger
+            // retains cost only when a concurrent human edit prevented that update.
+            const rowCount = update.rowCount;
+            await db.query('UPDATE look_backfill_attempts SET cost_usd=$1 WHERE id=$2', [rowCount ? 0 : cost, attemptId]);
+            return { rowCount };
+          });
           if (update.rowCount > 0) {
             totals.redecided += 1;
             if (decision.sortStatus === 'auto') totals.promoted += 1;
           }
         } catch (error) {
           console.error(`[Sort] redecide reel ${row.id}:`, error.message);
+        } finally {
+          if (attemptId !== undefined) console.log(`[Sort] redecide reel=${row.id} estimated_usd=${cost.toFixed(6)}`);
         }
       }
     }
@@ -68,13 +89,13 @@ function redecideNeedsLook({ pool, redecide, cfg = sortConfig() }) {
     // microtask must start fresh rather than mark an already-finished pass pending.
     redecideQueues.delete(pool);
     return totals;
-  })().finally(() => {
+  }).finally(() => {
     if (redecideQueues.get(pool) === state) redecideQueues.delete(pool);
   });
   return state.promise;
 }
 
-function registerSortRoutes(app, { pool, runAutoSort, redecide, cfg = sortConfig() }) {
+function registerSortRoutes(app, { pool, runAutoSort, runLookBackfill, redecide, cfg = sortConfig() }) {
   const route = (handler) => (req, res, next) => Promise.resolve(handler(req, res)).catch(next);
   const backgroundRedecide = () => {
     redecideNeedsLook({ pool, redecide, cfg }).catch((error) => console.error('[Sort] redecide:', error.message));
@@ -137,6 +158,24 @@ function registerSortRoutes(app, { pool, runAutoSort, redecide, cfg = sortConfig
 
   app.get('/admin/sort-usage', route(async (req, res) => {
     res.json(await require('./sort-runner').sortUsage(pool, cfg));
+  }));
+
+  app.get('/sort/look-backfill/estimate', route(async (req, res) => {
+    res.json(await require('./look-backfill').lookBackfillEstimate(pool, cfg));
+  }));
+
+  let lookBackfillRunning = false;
+  app.post('/sort/look-backfill', route(async (req, res) => {
+    res.json({ started: true });
+    if (lookBackfillRunning) return;
+    lookBackfillRunning = true;
+    Promise.resolve().then(async () => {
+      while (true) {
+        const result = await (runLookBackfill || require('./look-backfill').runLookBackfill)({ pool, cfg });
+        if (result.skippedCap || !(result.tagged || result.errored)) break;
+      }
+    }).catch(error => console.error('[Look] backfill:', error.message))
+      .finally(() => { lookBackfillRunning = false; });
   }));
 
   app.get('/sort/start-fresh/preview', route(async (req, res) => {

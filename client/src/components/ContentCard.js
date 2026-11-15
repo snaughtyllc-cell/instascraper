@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { saveNotes, archivePost, setPostContentType } from '../api';
 import API_URL from '../api-base';
+import { LookTagChips } from './LookTags';
 
 function formatCount(n) {
   if (!n) return '0';
@@ -279,6 +280,8 @@ export default function ContentCard({
           </a>
           <span className="text-xs text-gray-500">{formatDate(post.posted_at)}</span>
         </div>
+
+        <LookTagChips tags={post.ai_look_tags} />
 
         {/* Caption */}
         {post.caption && (

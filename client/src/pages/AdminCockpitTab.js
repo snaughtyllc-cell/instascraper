@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useState } from 'react';
-import { getBackfillEstimate, getModelCockpit, getSortUsage, getStartFreshPreview, startBackfill, startFresh } from '../api';
+import { getBackfillEstimate, getModelCockpit, getSortUsage, getStartFreshPreview, startBackfill, startFresh, getLookTags, addLookTag, deleteLookTag, getLookBackfillEstimate, startLookBackfill } from '../api';
 import { isStartFreshConfirmation } from '../utils/startFreshConfirmation';
 
 const FEEDBACK_LABELS = {
@@ -74,6 +74,7 @@ export default function AdminCockpitTab() {
       )}
 
       <AutoSortCard />
+      <LookTagsCard />
 
       <div className="grid grid-cols-2 gap-3 lg:grid-cols-6">
         {[
@@ -245,6 +246,76 @@ function Metric({ label, value, tone = 'text-white' }) {
       <p className={`text-sm font-semibold ${tone}`}>{typeof value === 'number' ? num(value) : value}</p>
     </div>
   );
+}
+
+function LookTagsCard() {
+  const [tags, setTags] = useState([]);
+  const [estimate, setEstimate] = useState(null);
+  const [label, setLabel] = useState('');
+  const [category, setCategory] = useState('aesthetic');
+  const [busy, setBusy] = useState('');
+  const [error, setError] = useState('');
+  const [message, setMessage] = useState('');
+  const load = useCallback(async () => {
+    const [vocabulary, backfill] = await Promise.all([getLookTags(), getLookBackfillEstimate()]);
+    setTags(vocabulary.data);
+    setEstimate(backfill.data);
+  }, []);
+  useEffect(() => { load().catch(err => setError(err.response?.data?.error || err.message)); }, [load]);
+  const act = async (name, action) => {
+    setBusy(name);
+    setError('');
+    setMessage('');
+    try { await action(); await load(); }
+    catch (err) { setError(err.response?.data?.error || err.message); }
+    finally { setBusy(''); }
+  };
+  const cost = value => Number(value || 0).toLocaleString(undefined, { style: 'currency', currency: 'USD', minimumFractionDigits: 2, maximumFractionDigits: 4 });
+  const backfill = () => act('backfill', async () => {
+    const { data } = await getLookBackfillEstimate();
+    setEstimate(data);
+    if (!Number(data.count)) { setMessage('All eligible cached reels already have look tags.'); return; }
+    if (!window.confirm(`Tag ${num(data.count)} existing reels? Estimated cost: ${cost(data.estUsd)}. The daily cap applies. Content types and sort statuses stay unchanged.`)) return;
+    await startLookBackfill();
+    setMessage('Look tagging started. Refresh to update the remaining count.');
+  });
+  return <section aria-labelledby="look-tags-title" className="space-y-4 rounded-xl border border-gray-800 bg-gray-900 p-5">
+    <div>
+      <h3 id="look-tags-title" className="text-lg font-semibold text-white">Look tags</h3>
+      <p className="mt-1 text-sm text-gray-400">Hair, aesthetic and setting help rank matching reels. Custom tags are added manually.</p>
+    </div>
+    <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+      {['hair', 'aesthetic', 'setting', 'custom'].map(group => <div key={group}>
+        <h4 className="mb-2 text-xs font-medium capitalize text-gray-400">{group}</h4>
+        <div className="flex flex-wrap gap-1.5">
+          {tags.filter(tag => tag.category === group).map(tag => <span key={tag.id} className="inline-flex items-center gap-1 rounded border border-gray-700 bg-gray-800 px-2 py-1 text-xs text-gray-300">
+            {tag.label}<button type="button" disabled={Boolean(busy)} aria-label={`Delete ${tag.label} tag`} onClick={() => {
+              if (window.confirm(`Delete "${tag.label}" from the vocabulary? It will stop contributing to look matches.`)) act(`delete:${tag.id}`, () => deleteLookTag(tag.id));
+            }} className="px-1 py-1 text-gray-500 hover:text-red-300 disabled:opacity-50">×</button>
+          </span>)}
+          {!tags.some(tag => tag.category === group) && <p className="text-xs text-gray-500">No tags</p>}
+        </div>
+      </div>)}
+    </div>
+    <form onSubmit={event => { event.preventDefault(); act('add', async () => { await addLookTag(label.trim(), category); setLabel(''); }); }} className="flex flex-wrap items-end gap-3 border-t border-gray-800 pt-4">
+      <label className="flex-1 text-xs text-gray-400">Label
+        <input value={label} onChange={event => setLabel(event.target.value)} required maxLength={40} placeholder="e.g. Soft glam" className="mt-1 block w-full min-w-40 rounded-lg border border-gray-700 bg-gray-800 px-3 py-2 text-sm text-white focus-visible:outline focus-visible:outline-gold" />
+      </label>
+      <label className="text-xs text-gray-400">Category
+        <select value={category} onChange={event => setCategory(event.target.value)} className="mt-1 block rounded-lg border border-gray-700 bg-gray-800 px-3 py-2 text-sm text-white">
+          {['hair', 'aesthetic', 'setting', 'custom'].map(value => <option key={value} value={value}>{value}</option>)}
+        </select>
+      </label>
+      <button type="submit" disabled={Boolean(busy) || !label.trim()} className="rounded-lg border border-gray-700 bg-gray-800 px-4 py-2 text-sm text-gray-200 hover:border-gray-500 disabled:opacity-50">{busy === 'add' ? 'Adding…' : 'Add tag'}</button>
+    </form>
+    <div className="flex flex-wrap items-center gap-3 border-t border-gray-800 pt-4">
+      <button onClick={backfill} disabled={Boolean(busy) || !estimate} className="rounded-lg bg-gold px-4 py-2 text-sm font-semibold text-gray-950 hover:bg-gold-light disabled:opacity-50">{busy === 'backfill' ? 'Preparing…' : 'Tag existing reels'}</button>
+      <p className="text-xs text-gray-400">{estimate ? `${num(estimate.count)} eligible reels · estimated ${cost(estimate.estUsd)}` : 'Loading estimate…'}</p>
+      <button type="button" disabled={Boolean(busy)} onClick={() => act('refresh', async () => {})} className="text-xs text-gray-400 underline underline-offset-4">Refresh</button>
+    </div>
+    {message && <p role="status" className="text-sm text-emerald-300">{message}</p>}
+    {error && <p role="alert" className="text-sm text-red-300">{error}</p>}
+  </section>;
 }
 
 function AutoSortCard() {
