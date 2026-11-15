@@ -11,6 +11,8 @@ const response = (status, body) => ({ ok: status >= 200 && status < 300, status,
   json: async () => body, body: { destroy() {} } });
 const signal = () => new AbortController().signal;
 const noSleep = async () => {};
+const GENERIC_ACTOR_ID = 'apify~instagram-scraper';
+const REEL_ACTOR_ID = 'apify~instagram-reel-scraper';
 
 function captureErrors(t) {
   const lines = [];
@@ -31,13 +33,13 @@ for (const [name, keys, token] of [
     requests.push({ url: new URL(url), options });
     return response(200, { data: { id: 'run-id' } });
   }, noSleep, 180000);
-  const input = { directUrls: ['https://www.instagram.com/reel/example/'], resultsLimit: 1 };
-  await client.startRun('apify~instagram-reel-scraper', input, signal());
+  const input = { directUrls: ['https://www.instagram.com/reel/example/'], resultsType: 'posts', resultsLimit: 1 };
+  await client.startRun(GENERIC_ACTOR_ID, input, signal());
   await client.getRun('run-id', signal());
   await client.getItems('run-id', signal());
   await client.abortRun('run-id', signal());
   assert.deepEqual(requests.map(item => item.url.pathname), [
-    '/v2/acts/apify~instagram-reel-scraper/runs', '/v2/actor-runs/run-id',
+    '/v2/acts/apify~instagram-scraper/runs', '/v2/actor-runs/run-id',
     '/v2/actor-runs/run-id/dataset/items', '/v2/actor-runs/run-id/abort',
   ]);
   for (const { url, options } of requests) {
@@ -47,6 +49,7 @@ for (const [name, keys, token] of [
   }
   assert.equal(requests[0].url.searchParams.get('timeout'), '180');
   assert.equal(requests[0].url.searchParams.get('memory'), '1024');
+  assert.ok(requests.slice(1).every(item => !item.url.searchParams.has('memory')));
   assert.deepEqual(JSON.parse(requests[0].options.body), input);
   assert.equal(requests[3].url.searchParams.get('gracefully'), 'false');
 });
@@ -66,15 +69,15 @@ test('missing keys fail every route with apify_no_key and one diagnostic across 
   assert.deepEqual(lines, ['[React fetch] no Apify key configured (set REACT_APIFY_API_KEY)']);
 });
 
-test('Apify run memory defaults to 512 for absent or invalid configuration', async () => {
-  for (const memory of [undefined, '0', '-1', 'not-a-number', '512.5']) {
+test('Apify run memory is omitted for absent, empty, or invalid configuration', async () => {
+  for (const memory of [undefined, '', ' ', '0', '-1', 'not-a-number', '512.5', '9007199254740992']) {
     let requested;
     const client = createApifyClient({ APIFY_API_KEY: 'secret', REACT_FETCH_MEMORY_MB: memory }, async url => {
       requested = new URL(url);
       return response(200, { data: { id: 'run-id' } });
     }, noSleep, 180000);
     await client.startRun('actor', {}, signal());
-    assert.equal(requested.searchParams.get('memory'), '512');
+    assert.equal(requested.searchParams.has('memory'), false);
   }
 });
 
@@ -90,10 +93,56 @@ test('HTTP failures log exactly one sanitized line per response on every route',
   await assert.rejects(client.getItems('run-id', signal()), { code: 'apify_failed' });
   await assert.rejects(client.abortRun('run-id', signal()), { code: 'apify_failed' });
   assert.deepEqual(lines, ['startRun', 'getRun', 'getItems', 'abortRun'].map(route =>
-    `[React fetch] apify_http route=${route} status=401 type=invalid-token`));
+    `[React fetch] apify_http route=${route} actor=unknown status=401 type=invalid-token`));
   assert.ok(!lines.join('\n').includes(token));
   assert.ok(!lines.join('\n').includes('https://'));
   assert.ok(!lines.join('\n').includes('dataset'));
+});
+
+test('HTTP failure diagnostics identify the generic or reel actor on every route', async t => {
+  const lines = captureErrors(t);
+  for (const actorId of [GENERIC_ACTOR_ID, REEL_ACTOR_ID]) {
+    const client = createApifyClient({ APIFY_API_KEY: 'secret-token' },
+      async () => response(401, { error: { type: 'invalid-token' } }), noSleep);
+    await assert.rejects(client.startRun(actorId, {}, signal()), { code: 'apify_failed' });
+    await assert.rejects(client.getRun('run-id', signal(), actorId), { code: 'apify_failed' });
+    await assert.rejects(client.getItems('run-id', signal(), actorId), { code: 'apify_failed' });
+    await assert.rejects(client.abortRun('run-id', signal(), actorId), { code: 'apify_failed' });
+  }
+  assert.deepEqual(lines, ['generic', 'reel'].flatMap(actor =>
+    ['startRun', 'getRun', 'getItems', 'abortRun'].map(route =>
+      `[React fetch] apify_http route=${route} actor=${actor} status=401 type=invalid-token`)));
+});
+
+test('400 invalid-input on either actor start fails once with apify_invalid_input', async t => {
+  const lines = captureErrors(t);
+  for (const actorId of [GENERIC_ACTOR_ID, REEL_ACTOR_ID]) {
+    let calls = 0;
+    const client = createApifyClient({ APIFY_API_KEY: 'secret-token' }, async () => {
+      calls++;
+      return response(400, { error: { type: 'invalid-input' } });
+    }, async () => { assert.fail('invalid actor input must not back off'); });
+    await assert.rejects(client.startRun(actorId, {}, signal()), {
+      code: 'apify_invalid_input', message: 'apify_invalid_input',
+    });
+    assert.equal(calls, 1);
+  }
+  assert.deepEqual(lines, ['generic', 'reel'].map(actor =>
+    `[React fetch] apify_http route=startRun actor=${actor} status=400 type=invalid-input`));
+});
+
+test('invalid-input outside a 400 actor start remains apify_failed', async t => {
+  captureErrors(t);
+  const client = createApifyClient({ APIFY_API_KEY: 'secret-token' },
+    async () => response(400, { error: { type: 'invalid-input' } }),
+    async () => { assert.fail('invalid input must not back off'); });
+  await assert.rejects(client.getRun('run-id', signal(), GENERIC_ACTOR_ID), { code: 'apify_failed' });
+  await assert.rejects(client.getItems('run-id', signal(), GENERIC_ACTOR_ID), { code: 'apify_failed' });
+  await assert.rejects(client.abortRun('run-id', signal(), GENERIC_ACTOR_ID), { code: 'apify_failed' });
+  const forbidden = createApifyClient({ APIFY_API_KEY: 'secret-token' },
+    async () => response(403, { error: { type: 'invalid-input' } }),
+    async () => { assert.fail('403 must not back off'); });
+  await assert.rejects(forbidden.startRun(GENERIC_ACTOR_ID, {}, signal()), { code: 'apify_failed' });
 });
 
 test('untrusted or token-bearing error types are replaced with a static placeholder', async t => {
@@ -105,7 +154,7 @@ test('untrusted or token-bearing error types are replaced with a static placehol
     }), noSleep, 180000);
     await assert.rejects(client.getRun('run-id', signal()), { code: 'apify_failed' });
   }
-  assert.ok(lines.every(line => line === '[React fetch] apify_http route=getRun status=400 type=unknown'));
+  assert.ok(lines.every(line => line === '[React fetch] apify_http route=getRun actor=unknown status=400 type=unknown'));
 });
 
 test('HTTP diagnostics scrub both Apify keys when the React key is preferred', async t => {
@@ -115,7 +164,7 @@ test('HTTP diagnostics scrub both Apify keys when the React key is preferred', a
       async () => response(400, { error: { type } }), noSleep);
     await assert.rejects(client.getRun('run-id', signal()), { code: 'apify_failed' });
   }
-  assert.deepEqual(lines, Array(2).fill('[React fetch] apify_http route=getRun status=400 type=unknown'));
+  assert.deepEqual(lines, Array(2).fill('[React fetch] apify_http route=getRun actor=unknown status=400 type=unknown'));
 });
 
 test('non-JSON HTTP errors still emit a sanitized diagnostic', async t => {
@@ -124,7 +173,7 @@ test('non-JSON HTTP errors still emit a sanitized diagnostic', async t => {
     ...response(400), json: async () => { throw new Error('https://example.com/secret-token'); },
   }), noSleep, 180000);
   await assert.rejects(client.getItems('run-id', signal()), { code: 'apify_failed' });
-  assert.deepEqual(lines, ['[React fetch] apify_http route=getItems status=400 type=unknown']);
+  assert.deepEqual(lines, ['[React fetch] apify_http route=getItems actor=unknown status=400 type=unknown']);
 });
 
 test('capacity statuses and error types back off three times then fail apify_busy', async t => {

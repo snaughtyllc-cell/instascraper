@@ -83,7 +83,7 @@ test('transient failure codes become retryable at ten minutes', async t => {
 
 test('permanent failure codes retain the six-hour retry window', async t => {
   const f = await fixture(t);
-  for (const code of ['no_video', 'apify_error_stub', 'download_too_large', 'invalid_video_type']) {
+  for (const code of ['apify_invalid_input', 'no_video', 'apify_error_stub', 'download_too_large', 'invalid_video_type']) {
     const shortcode = `retry_${code}`;
     f.failed(shortcode, code, TEN_MINUTES);
     assert.deepEqual(await f.worker.request(shortcode), { state: 'unavailable', launched: false }, code);
@@ -93,7 +93,7 @@ test('permanent failure codes retain the six-hour retry window', async t => {
     assert.deepEqual(await f.worker.request(shortcode), { state: 'fetching', launched: true }, code);
     await f.worker.waitForIdle();
   }
-  assert.equal(f.launches.length, 4);
+  assert.equal(f.launches.length, 5);
 });
 
 test('old apify_failed cohort releases rejected launches before the daily cap', async t => {
