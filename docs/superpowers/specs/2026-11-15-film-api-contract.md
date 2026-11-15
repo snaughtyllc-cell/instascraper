@@ -138,6 +138,13 @@ On boot, interrupted running jobs fail with `worker_restarted` and receive a fai
 queued jobs resume, and undelivered terminal callbacks retry without re-rendering. Duplicate IDs, including
 failed jobs, remain idempotent. Only one render runs at a time by default.
 
+Each render caps libx264 and both filter thread pools to `REACT_FFMPEG_THREADS` (default 2).
+Positive integers are clamped to 1–16; invalid, nonpositive, or fractional values use 2.
+ffmpeg and ffprobe (including pinned-reference probes) run at CPU nice level `REACT_FFMPEG_NICE`
+(default 10) to give the live app priority. Integer levels 1–19 are accepted; 0 disables the adjustment,
+and invalid values use 10. Priority adjustment is best effort and never fails a render.
+These settings come from the server environment and cannot be overridden by render request fields.
+
 Runtime configuration:
 
 | Variable | Default / purpose |
@@ -146,6 +153,8 @@ Runtime configuration:
 | `REACT_REF_DIR` | `<DEFAULT_VIDEO_DIR>/../react-refs`; persistent pinned references |
 | `REACT_RENDER_CONCURRENCY` | `1` |
 | `REACT_RENDER_TIMEOUT_SEC` | `900` wall-clock seconds per ffmpeg render |
+| `REACT_FFMPEG_THREADS` | `2`; encoder and filter thread caps, positive integer clamped to 1–16 |
+| `REACT_FFMPEG_NICE` | `10`; best-effort CPU nice level 1–19; `0` disables |
 | `REACT_RAW_MAX_MB` | `1024` |
 | `FFMPEG_PATH` | `ffmpeg` |
 | `FFPROBE_PATH` | `ffprobe` |

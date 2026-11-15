@@ -6,7 +6,7 @@ const { spawnSync } = require('node:child_process');
 const fs = require('node:fs/promises');
 const os = require('node:os');
 const path = require('node:path');
-const { buildFfmpegArgs, probeVideo, renderVideo } = require('./react-ffmpeg');
+const { buildFfmpegArgs, probeVideo, renderVideo, resolveFfmpegThreads } = require('./react-ffmpeg');
 
 function options(overrides = {}) {
   return { rawPath: '/tmp/raw.mp4', referencePath: '/tmp/reference.mp4', outputPath: '/tmp/output.mp4',
@@ -47,6 +47,55 @@ test('positive sync offsets the reference input and clones its first frame with 
   assert.match(filter(args), /\[1:v\]setpts=PTS-STARTPTS/);
   assert.match(filter(args), /tpad=start_mode=clone:start_duration=1.234/);
   assert.match(filter(args), /\[1:a\]asetpts=PTS-STARTPTS,adelay=1234:all=1,volume=0.8/);
+});
+
+test('ffmpeg thread caps default to two in the filter and output option sections', () => {
+  for (const output of ['stitched', 'solo']) {
+    const opts = options({ output });
+    const args = buildFfmpegArgs(opts);
+    const graphIndex = args.indexOf('-filter_complex');
+    const outputIndex = args.indexOf(opts.outputPath);
+    const lastInputIndex = args.lastIndexOf('-i');
+    for (const flag of ['-filter_threads', '-filter_complex_threads']) {
+      assert.equal(args[args.indexOf(flag) + 1], '2');
+      assert.ok(args.indexOf(flag) < graphIndex);
+    }
+    assert.equal(args[args.indexOf('-threads') + 1], '2');
+    assert.ok(args.indexOf('-threads') > lastInputIndex + 1);
+    assert.ok(args.indexOf('-threads') > graphIndex);
+    assert.ok(args.indexOf('-threads') < outputIndex);
+    assert.equal(args[args.indexOf('-x264-params') + 1], 'threads=2');
+    assert.ok(args.indexOf('-x264-params') > lastInputIndex + 1);
+    assert.ok(args.indexOf('-x264-params') < outputIndex);
+    assert.equal(outputIndex, args.length - 1);
+  }
+});
+
+test('ffmpeg builder uses explicit thread options and never reads the environment', () => {
+  const previous = process.env.REACT_FFMPEG_THREADS;
+  try {
+    process.env.REACT_FFMPEG_THREADS = '12';
+    const defaults = buildFfmpegArgs(options());
+    assert.equal(defaults[defaults.indexOf('-threads') + 1], '2');
+    const args = buildFfmpegArgs(options({ threads: 4 }));
+    for (const flag of ['-threads', '-filter_threads', '-filter_complex_threads']) {
+      assert.equal(args[args.indexOf(flag) + 1], '4');
+    }
+    assert.equal(args[args.indexOf('-x264-params') + 1], 'threads=4');
+  } finally {
+    if (previous === undefined) delete process.env.REACT_FFMPEG_THREADS;
+    else process.env.REACT_FFMPEG_THREADS = previous;
+  }
+});
+
+test('ffmpeg thread resolver rejects invalid values and clamps positive integers', () => {
+  for (const value of [undefined, null, '', ' ', 'no', '2bad', 0, '0', -1, '-1', 1.5, '1.5',
+    NaN, Infinity, 'Infinity', true, {}, []]) {
+    assert.equal(resolveFfmpegThreads(value), 2, String(value));
+  }
+  for (const [value, expected] of [[1, 1], ['3', 3], [16, 16], ['17', 16], [100, 16]]) {
+    assert.equal(resolveFfmpegThreads(value), expected, String(value));
+  }
 });
 
 test('negative sync seeks only the reference input and does not delay audio or video', () => {
@@ -90,10 +139,11 @@ test('ffmpeg graph rejects nonfinite duration and unsafe graph values', () => {
   }
 });
 
-function fakeSpawn({ stdout = '', code = 0, hang = false } = {}) {
+function fakeSpawn({ stdout = '', code = 0, hang = false, pid = 43210 } = {}) {
   const calls = [];
   const spawnImpl = (command, args, spawnOptions) => {
     const child = new EventEmitter();
+    child.pid = pid;
     child.stdout = new PassThrough();
     child.kill = signal => {
       calls.push({ signal });
@@ -106,8 +156,25 @@ function fakeSpawn({ stdout = '', code = 0, hang = false } = {}) {
     });
     return child;
   };
-  return { calls, spawnImpl };
+  return { calls, spawnImpl, setPriorityImpl: () => {} };
 }
+
+test('renderVideo resolves thread caps from environment and execution options', async () => {
+  for (const [envValue, expected] of [[undefined, '2'], ['4', '4'], ['', '2'], ['0', '2'],
+    ['-1', '2'], ['1.5', '2'], ['invalid', '2'], ['100', '16']]) {
+    const fake = fakeSpawn();
+    await renderVideo(options({ threads: 16 }), { ...fake, env: { REACT_FFMPEG_THREADS: envValue } });
+    const args = fake.calls[0].args;
+    for (const flag of ['-threads', '-filter_threads', '-filter_complex_threads']) {
+      assert.equal(args[args.indexOf(flag) + 1], expected, String(envValue));
+    }
+    assert.equal(args[args.indexOf('-x264-params') + 1], `threads=${expected}`);
+  }
+  const fake = fakeSpawn();
+  await renderVideo(options(), { ...fake, env: { REACT_FFMPEG_THREADS: '4' }, threads: 3 });
+  const args = fake.calls[0].args;
+  assert.equal(args[args.indexOf('-threads') + 1], '3');
+});
 
 test('probeVideo reads metadata and supports the configured binary', async () => {
   const fake = fakeSpawn({ stdout: JSON.stringify({ format: { duration: '3.000' },
@@ -144,6 +211,63 @@ test('process startup failures, probe timeouts and oversized output remain bound
   assert.equal(hanging.calls[1].signal, 'SIGKILL');
   await assert.rejects(probeVideo('/tmp/raw.mp4', fakeSpawn({ stdout: 'x'.repeat(1024 * 1024 + 1) })),
     /^Error: ffprobe_invalid_output$/);
+});
+
+test('ffmpeg and ffprobe lower child CPU priority by default', async () => {
+  for (const command of ['ffmpeg', 'ffprobe']) {
+    const priorities = [];
+    const fake = fakeSpawn({ stdout: JSON.stringify({ format: { duration: '3' },
+      streams: [{ codec_type: 'video', width: 720, height: 1280 }] }) });
+    const runOptions = { ...fake, env: {}, setPriorityImpl: (...args) => priorities.push(args) };
+    if (command === 'ffmpeg') await renderVideo(options(), runOptions);
+    else await probeVideo('/tmp/raw.mp4', runOptions);
+    assert.deepEqual(priorities, [[43210, 10]], command);
+  }
+});
+
+test('priority failures never fail ffmpeg or ffprobe', async () => {
+  for (const code of ['EPERM', 'ESRCH', 'ENOSYS']) {
+    for (const command of ['ffmpeg', 'ffprobe']) {
+      const fake = fakeSpawn({ stdout: JSON.stringify({ format: { duration: '3' },
+        streams: [{ codec_type: 'video', width: 720, height: 1280 }] }) });
+      let attempts = 0;
+      const runOptions = { ...fake, env: {}, setPriorityImpl: () => {
+        attempts++;
+        throw Object.assign(new Error('priority unavailable'), { code });
+      } };
+      if (command === 'ffmpeg') await renderVideo(options(), runOptions);
+      else await probeVideo('/tmp/raw.mp4', runOptions);
+      assert.equal(attempts, 1, `${command}: ${code}`);
+    }
+  }
+});
+
+test('priority accepts configured values, rejects unsafe values and allows disabling', async () => {
+  for (const [configured, expected] of [['0', null], ['1', 1], ['19', 19], ['6', 6],
+    ['', 10], ['bad', 10], ['1.5', 10], ['-1', 10], ['20', 10], ['Infinity', 10]]) {
+    const priorities = [];
+    await renderVideo(options(), { ...fakeSpawn(), env: { REACT_FFMPEG_NICE: configured },
+      setPriorityImpl: (...args) => priorities.push(args) });
+    assert.deepEqual(priorities, expected === null ? [] : [[43210, expected]], configured);
+  }
+  const priorities = [];
+  await probeVideo('/tmp/raw.mp4', { ...fakeSpawn({ stdout: JSON.stringify({ format: { duration: '3' },
+    streams: [{ codec_type: 'video', width: 720, height: 1280 }] }) }),
+  nice: 0, env: { REACT_FFMPEG_NICE: '10' }, setPriorityImpl: (...args) => priorities.push(args) });
+  assert.deepEqual(priorities, []);
+});
+
+test('priority never targets the parent process when spawn has no positive child pid', async () => {
+  for (const pid of [undefined, null, 0, -1, NaN]) {
+    const priorities = [];
+    const spawnImpl = (...args) => {
+      const child = fakeSpawn().spawnImpl(...args);
+      child.pid = pid;
+      return child;
+    };
+    await renderVideo(options(), { spawnImpl, env: {}, setPriorityImpl: (...args) => priorities.push(args) });
+    assert.deepEqual(priorities, []);
+  }
 });
 
 const ffmpegAvailable = spawnSync('ffmpeg', ['-version'], { stdio: 'ignore' }).status === 0;

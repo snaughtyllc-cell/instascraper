@@ -85,6 +85,25 @@ test('queue is durable, case-insensitively idempotent and removes all temporary 
   assert.deepEqual(fs.readdirSync(f.dir), []);
 });
 
+test('worker passes trusted thread and priority configuration instead of request overrides', async t => {
+  for (const [configured, expected] of [
+    [{}, { threads: 2, nice: 10 }],
+    [{ REACT_FFMPEG_THREADS: '4', REACT_FFMPEG_NICE: '6' }, { threads: 4, nice: 6 }],
+    [{ REACT_FFMPEG_THREADS: '100', REACT_FFMPEG_NICE: '0' }, { threads: 16, nice: 0 }],
+    [{ REACT_FFMPEG_THREADS: 'invalid', REACT_FFMPEG_NICE: '-1' }, { threads: 2, nice: 10 }],
+  ]) {
+    const { pool } = await database(t), f = fixture(t), probes = [], renders = [];
+    const worker = createReactRenderWorker({ pool, ...f.dependencies, env: { ...env, ...configured },
+      probe: async (file, options) => { probes.push(options); return { durationSec: 3, hasAudio: true }; },
+      render: async (opts, options) => { renders.push(options); fs.writeFileSync(opts.outputPath, 'rendered'); } });
+    await worker.enqueue(request({ threads: 1000, nice: 0 }));
+    await worker.waitForIdle();
+    assert.deepEqual(probes, Array.from({ length: 2 }, () => ({ ffprobePath: 'ffprobe', nice: expected.nice })));
+    assert.deepEqual(renders, [{ ffmpegPath: 'ffmpeg', ...expected, timeoutMs: 900000 }]);
+    assert.equal(f.callbacks[0].state, 'done');
+  }
+});
+
 test('worker enforces configured concurrency and atomic database queue claims', async t => {
   const { pool } = await database(t), f = fixture(t);
   let active = 0, peak = 0;

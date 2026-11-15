@@ -1,7 +1,7 @@
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
-const { execFile } = require('child_process');
+const { probeVideo } = require('./react-ffmpeg');
 const videos = require('./videos');
 
 function isValidShortcode(shortcode) {
@@ -35,18 +35,9 @@ function availableReferencePath(post) {
   return usableFile(cache) ? cache : getPinnedReferencePath(post.shortcode);
 }
 
-function probeDuration(file) {
-  return new Promise(resolve => {
-    execFile(process.env.FFPROBE_PATH || 'ffprobe', [
-      '-v', 'error', '-protocol_whitelist', 'file,pipe', '-show_entries', 'format=duration', '-of', 'json', file,
-    ], { timeout: 30000, maxBuffer: 64 * 1024 }, (error, stdout) => {
-      if (error) return resolve(null);
-      try {
-        const value = Number(JSON.parse(stdout).format?.duration);
-        resolve(Number.isFinite(value) && value > 0 ? value : null);
-      } catch { resolve(null); }
-    });
-  });
+async function probeDuration(file) {
+  try { return (await probeVideo(file)).durationSec; }
+  catch { return null; }
 }
 
 async function ensureReactReference(pool, shortcode, deps = {}) {

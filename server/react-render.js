@@ -1,7 +1,7 @@
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
-const { buildFfmpegArgs, probeVideo, renderVideo } = require('./react-ffmpeg');
+const { buildFfmpegArgs, probeVideo, renderVideo, resolveFfmpegThreads, resolveFfmpegNice } = require('./react-ffmpeg');
 const transfer = require('./react-transfer');
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -48,6 +48,8 @@ function createReactRenderWorker({ pool, env = process.env, download = transfer.
   ensureReference = (db, shortcode) => require('./react-reference').ensureReactReference(db, shortcode),
   tempRoot = os.tmpdir() }) {
   const concurrency = positiveNumber(env.REACT_RENDER_CONCURRENCY, 1, true);
+  const threads = resolveFfmpegThreads(env.REACT_FFMPEG_THREADS);
+  const nice = resolveFfmpegNice(env.REACT_FFMPEG_NICE);
   const jobs = new Map(), queue = [], idleWaiters = [];
   let active = 0, initialization;
 
@@ -107,14 +109,15 @@ function createReactRenderWorker({ pool, env = process.env, download = transfer.
         await download(body.reference.url, referenceDownload, { maxBytes: 500 * 1024 * 1024, allowedUrl });
         referencePath = referenceDownload;
       }
-      const raw = await probe(rawPath, { ffprobePath: env.FFPROBE_PATH || 'ffprobe' });
-      const reference = await probe(referencePath, { ffprobePath: env.FFPROBE_PATH || 'ffprobe' });
+      const raw = await probe(rawPath, { ffprobePath: env.FFPROBE_PATH || 'ffprobe', nice });
+      const reference = await probe(referencePath, { ffprobePath: env.FFPROBE_PATH || 'ffprobe', nice });
       if (body.output === 'stitched' && body.syncMs < 0 && -body.syncMs / 1000 >= reference.durationSec) {
         throw Object.assign(new Error('reference_seek_out_of_range'), { code: 'reference_seek_out_of_range' });
       }
       await render({ ...body, rawPath, referencePath, outputPath, rawDuration: raw.durationSec,
         rawHasAudio: raw.hasAudio, referenceHasAudio: reference.hasAudio },
-      { ffmpegPath: env.FFMPEG_PATH || 'ffmpeg', timeoutMs: positiveNumber(env.REACT_RENDER_TIMEOUT_SEC, 900) * 1000 });
+      { ffmpegPath: env.FFMPEG_PATH || 'ffmpeg', threads, nice,
+        timeoutMs: positiveNumber(env.REACT_RENDER_TIMEOUT_SEC, 900) * 1000 });
       driveFileId = await upload(body.uploadUrl, outputPath);
     } catch (error) { failure = safeError(error); }
     finally { if (dir) fs.rmSync(dir, { recursive: true, force: true }); }

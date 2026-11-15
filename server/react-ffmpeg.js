@@ -1,4 +1,12 @@
 const { spawn } = require('node:child_process');
+const os = require('node:os');
+
+function resolveFfmpegThreads(value) {
+  if ((typeof value !== 'number' && typeof value !== 'string') ||
+      (typeof value === 'string' && value.trim() === '')) return 2;
+  const threads = Number(value);
+  return Number.isInteger(threads) && threads > 0 ? Math.min(threads, 16) : 2;
+}
 
 function buildFfmpegArgs(opts) {
   const { rawPath, referencePath, outputPath, rawDuration, rawHasAudio, referenceHasAudio,
@@ -12,6 +20,7 @@ function buildFfmpegArgs(opts) {
       (output === 'stitched' && typeof referencePath !== 'string')) {
     throw new Error('invalid_render_options');
   }
+  const threads = String(resolveFfmpegThreads(opts.threads));
 
   const args = ['-hide_banner', '-loglevel', 'error', '-nostdin', '-y',
     '-protocol_whitelist', 'file,pipe', '-i', rawPath];
@@ -51,14 +60,23 @@ function buildFfmpegArgs(opts) {
     graph.push(`anullsrc=r=48000:cl=stereo,atrim=duration=${rawDuration}[a]`);
   }
 
-  args.push('-filter_complex', graph.join(';'), '-map', '[v]', '-map', '[a]',
+  args.push('-filter_threads', threads, '-filter_complex_threads', threads,
+    '-filter_complex', graph.join(';'), '-map', '[v]', '-map', '[a]',
     '-t', String(rawDuration), '-r', '30', '-c:v', 'libx264', '-preset', 'veryfast',
+    '-threads', threads, '-x264-params', `threads=${threads}`,
     '-crf', '20', '-pix_fmt', 'yuv420p', '-c:a', 'aac', '-b:a', '160k',
     '-movflags', '+faststart', outputPath);
   return args;
 }
 
-function runProcess(command, args, { timeoutMs, spawnImpl = spawn, errorPrefix }) {
+function resolveFfmpegNice(value) {
+  const nice = typeof value === 'number' || (typeof value === 'string' && value.trim() !== '')
+    ? Number(value) : NaN;
+  return Number.isInteger(nice) && nice >= 0 && nice <= 19 ? nice : 10;
+}
+
+function runProcess(command, args, { timeoutMs, spawnImpl = spawn, errorPrefix, nice,
+  setPriorityImpl = os.setPriority }) {
   return new Promise((resolve, reject) => {
     let child;
     try {
@@ -66,6 +84,10 @@ function runProcess(command, args, { timeoutMs, spawnImpl = spawn, errorPrefix }
     } catch {
       reject(new Error(`${errorPrefix}_failed`));
       return;
+    }
+    if (nice > 0 && Number.isInteger(child.pid) && child.pid > 0) {
+      try { setPriorityImpl(child.pid, nice); }
+      catch { /* Priority is best effort, including denied or already exited children. */ }
     }
     let stdout = '';
     let failure;
@@ -98,10 +120,12 @@ function validTimeout(value, fallback) {
 }
 
 async function probeVideo(file, options = {}) {
-  const stdout = await runProcess(options.ffprobePath || process.env.FFPROBE_PATH || 'ffprobe',
+  const env = options.env || process.env;
+  const stdout = await runProcess(options.ffprobePath || env.FFPROBE_PATH || 'ffprobe',
     ['-v', 'error', '-protocol_whitelist', 'file,pipe', '-show_entries',
       'format=duration:stream=codec_type,width,height,duration', '-of', 'json', file], {
       timeoutMs: validTimeout(options.timeoutMs, 30000), spawnImpl: options.spawnImpl, errorPrefix: 'ffprobe',
+      nice: resolveFfmpegNice(options.nice ?? env.REACT_FFMPEG_NICE), setPriorityImpl: options.setPriorityImpl,
     });
   let info;
   try {
@@ -122,12 +146,16 @@ async function probeVideo(file, options = {}) {
 }
 
 async function renderVideo(opts, options = {}) {
-  await runProcess(options.ffmpegPath || process.env.FFMPEG_PATH || 'ffmpeg', buildFfmpegArgs(opts), {
+  const env = options.env || process.env;
+  const threads = resolveFfmpegThreads(options.threads ?? env.REACT_FFMPEG_THREADS);
+  await runProcess(options.ffmpegPath || env.FFMPEG_PATH || 'ffmpeg', buildFfmpegArgs({ ...opts, threads }), {
     timeoutMs: validTimeout(options.timeoutMs,
-      validTimeout(Number(process.env.REACT_RENDER_TIMEOUT_SEC) * 1000, 900000)),
+      validTimeout(Number(env.REACT_RENDER_TIMEOUT_SEC) * 1000, 900000)),
     spawnImpl: options.spawnImpl,
+    nice: resolveFfmpegNice(options.nice ?? env.REACT_FFMPEG_NICE),
+    setPriorityImpl: options.setPriorityImpl,
     errorPrefix: 'ffmpeg',
   });
 }
 
-module.exports = { buildFfmpegArgs, probeVideo, renderVideo };
+module.exports = { buildFfmpegArgs, probeVideo, renderVideo, resolveFfmpegThreads, resolveFfmpegNice };
