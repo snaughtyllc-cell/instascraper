@@ -1,6 +1,8 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import { getModels, createModel, updateModel, deleteModel, getAvailableNiches, generateIdeas, getIdeas, exportIdeas, exportIdeasToNotion, getNotionPersonas, previewNotionPersona, importNotionPersona, resyncNotion, getModelActivity } from '../api';
 
+import ModelWorkspace from './ModelWorkspace';
+
 const DELIVERY_METHODS = [
   { value: 'whatsapp', label: 'WhatsApp' },
   { value: 'sheet', label: 'Google Sheet' },
@@ -18,6 +20,7 @@ const EMPTY_FORM = {
 };
 
 export default function ModelsTab() {
+  const [workspaceId, setWorkspaceId] = useState(null);
   const [models, setModels] = useState([]);
   const [niches, setNiches] = useState([]);
   const [showForm, setShowForm] = useState(false);
@@ -183,6 +186,8 @@ export default function ModelsTab() {
     need_script: 'Needs script',
     done: 'Done',
   }[value] || 'No reaction yet');
+
+  if (workspaceId) return <ModelWorkspace modelId={workspaceId} onBack={() => { setWorkspaceId(null); loadModels(); }} />;
 
   return (
     <div className="space-y-6">
@@ -403,6 +408,7 @@ export default function ModelsTab() {
                   )}
                 </div>
                 {model.notion_page_id && <button onClick={() => doResync(model)} className="px-2 py-1 text-sm rounded bg-gray-700">Re-sync</button>}
+                <button onClick={() => setWorkspaceId(model.id)} className="px-3 py-2 rounded-lg text-xs font-semibold bg-gold text-gray-950 hover:bg-gold-light">Open workspace</button>
                 <button onClick={() => handleEdit(model)} className="p-1.5 text-gray-500 hover:text-white">
                   <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}><path strokeLinecap="round" strokeLinejoin="round" d="M15.232 5.232l3.536 3.536m-2.036-5.036a2.5 2.5 0 113.536 3.536L6.5 21.036H3v-3.572L16.732 3.732z" /></svg>
                 </button>

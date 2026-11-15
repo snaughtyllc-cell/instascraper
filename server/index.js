@@ -34,6 +34,9 @@ const { modelCanAccessPost } = require('./model-access');
 const { getCreators } = require('./creators-mix');
 const { registerSortRoutes, redecideNeedsLook } = require('./sort-routes');
 const { runAutoSort } = require('./sort-runner');
+const { modelScopeClause } = require('./model-scope');
+const { registerWorkspaceRoutes } = require('./workspace-routes');
+const { approveForModel } = require('./workspaces');
 
 const app = express();
 app.disable('x-powered-by');
@@ -234,11 +237,13 @@ app.use('/models', requireAdmin);
 app.use('/ideas', requireAdmin);
 app.use('/admin', requireAdmin);
 app.use('/sort', requireAdmin);
+app.use('/workspaces', requireAdmin);
 app.use('/notion', requireAdmin);
 app.use('/radar', requireAdmin);
 app.use('/audio', requireAdmin);
 app.use('/me', requireModel);
 registerSortRoutes(app, { pool, runAutoSort });
+registerWorkspaceRoutes(app, { pool });
 
 const ContentIdeaAgent = require('./ai-agent');
 const { deliverBatch } = require('./delivery');
@@ -435,8 +440,14 @@ app.post('/content/bulk', async (req, res) => {
 // ─── Tracked Accounts Routes ────────────────────────────────────
 
 app.get('/tracked', async (req, res) => {
-  const result = await pool.query('SELECT * FROM tracked_accounts ORDER BY added_at DESC');
-  res.json(result.rows);
+  const where = req.query.unassigned === 'true'
+    ? 'WHERE NOT EXISTS (SELECT 1 FROM model_creators mc WHERE mc.username = LOWER(tracked_accounts.username))' : '';
+  const result = await pool.query(`SELECT * FROM tracked_accounts ${where} ORDER BY added_at DESC`);
+  const owners = (await pool.query(`SELECT mc.username, mc.model_id, m.name FROM model_creators mc
+    JOIN models m ON m.id = mc.model_id ORDER BY mc.model_id`)).rows;
+  res.json(result.rows.map(account => ({ ...account, owners: owners
+    .filter(owner => owner.username === account.username.toLowerCase())
+    .map(owner => ({ modelId: owner.model_id, name: owner.name })) })));
 });
 
 app.post('/tracked', async (req, res) => {
@@ -476,7 +487,12 @@ app.patch('/tracked/:username', async (req, res) => {
 });
 
 app.delete('/tracked/:username', async (req, res) => {
-  await pool.query('DELETE FROM tracked_accounts WHERE username = $1', [req.params.username]);
+  const username = req.params.username.toLowerCase();
+  await pool.transaction(async db => {
+    await db.query('UPDATE tracked_accounts SET username = username WHERE LOWER(username) = $1', [username]);
+    await db.query('DELETE FROM model_creators WHERE username = $1', [username]);
+    await db.query('DELETE FROM tracked_accounts WHERE LOWER(username) = $1', [username]);
+  });
   res.json({ success: true });
 });
 
@@ -515,53 +531,61 @@ app.get('/suggested', async (req, res) => {
   const accounts = result.rows;
   let reels = [];
   if (accounts.length) {
-    const names = accounts.map(a => a.username);
+    const names = accounts.map(a => a.username.toLowerCase());
     const ph = names.map((_, i) => `$${i + 1}`).join(',');
     reels = (await pool.query(
       `SELECT id, username, shortcode, view_count, like_count, comment_count, video_url, permalink, rank
-       FROM suggested_reels WHERE username IN (${ph}) ORDER BY rank`,
+       FROM suggested_reels WHERE LOWER(username) IN (${ph}) ORDER BY rank`,
       names
     )).rows;
   }
-  res.json(attachTopReels(accounts, reels));
+  const routed = accounts.length ? (await pool.query(`SELECT ms.username, ms.model_id, m.name, ms.fit, ms.status
+    FROM model_suggestions ms JOIN models m ON m.id = ms.model_id
+    WHERE ms.username IN (${accounts.map((_, i) => `$${i + 1}`).join(',')}) ORDER BY ms.model_id`,
+    accounts.map(a => a.username.toLowerCase()))).rows : [];
+  res.json(attachTopReels(accounts, reels).map(account => ({ ...account, models: routed
+    .filter(row => row.username === account.username.toLowerCase())
+    .map(row => ({ modelId: row.model_id, name: row.name, fit: row.fit, status: row.status })) })));
 });
 
+async function approvalModelIds(req, res) {
+  const ids = req.body?.modelIds;
+  if (!Array.isArray(ids) || !ids.length || ids.some(id => !Number.isSafeInteger(id) || id <= 0)) {
+    res.status(400).json({ error: 'modelIds must be a non-empty array of model IDs' });
+    return null;
+  }
+  const unique = [...new Set(ids)];
+  const models = await pool.query(`SELECT id FROM models WHERE id IN (${unique.map((_, i) => `$${i + 1}`).join(',')})`, unique);
+  if (models.rows.length !== unique.length) {
+    res.status(404).json({ error: 'Model not found' });
+    return null;
+  }
+  return unique;
+}
+
 app.post('/suggested/:username/approve', async (req, res) => {
-  const username = req.params.username;
-  const suggestion = await pool.query('SELECT * FROM suggested_accounts WHERE username = $1', [username]);
-  if (suggestion.rows.length === 0) return res.status(404).json({ error: 'Not found' });
-  await pool.query("UPDATE suggested_accounts SET status = 'approved', reviewed_at = TO_CHAR(NOW(), 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"') WHERE username = $1", [username]);
-  const s = suggestion.rows[0];
-  try {
-    await pool.query(
-      `INSERT INTO tracked_accounts (username, status, tags, followers, bio, avg_er) VALUES ($1, 'paused', $2, $3, $4, $5)`,
-      [username.toLowerCase(), 'discovered', s.followers || 0, s.bio || '', s.avg_er || 0]
-    );
-  } catch (e) { /* already tracked */ }
+  const modelIds = await approvalModelIds(req, res);
+  if (!modelIds) return;
+  const username = req.params.username.toLowerCase();
+  const suggestion = await pool.query('SELECT username FROM suggested_accounts WHERE LOWER(username) = $1', [username]);
+  if (!suggestion.rows.length) return res.status(404).json({ error: 'Not found' });
+  for (const modelId of modelIds) await approveForModel(pool, modelId, username);
   res.json({ success: true });
 });
 
 app.post('/suggested/approve-bulk', async (req, res) => {
-  const usernames = (Array.isArray(req.body?.usernames) ? req.body.usernames : [])
-    .filter(u => typeof u === 'string' && u.trim())
-    .map(u => u.trim());
+  const modelIds = await approvalModelIds(req, res);
+  if (!modelIds) return;
+  const usernames = [...new Set((Array.isArray(req.body?.usernames) ? req.body.usernames : [])
+    .filter(u => typeof u === 'string' && u.trim()).map(u => u.trim().toLowerCase()))];
   let approved = 0;
   for (const username of usernames) {
-    try {
-      const suggestion = await pool.query('SELECT * FROM suggested_accounts WHERE username = $1', [username]);
-      if (suggestion.rows.length === 0) continue;
-      const s = suggestion.rows[0];
-      await pool.query("UPDATE suggested_accounts SET status = 'approved', reviewed_at = TO_CHAR(NOW(), 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"') WHERE username = $1", [username]);
-      try {
-        await pool.query(
-          `INSERT INTO tracked_accounts (username, status, tags, followers, bio, avg_er) VALUES ($1, 'paused', $2, $3, $4, $5)`,
-          [username.toLowerCase(), 'discovered', s.followers || 0, s.bio || '', s.avg_er || 0]
-        );
-      } catch (e) { /* already tracked */ }
-      approved++;
-    } catch (e) { console.error(`[Suggested] bulk approve failed for ${username}:`, e.message); }
+    const suggestion = await pool.query('SELECT username FROM suggested_accounts WHERE LOWER(username) = $1', [username]);
+    if (!suggestion.rows.length) continue;
+    for (const modelId of modelIds) await approveForModel(pool, modelId, username);
+    approved++;
   }
-  res.json({ approved, total: usernames.length, status: 'paused' });
+  res.json({ approved, total: usernames.length, status: 'active' });
 });
 
 app.post('/suggested/:username/dismiss', async (req, res) => {
@@ -635,7 +659,7 @@ app.get('/me/audio/trending', asyncHandler(async (req, res) => {
   const m = await pool.query('SELECT primary_niche, secondary_niches FROM models WHERE id = $1', [req.session.user.modelId]);
   if (m.rows.length === 0) return res.status(404).json({ error: 'Model not found' });
   const niches = parseNiches(m.rows[0]);
-  const rows = await audio.trendingAudio(pool, { niches });
+  const rows = await audio.trendingAudio(pool, { niches, modelId: req.session.user.modelId });
   res.json({
     audio: rows.filter((row) => row.exampleReels?.length).map((row) => ({
       audio_id: row.audio_id,
@@ -653,7 +677,7 @@ app.get('/me/audio/trending', asyncHandler(async (req, res) => {
 app.get('/me/audio/:audioId/reels', asyncHandler(async (req, res) => {
   const m = await pool.query('SELECT primary_niche, secondary_niches FROM models WHERE id = $1', [req.session.user.modelId]);
   const niches = m.rows.length ? parseNiches(m.rows[0]) : [];
-  const { sql, params } = audio.buildAudioReelsQuery(String(req.params.audioId), niches, { limit: 24 });
+  const { sql, params } = audio.buildAudioReelsQuery(String(req.params.audioId), niches, { limit: 24, modelId: req.session.user.modelId });
   if (!sql) return res.json({ reels: [] });
   const r = await pool.query(sql, params);
   res.json({ reels: toModelPosts(r.rows) });
@@ -1473,8 +1497,9 @@ app.get('/me/saves', asyncHandler(async (req, res) => {
   const m = await pool.query('SELECT primary_niche, secondary_niches FROM models WHERE id = $1', [modelId]);
   if (m.rowCount === 0) return res.status(404).json({ error: 'Model not found' });
   const niches = parseNiches(m.rows[0]);
+  const scope = modelScopeClause('posts', niches.length + 4);
   const nicheClause = niches.length
-    ? ` OR ${effectiveNicheExpr()} IN (${niches.map((_, i) => `$${i + 4}`).join(', ')})`
+    ? ` OR (${effectiveNicheExpr()} IN (${niches.map((_, i) => `$${i + 4}`).join(', ')}) AND ${scope.clause})`
     : '';
   const r = await pool.query(
     `SELECT posts.* FROM model_saved_posts s
@@ -1487,7 +1512,7 @@ app.get('/me/saves', asyncHandler(async (req, res) => {
        AND (a.model_id IS NOT NULL
          OR EXISTS (SELECT 1 FROM model_saved_posts s2 WHERE s2.post_id = posts.id AND s2.model_id = $2)
          OR EXISTS (SELECT 1 FROM model_post_feedback f2 WHERE f2.post_id = posts.id AND f2.model_id = $3)${nicheClause})
-     ORDER BY s.saved_at DESC`, [modelId, modelId, modelId, ...niches]);
+     ORDER BY s.saved_at DESC`, [modelId, modelId, modelId, ...niches, ...(niches.length ? scope.params(modelId) : [])]);
   res.json({ posts: toModelPosts(r.rows) });
 }));
 
@@ -1524,6 +1549,7 @@ app.get('/me/ideas', asyncHandler(async (req, res) => {
   let byCode = {};
   if (all.length) {
     const ph = all.map((_, i) => `$${i + 1}`).join(', ');
+    const scope = modelScopeClause('posts', all.length + 1);
     const pr = await pool.query(
       `SELECT id, shortcode, view_count, caption, post_url, content_type, account_handle, posted_at,
               ${effectiveNicheExpr()} AS niche
@@ -1531,7 +1557,8 @@ app.get('/me/ideas', asyncHandler(async (req, res) => {
          AND (soft_deleted = 0 OR soft_deleted IS NULL)
          AND (archived = 0 OR archived IS NULL)
          AND video_cache_status = 'cached'
-         AND ${effectiveNicheExpr()} IS NOT NULL`, all);
+         AND ${effectiveNicheExpr()} IS NOT NULL
+         AND ${scope.clause}`, [...all, ...scope.params(req.session.user.modelId)]);
     byCode = Object.fromEntries(toModelPosts(pr.rows).map(p => [p.shortcode, p]));
   }
   const enriched = ideas.map((idea, k) => ({

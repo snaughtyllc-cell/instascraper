@@ -108,11 +108,12 @@ function scoreReels(reels, cfg = scoreConfig()) {
 function attachTopReels(accounts, reels) {
   const byUser = new Map();
   for (const r of (reels || [])) {
-    if (!byUser.has(r.username)) byUser.set(r.username, []);
-    byUser.get(r.username).push(r);
+    const username = String(r.username).toLowerCase();
+    if (!byUser.has(username)) byUser.set(username, []);
+    byUser.get(username).push(r);
   }
   for (const list of byUser.values()) list.sort((a, b) => (a.rank || 0) - (b.rank || 0));
-  return (accounts || []).map(a => ({ ...a, top_reels: byUser.get(a.username) || [] }));
+  return (accounts || []).map(a => ({ ...a, top_reels: byUser.get(String(a.username).toLowerCase()) || [] }));
 }
 
 // Collaborators: the reel actor returns taggedUsers/usertags per post. Extract
@@ -1080,6 +1081,8 @@ class InstagramScraper {
         downloadThumbnail({ shortcode: r.shortcode, thumbnail_url: r.thumbnailUrl }).catch(() => {});
       }
     }
+    try { await require('./candidate-routing').routeCandidate(username); }
+    catch (error) { console.error(`[Route] @${username}:`, error.message); }
     // Reel-performance score → the account's suggestion_score (0 when no reels got through,
     // which correctly sinks blocked/private accounts below the display threshold).
     const score = scoreReels(reels, scoreConfig());

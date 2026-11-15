@@ -17,6 +17,7 @@ function makeDb() {
     soft_deleted INTEGER DEFAULT 0, archived INTEGER DEFAULT 0,
     audio_id TEXT, audio_title TEXT, audio_author TEXT, is_original_audio INTEGER)`);
   s.exec(`CREATE TABLE creator_types (account_handle TEXT, content_type TEXT)`);
+  s.exec(`CREATE TABLE model_creators (model_id INTEGER, username TEXT)`);
   // a tiny adapter so trendingAudio(db,...) can run: .query(sql, params) → {rows}
   return {
     sqlite: s,
@@ -148,4 +149,20 @@ test('trendingAudio example query excludes an unsorted reel audio', async () => 
   seedUnsortedAudio(db);
   const rows = await trendingAudio(db, { niches: ['talking'], nowMs: NOW, examples: 3 });
   assert.deepStrictEqual(rows[0].exampleReels.map((row) => row.id), [2, 1]);
+});
+
+test("trending audio for a model with creators only counts her creators' reels", async () => {
+  const db = makeDb();
+  db.sqlite.exec(`INSERT INTO model_creators VALUES (7,'mia.talks');
+    INSERT INTO posts (id,account_handle,posted_at,content_type,audio_id,video_cache_status,view_count) VALUES
+    (1,'Mia.Talks','${daysAgo(1)}','talking','A','cached',100),
+    (2,'mia.talks','${daysAgo(1)}','talking','A','cached',200),
+    (3,'other','${daysAgo(1)}','talking','A','cached',99999)`);
+  const rows = await trendingAudio(db, { niches: ['talking'], modelId: 7, nowMs: NOW });
+  assert.strictEqual(rows[0].reel_count, 2);
+  assert.deepStrictEqual(rows[0].exampleReels.map(r => r.id), [2,1]);
+  const built = buildAudioReelsQuery('A', ['talking'], { modelId: 7 });
+  assert.deepStrictEqual(db.query(built.sql, built.params).rows.map(r => r.id), [2,1]);
+  const fallback = await trendingAudio(db, { niches: ['talking'], modelId: 8, nowMs: NOW });
+  assert.strictEqual(fallback[0].reel_count, 3);
 });

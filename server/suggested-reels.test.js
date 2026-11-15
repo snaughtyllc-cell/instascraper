@@ -60,3 +60,16 @@ test('attachTopReels: groups reels by username, ordered by rank; empty when none
   assert.deepStrictEqual(out[0].top_reels.map(r => r.shortcode), ['a1', 'a2']); // rank order
   assert.deepStrictEqual(out[1].top_reels, []); // bob has none
 });
+
+test('attachTopReels: matches legacy mixed-case usernames and preserves the account handle', () => {
+  const accounts = [{ username: 'Mia.Talks', bio: 'Original account' }];
+  const reels = [
+    { id: 2, username: 'MIA.TALKS', rank: 2, shortcode: 'second' },
+    { id: 1, username: 'mia.talks', rank: 1, shortcode: 'first' },
+  ];
+  const [account] = attachTopReels(accounts, reels);
+  assert.strictEqual(account.username, 'Mia.Talks');
+  assert.strictEqual(account.bio, 'Original account');
+  assert.deepStrictEqual(account.top_reels.map(reel => reel.shortcode), ['first', 'second']);
+  assert.strictEqual(accounts[0].top_reels, undefined);
+});

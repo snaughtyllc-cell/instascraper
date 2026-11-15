@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useCallback } from 'react';
-import { getSuggestedAccounts, approveSuggested, dismissSuggested, snoozeSuggested, triggerJob, approveSuggestedBulk, scrapeTrackedBulk, getRadarTerms, addRadarTerm, removeRadarTerm, triggerRadar } from '../api';
+import { getSuggestedAccounts, approveSuggested, dismissSuggested, snoozeSuggested, triggerJob, approveSuggestedBulk, scrapeTrackedBulk, getRadarTerms, addRadarTerm, removeRadarTerm, triggerRadar, getModels } from '../api';
 import API_URL from '../api-base';
 
 function formatCount(n) {
@@ -67,7 +67,7 @@ function SuggestedReel({ reel }) {
   );
 }
 
-function SuggestedReelStrip({ reels }) {
+export function SuggestedReelStrip({ reels }) {
   if (!reels || reels.length === 0) return null;
   return (
     <div className="grid grid-cols-3 gap-1.5">
@@ -79,6 +79,13 @@ function SuggestedReelStrip({ reels }) {
 export default function SuggestedAccountsTab() {
   const [suggestions, setSuggestions] = useState([]);
   const [sort, setSort] = useState('score');
+  const [status, setStatus] = useState('pending');
+  const [models, setModels] = useState([]);
+  const [picker, setPicker] = useState(null);
+  const [modelIds, setModelIds] = useState(new Set());
+  const [approving, setApproving] = useState(false);
+  const [approvalError, setApprovalError] = useState('');
+  useEffect(() => { getModels().then(({ data }) => setModels(data.filter(m => m.status === 'active'))).catch(err => setApprovalError(err.message)); }, []);
   const [loading, setLoading] = useState(true);
   const [discovering, setDiscovering] = useState(false);
   const [selected, setSelected] = useState(new Set());
@@ -92,13 +99,13 @@ export default function SuggestedAccountsTab() {
 
   const load = useCallback(async () => {
     try {
-      const { data } = await getSuggestedAccounts({ status: 'pending', sort });
+      const { data } = await getSuggestedAccounts({ status, sort });
       setSuggestions(data);
     } catch (err) {
       console.error('Failed to load suggestions:', err);
     }
     setLoading(false);
-  }, [sort]);
+  }, [sort, status]);
 
   useEffect(() => {
     load();
@@ -144,7 +151,7 @@ export default function SuggestedAccountsTab() {
     const poll = setInterval(async () => {
       elapsed += 15;
       try {
-        const { data } = await getSuggestedAccounts({ status: 'pending', sort });
+        const { data } = await getSuggestedAccounts({ status, sort });
         if (data.length > startLen || elapsed >= 300) {
           clearInterval(poll);
           setSuggestions(data);
@@ -155,9 +162,30 @@ export default function SuggestedAccountsTab() {
     }, 15000);
   };
 
-  const handleApprove = async (username) => {
-    await approveSuggested(username);
-    load();
+  const openModelPicker = (usernames, scrape = false, bulk = false) => {
+    const routed = suggestions.filter(s => usernames.includes(s.username)).flatMap(s => s.models || []);
+    setModelIds(new Set(routed.map(m => m.modelId).filter(id => models.some(m => m.id === id))));
+    setApprovalError('');
+    setPicker({ usernames, scrape, bulk });
+  };
+  const handleApprove = username => openModelPicker([username]);
+  const confirmApproval = async () => {
+    if (!modelIds.size) return;
+    setApproving(true);
+    setApprovalError('');
+    try {
+      const ids = [...modelIds];
+      if (picker.bulk) await approveSuggestedBulk(picker.usernames, ids);
+      else await approveSuggested(picker.usernames[0], ids);
+      if (picker.scrape) {
+        const { data } = await scrapeTrackedBulk(picker.usernames);
+        if (data.stopped) alert(`Stopped at budget: ${data.stopped.message}`);
+      }
+      setSelected(new Set());
+      setPicker(null);
+      await load();
+    } catch (err) { setApprovalError(err.response?.data?.error || err.message); }
+    finally { setApproving(false); }
   };
 
   const handleDismiss = async (username) => {
@@ -179,7 +207,7 @@ export default function SuggestedAccountsTab() {
     const poll = setInterval(async () => {
       elapsed += 15;
       try {
-        const { data } = await getSuggestedAccounts({ status: 'pending', sort });
+        const { data } = await getSuggestedAccounts({ status, sort });
         if (data.length > suggestions.length || elapsed >= 300) {
           clearInterval(poll);
           setSuggestions(data);
@@ -191,21 +219,8 @@ export default function SuggestedAccountsTab() {
     }, 15000);
   };
 
-  const handleBulkApprove = async () => {
-    const usernames = [...selected];
-    await approveSuggestedBulk(usernames);
-    setSelected(new Set());
-    load();
-  };
-
-  const handleBulkApproveScrape = async () => {
-    const usernames = [...selected];
-    await approveSuggestedBulk(usernames);
-    const { data } = await scrapeTrackedBulk(usernames);
-    setSelected(new Set());
-    if (data.stopped) alert(`Stopped at budget: ${data.stopped.message}`);
-    load();
-  };
+  const handleBulkApprove = () => openModelPicker([...selected], false, true);
+  const handleBulkApproveScrape = () => openModelPicker([...selected], true, true);
 
   const toggleSelected = (username) => {
     setSelected(prev => {
@@ -271,6 +286,11 @@ export default function SuggestedAccountsTab() {
         </div>
       </div>
 
+      <div className="flex flex-wrap gap-1.5">
+        {(s.models || []).map(model => <span key={model.modelId} className={`px-2 py-1 rounded-full text-[10px] border ${model.status === 'approved' ? 'text-green-400 border-green-700' : model.status === 'dismissed' ? 'text-gray-500 border-gray-700' : 'text-gold border-gold/40'}`}>
+          {model.name} · {model.status} · {Math.round(model.fit * 100)}%
+        </span>)}
+      </div>
       {/* Stats (reel-derived) */}
       {(() => {
         const { avgViews, avgER } = reelStats(s.top_reels);
@@ -312,7 +332,7 @@ export default function SuggestedAccountsTab() {
           onClick={() => handleApprove(s.username)}
           className="flex-1 px-3 py-2 rounded-lg text-xs font-medium bg-green-600 hover:bg-green-500 text-white transition-colors"
         >
-          Add to System
+          Approve
         </button>
         <button
           onClick={() => handleSnooze(s.username)}
@@ -340,6 +360,25 @@ export default function SuggestedAccountsTab() {
 
   return (
     <div className="space-y-6">
+      {approvalError && !picker && <p role="alert" className="text-red-400">{approvalError}</p>}
+      {picker && <div className="fixed inset-0 z-50 bg-black/70 flex items-center justify-center p-4">
+        <section role="dialog" aria-modal="true" aria-labelledby="model-picker-title" className="w-full max-w-md rounded-xl bg-gray-900 border border-gray-700 p-5 space-y-4">
+          <h3 id="model-picker-title" className="text-lg font-semibold text-white">Choose models</h3>
+          <p className="text-sm text-gray-400">Add {picker.usernames.length} creator{picker.usernames.length === 1 ? '' : 's'} to these workspaces.</p>
+          {models.length === 0 && <p className="text-gray-400">Create an active model first.</p>}
+          <div className="max-h-72 overflow-auto space-y-2">
+            {models.map(model => <label key={model.id} className="flex items-center gap-3 p-2 rounded-lg bg-gray-800 text-sm">
+              <input type="checkbox" checked={modelIds.has(model.id)} onChange={() => setModelIds(previous => { const next = new Set(previous); next.has(model.id) ? next.delete(model.id) : next.add(model.id); return next; })} />
+              {model.name}
+            </label>)}
+          </div>
+          {approvalError && <p role="alert" className="text-sm text-red-400">{approvalError}</p>}
+          <div className="flex gap-2 justify-end">
+            <button disabled={approving} onClick={() => setPicker(null)} className="px-3 py-2 text-sm text-gray-400">Cancel</button>
+            <button disabled={approving || !modelIds.size} onClick={confirmApproval} className="px-4 py-2 rounded-lg text-sm font-semibold bg-green-600 disabled:opacity-50">{approving ? 'Approving…' : 'Approve for selected models'}</button>
+          </div>
+        </section>
+      </div>}
       {/* Header */}
       <div className="bg-gray-900 rounded-xl border border-gray-800 p-5">
         <div className="flex items-center justify-between">
@@ -349,7 +388,10 @@ export default function SuggestedAccountsTab() {
               Female creators discovered from caption mentions and collab tags on your tracked accounts.
             </p>
           </div>
-          <div className="flex gap-3 items-center">
+          <div className="flex flex-wrap gap-3 items-center">
+            <select aria-label="Suggestion status" value={status} onChange={e => { setStatus(e.target.value); setSelected(new Set()); }} className="bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm text-white">
+              <option value="pending">Pending</option><option value="approved">Approved</option><option value="dismissed">Dismissed</option><option value="">All statuses</option>
+            </select>
             <label className="flex items-center gap-1.5 text-xs text-gray-400">
               Min score
               <input
@@ -448,7 +490,7 @@ export default function SuggestedAccountsTab() {
         <div className="sticky top-2 z-10 bg-gray-900 border border-gold/40 rounded-xl p-3 flex items-center gap-3">
           <span className="text-sm text-gray-300">{selected.size} selected</span>
           <button onClick={handleBulkApprove} className="px-3 py-1.5 rounded-lg text-xs font-semibold bg-green-600 hover:bg-green-500 text-white">
-            Approve {selected.size} (paused)
+            Approve {selected.size}
           </button>
           <button onClick={handleBulkApproveScrape} className="px-3 py-1.5 rounded-lg text-xs font-semibold bg-gold hover:bg-gold-light text-gray-950">
             Approve &amp; Scrape {selected.size}

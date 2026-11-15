@@ -1,3 +1,4 @@
+const { modelScopeClause } = require('./model-scope');
 const { effectiveNicheExpr } = require('./sort-status');
 // server/audio.js — Trending Audio ("Reel Radar, but for sounds").
 // Ranks the audio tracks used by the reels we ALREADY scrape (musicInfo captured
@@ -41,7 +42,7 @@ function trendScore(row, cfg = audioConfig(), nowMs = Date.now()) {
 // all:true = roster-wide, admin). `cutoffIso` is the age boundary (passed for
 // deterministic tests; else derived from maxAgeDays). Placeholders are numbered
 // sequentially and each used once (SQLite adapter rewrites $N → ? positionally).
-function buildTrendingAudioQuery(niches, { all = false, cutoffIso, minReels = 2 } = {}) {
+function buildTrendingAudioQuery(niches, { all = false, cutoffIso, minReels = 2, modelId = null } = {}) {
   const list = all ? [] : (Array.isArray(niches) ? niches : []).filter(Boolean);
   if (!all && list.length === 0) return { sql: null, params: [] };
 
@@ -54,6 +55,11 @@ function buildTrendingAudioQuery(niches, { all = false, cutoffIso, minReels = 2 
     const ph = list.map((_, i) => `$${i + 2}`).join(', ');
     nicheClause = ` AND ${effectiveNicheExpr()} IN (${ph})`;
     params.push(...list);
+  }
+  if (!all && Number(modelId) > 0) {
+    const scope = modelScopeClause('posts', params.length + 1);
+    nicheClause += ` AND ${scope.clause}`;
+    params.push(...scope.params(Number(modelId)));
   }
   const minIdx = params.length + 1;
   params.push(minReels);
@@ -80,7 +86,7 @@ function buildTrendingAudioQuery(niches, { all = false, cutoffIso, minReels = 2 
 }
 
 // PURE. Build the "reels using this audio" query (expand view / example reels).
-function buildAudioReelsQuery(audioId, niches, { all = false, limit = 12 } = {}) {
+function buildAudioReelsQuery(audioId, niches, { all = false, limit = 12, modelId = null } = {}) {
   const params = [audioId];
   let nicheClause = '';
   if (!all) {
@@ -89,6 +95,11 @@ function buildAudioReelsQuery(audioId, niches, { all = false, limit = 12 } = {})
     const ph = list.map((_, i) => `$${i + 2}`).join(', ');
     nicheClause = ` AND ${effectiveNicheExpr()} IN (${ph})`;
     params.push(...list);
+  }
+  if (!all && Number(modelId) > 0) {
+    const scope = modelScopeClause('posts', params.length + 1);
+    nicheClause += ` AND ${scope.clause}`;
+    params.push(...scope.params(Number(modelId)));
   }
   const limIdx = params.length + 1;
   params.push(limit);
@@ -108,9 +119,9 @@ function buildAudioReelsQuery(audioId, niches, { all = false, limit = 12 } = {})
 }
 
 // Run the aggregation, score + rank in JS, attach up to `examples` top reels each.
-async function trendingAudio(db, { niches = [], all = false, cfg = audioConfig(), nowMs = Date.now(), examples = 3 } = {}) {
+async function trendingAudio(db, { niches = [], all = false, cfg = audioConfig(), nowMs = Date.now(), examples = 3, modelId = null } = {}) {
   const cutoffIso = new Date(nowMs - cfg.maxAgeDays * 86400000).toISOString();
-  const built = buildTrendingAudioQuery(niches, { all, cutoffIso, minReels: cfg.minReels });
+  const built = buildTrendingAudioQuery(niches, { all, cutoffIso, minReels: cfg.minReels, modelId });
   if (!built.sql) return [];
   const rows = (await db.query(built.sql, built.params)).rows || [];
   const ranked = rows
@@ -128,6 +139,11 @@ async function trendingAudio(db, { niches = [], all = false, cfg = audioConfig()
     const list = (Array.isArray(niches) ? niches : []).filter(Boolean);
     const nph = list.map((_, i) => `$${ids.length + 1 + i}`).join(', ');
     if (list.length) { nicheClause = ` AND ${effectiveNicheExpr()} IN (${nph})`; exParams.push(...list); }
+  }
+  if (!all && Number(modelId) > 0) {
+    const scope = modelScopeClause('posts', exParams.length + 1);
+    nicheClause += ` AND ${scope.clause}`;
+    exParams.push(...scope.params(Number(modelId)));
   }
   const exSql = `
     SELECT posts.id, posts.shortcode, posts.audio_id, posts.view_count, posts.account_handle, posts.post_url
