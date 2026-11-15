@@ -30,6 +30,7 @@ function containsReactSecrets(value, seen = new WeakSet()) {
   if (typeof value === 'string') {
     if (process.env.FILM_SERVICE_KEY && value.includes(process.env.FILM_SERVICE_KEY)) return true;
     if (process.env.APIFY_API_KEY && value.includes(process.env.APIFY_API_KEY)) return true;
+    if (process.env.REACT_APIFY_API_KEY && value.includes(process.env.REACT_APIFY_API_KEY)) return true;
     if (/upload_id|["'](?:uploadUrl|rawUrl|callbackUrl)["']\s*:/i.test(value)) return true;
     return (value.match(/https?:\/\/[^\s"'<>\\]+|\/film\/v1\/(?:react-media|media|thumb)\/[^\s"'<>\\]+/gi) || []).some(isReactMediaUrl);
   }

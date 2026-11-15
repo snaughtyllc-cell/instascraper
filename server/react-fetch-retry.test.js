@@ -70,7 +70,7 @@ async function fixture(t, options = {}) {
 
 test('transient failure codes become retryable at ten minutes', async t => {
   const f = await fixture(t);
-  for (const code of ['apify_failed', 'apify_busy', 'apify_network', 'fetch_timeout', 'worker_restarted']) {
+  for (const code of ['apify_no_key', 'apify_failed', 'apify_busy', 'apify_network', 'fetch_timeout', 'worker_restarted']) {
     const shortcode = `retry_${code}`;
     f.failed(shortcode, code, TEN_MINUTES - 1);
     assert.deepEqual(await f.worker.request(shortcode), { state: 'unavailable', launched: false }, code);
@@ -78,7 +78,7 @@ test('transient failure codes become retryable at ten minutes', async t => {
     assert.deepEqual(await f.worker.request(shortcode), { state: 'fetching', launched: true }, code);
     await f.worker.waitForIdle();
   }
-  assert.equal(f.launches.length, 5);
+  assert.equal(f.launches.length, 6);
 });
 
 test('permanent failure codes retain the six-hour retry window', async t => {

@@ -97,13 +97,18 @@ callback. The reference, prefetch and render routes use the existing `FILM_SERVI
   `film_react_refs` store. A ready reference returns 200 with a signed `/film/v1/react-media/:shortcode` URL.
   With `fetch` omitted or `true`, an absent reference or a retryable failure starts an on-demand Apify
   Instagram reel fetch and returns `202 { "state": "fetching" }`; subsequent requests while it is queued
-  or fetching also return 202. Failures with `apify_failed`, `apify_busy`, `apify_network`, `fetch_timeout`
-  or `worker_restarted` retry after 10 minutes, including existing `apify_failed` rows. Permanent failures
+  or fetching also return 202. Failures with `apify_no_key`, `apify_failed`, `apify_busy`, `apify_network`,
+  `fetch_timeout` or `worker_restarted` retry after 10 minutes, including existing `apify_failed` rows. Permanent failures
   such as `no_video`, `apify_error_stub`, `download_too_large` and `invalid_video_type` retry after 6 hours.
   HQ can poll `react-reference` until it receives 200 or 404. A recent failure returns
   `404 { "error": "reel_not_available" }`. The rolling 24-hour launch cap or a blocked Apify budget returns
-  the same 404 without launching a fetch. Fetches use the existing Apify token and record purpose `react_ref`;
-  fetched references never create `posts` rows or enter feeds, discovery, cadence or creator statistics.
+  the same 404 without launching a fetch. Fetches use `REACT_APIFY_API_KEY`, falling back to `APIFY_API_KEY`,
+  and record purpose `react_ref`. The React-only key does not enable scheduled daily scraping, discovery,
+  or radar; those continue to require `APIFY_API_KEY`. If neither key is configured, the reference fails
+  with `apify_no_key` without consuming the daily cap or writing the attempts or Apify cost ledgers. Startup
+  and missing-key requests share one process-wide log line:
+  `[React fetch] no Apify key configured (set REACT_APIFY_API_KEY)`.
+  Fetched references never create `posts` rows or enter feeds, discovery, cadence or creator statistics.
 - `POST /film/v1/react-prefetch` accepts `{ "shortcodes": ["AbCdE123", "Other_123"] }`: 1–50 valid shortcodes,
   deduplicated after validation. Invalid input returns `400 { "error": "invalid_shortcodes" }` before any fetch
   is queued. Existing posts, pinned files, ready references and active fetches are skipped. Recent failures,
@@ -195,6 +200,7 @@ Runtime configuration:
 |---|---|
 | `HQ_PUBLIC_URL` | Required HTTPS origin for raw/reference downloads and callbacks |
 | `REACT_REF_DIR` | `<DEFAULT_VIDEO_DIR>/../react-refs`; persistent pinned references |
+| `REACT_APIFY_API_KEY` | React-only Apify token; falls back to `APIFY_API_KEY`; does not enable scheduled scraping, discovery or radar |
 | `REACT_FETCH_DAILY_MAX` | `100` fetch launches per rolling 24 hours |
 | `REACT_FETCH_CONCURRENCY` | `1` simultaneous on-demand reference fetch by default; prefetch queues in process |
 | `REACT_FETCH_MEMORY_MB` | `512` MB per Apify run |

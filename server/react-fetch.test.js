@@ -57,11 +57,60 @@ async function fixture(t, options = {}) {
       fs.writeFileSync(file, 'video');
       return { status: 'cached', path: file };
     }, probe: async (file, opts) => { probes.push({ file, opts }); return { durationSec: 4.5 }; } };
-  const worker = createReactFetchWorker({ ...dependencies, ...options,
-    env: { ...dependencies.env, ...options.env } });
-  return { db, pool, dir, worker, launches, completions, probes, dependencies,
+  const env = { ...dependencies.env, ...options.env };
+  const worker = createReactFetchWorker({ ...dependencies, ...options, env });
+  return { db, pool, dir, env, worker, launches, completions, probes, dependencies,
     advance: ms => { time += ms; }, time: () => time };
 }
+
+test('missing keys fail before reserving capacity, log once at startup and retry after a key is added', async t => {
+  const logs = [], requests = [];
+  t.mock.method(console, 'error', line => logs.push(line));
+  let budgetChecks = 0;
+  const f = await fixture(t, { apify: undefined, env: { REACT_FETCH_DAILY_MAX: '1' },
+    budgetStatus: async () => { budgetChecks++; return { over: false }; },
+    fetchImpl: async url => {
+      requests.push(new URL(url));
+      return { ok: true, json: async () => url.includes('/acts/')
+        ? { data: { id: 'react-key-run', status: 'SUCCEEDED' } }
+        : [{ videoUrl: 'https://video.fbcdn.net/video.mp4' }] };
+    } });
+  const warning = '[React fetch] no Apify key configured (set REACT_APIFY_API_KEY)';
+  assert.deepEqual(logs, [warning], 'startup diagnoses the missing key before any request');
+  for (const shortcode of ['missing_ref', 'other_ref', 'missing_ref']) {
+    assert.deepEqual(await f.worker.request(shortcode), { state: 'unavailable', launched: false });
+  }
+  const second = createReactFetchWorker({ ...f.dependencies, apify: undefined, env: f.env,
+    fetchImpl: async () => assert.fail('missing keys must never make an HTTP request') });
+  assert.deepEqual(await second.request('third_ref'), { state: 'unavailable', launched: false });
+  f.advance(10 * 60000);
+  assert.deepEqual(await f.worker.request('missing_ref'), { state: 'unavailable', launched: false });
+  await Promise.all([f.worker.waitForIdle(), second.waitForIdle()]);
+  assert.ok(f.db.prepare('SELECT * FROM film_react_refs').all()
+    .every(row => row.state === 'failed' && row.error === 'apify_no_key' && row.attempts === 0));
+  assert.equal(f.db.prepare('SELECT COUNT(*) AS n FROM film_react_ref_attempts').get().n, 0);
+  assert.equal(f.db.prepare('SELECT COUNT(*) AS n FROM apify_runs').get().n, 0);
+  assert.equal(f.launches.length, 0);
+  assert.equal(f.completions.length, 0);
+  assert.equal(budgetChecks, 0);
+  assert.equal(requests.length, 0);
+  assert.deepEqual(logs, [warning], 'requests, retries and separate workers share one diagnostic');
+
+  f.env.REACT_APIFY_API_KEY = 'react-only-token';
+  f.advance(10 * 60000 - 1);
+  assert.deepEqual(await f.worker.request('missing_ref'), { state: 'unavailable', launched: false });
+  f.advance(1);
+  assert.deepEqual(await f.worker.request('missing_ref'), { state: 'fetching', launched: true });
+  await f.worker.waitForIdle();
+  assert.deepEqual(await f.worker.request('missing_ref'), { state: 'ready', durationSec: 4.5, launched: false });
+  assert.equal(requests.length, 2);
+  assert.ok(requests.every(url => url.searchParams.get('token') === 'react-only-token'));
+  assert.equal(f.db.prepare("SELECT attempts FROM film_react_refs WHERE shortcode='missing_ref'").get().attempts, 1);
+  assert.equal(f.db.prepare('SELECT COUNT(*) AS n FROM film_react_ref_attempts').get().n, 1);
+  assert.equal(f.launches.length, 1);
+  assert.equal(f.completions.length, 1);
+  assert.deepEqual(logs, [warning]);
+});
 
 test('unknown references atomically dedupe concurrent calls and publish ready pins without posts', async t => {
   const f = await fixture(t);

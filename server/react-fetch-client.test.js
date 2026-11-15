@@ -20,9 +20,14 @@ function captureErrors(t) {
   return lines;
 }
 
-test('Apify client authenticates every route with query token and configures run memory', async () => {
-  const requests = [], token = 'secret-token&hidden=value';
-  const client = createApifyClient({ APIFY_API_KEY: token, REACT_FETCH_MEMORY_MB: '1024' }, async (url, options) => {
+for (const [name, keys, token] of [
+  ['React-only key', { REACT_APIFY_API_KEY: 'react-token&hidden=value' }, 'react-token&hidden=value'],
+  ['APIFY_API_KEY fallback', { APIFY_API_KEY: 'fallback-token&hidden=value' }, 'fallback-token&hidden=value'],
+  ['React key precedence', { REACT_APIFY_API_KEY: 'react-token', APIFY_API_KEY: 'fallback-token' }, 'react-token'],
+  ['empty React key fallback', { REACT_APIFY_API_KEY: '', APIFY_API_KEY: 'fallback-token' }, 'fallback-token'],
+]) test(`Apify client authenticates every route with ${name} and configures run memory`, async () => {
+  const requests = [];
+  const client = createApifyClient({ ...keys, REACT_FETCH_MEMORY_MB: '1024' }, async (url, options) => {
     requests.push({ url: new URL(url), options });
     return response(200, { data: { id: 'run-id' } });
   }, noSleep, 180000);
@@ -44,6 +49,21 @@ test('Apify client authenticates every route with query token and configures run
   assert.equal(requests[0].url.searchParams.get('memory'), '1024');
   assert.deepEqual(JSON.parse(requests[0].options.body), input);
   assert.equal(requests[3].url.searchParams.get('gracefully'), 'false');
+});
+
+test('missing keys fail every route with apify_no_key and one diagnostic across clients', async t => {
+  const lines = captureErrors(t);
+  for (const env of [{}, { REACT_APIFY_API_KEY: '', APIFY_API_KEY: '' }]) {
+    const client = createApifyClient(env,
+      async () => assert.fail('missing keys must never make an HTTP request'),
+      async () => assert.fail('missing keys must never back off'));
+    for (const request of [() => client.startRun('actor', {}, signal()),
+      () => client.getRun('run-id', signal()), () => client.getItems('run-id', signal()),
+      () => client.abortRun('run-id', signal())]) {
+      await assert.rejects(request(), { code: 'apify_no_key', message: 'apify_no_key' });
+    }
+  }
+  assert.deepEqual(lines, ['[React fetch] no Apify key configured (set REACT_APIFY_API_KEY)']);
 });
 
 test('Apify run memory defaults to 512 for absent or invalid configuration', async () => {
@@ -86,6 +106,16 @@ test('untrusted or token-bearing error types are replaced with a static placehol
     await assert.rejects(client.getRun('run-id', signal()), { code: 'apify_failed' });
   }
   assert.ok(lines.every(line => line === '[React fetch] apify_http route=getRun status=400 type=unknown'));
+});
+
+test('HTTP diagnostics scrub both Apify keys when the React key is preferred', async t => {
+  const lines = captureErrors(t);
+  for (const type of ['error-react-token', 'error-fallback-token']) {
+    const client = createApifyClient({ REACT_APIFY_API_KEY: 'react-token', APIFY_API_KEY: 'fallback-token' },
+      async () => response(400, { error: { type } }), noSleep);
+    await assert.rejects(client.getRun('run-id', signal()), { code: 'apify_failed' });
+  }
+  assert.deepEqual(lines, Array(2).fill('[React fetch] apify_http route=getRun status=400 type=unknown'));
 });
 
 test('non-JSON HTTP errors still emit a sanitized diagnostic', async t => {
