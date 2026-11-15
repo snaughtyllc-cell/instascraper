@@ -1,4 +1,5 @@
 const { effectiveNicheExpr } = require('./sort-status');
+const { modelScopeClause } = require('./model-scope');
 // server/me-feed.js
 // [R2-#2] parseNiches lives HERE (Task 5) — the /me/feed route uses it immediately, and
 // /me/saves (Task 6) reuses it. One definition, one import site.
@@ -51,6 +52,11 @@ function buildMeFeedQuery(niches, { page = 1, limit = 24, pageSize = limit, all 
 
   let modelClause = '';
   if (Number.isSafeInteger(Number(modelId)) && Number(modelId) > 0) {
+    if (!all) {
+      const scope = modelScopeClause('posts', params.length + 1);
+      clause += ` AND ${scope.clause}`;
+      params.push(...scope.params(Number(modelId)));
+    }
     const assignmentModelIdx = params.length + 1;
     params.push(Number(modelId));
     const feedbackModelIdx = params.length + 1;

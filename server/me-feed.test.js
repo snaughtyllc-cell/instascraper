@@ -16,6 +16,7 @@ function makePostsDb() {
   sqlite.exec(`CREATE TABLE model_assigned_posts (model_id INTEGER, post_id INTEGER, status TEXT)`);
   sqlite.exec(`CREATE TABLE model_post_feedback (model_id INTEGER, post_id INTEGER, feedback TEXT)`);
   sqlite.exec(`CREATE TABLE model_saved_posts (model_id INTEGER, post_id INTEGER)`);
+  sqlite.exec(`CREATE TABLE model_creators (model_id INTEGER, username TEXT)`);
   return sqlite;
 }
 
@@ -147,7 +148,7 @@ test('model feed excludes assigned, saved, and not-interested reels without hidi
   const { sql, params } = buildMeFeedQuery(['talking'], { modelId: 7, limit: 24 });
   const rows = sqlite.prepare(sql.replace(/\$\d+/g, '?')).all(...params);
   assert.deepStrictEqual(rows.map((row) => row.id), [4]);
-  assert.deepStrictEqual(params, ['talking', 7, 7, 7, 24, 0]);
+  assert.deepStrictEqual(params, ['talking', 7, 7, 7, 7, 7, 24, 0]);
 });
 
 for (const [name, status, contentType, creatorType, expected] of [
@@ -165,3 +166,25 @@ for (const [name, status, contentType, creatorType, expected] of [
     assert.deepStrictEqual(sqlite.prepare(sql.replace(/\$\d+/g, '?')).all(...params).map((row) => row.id), expected);
   });
 }
+
+for (const [name, owned, expected] of [
+  ['fallback — no creators, niche reels from any creator visible', false, [2, 1]],
+  ["with creators — other creators' niche reels hidden", true, [1]],
+]) {
+  test(name, () => {
+    const sqlite = makePostsDb();
+    sqlite.exec(`INSERT INTO posts (id, account_handle, content_type, posted_at, video_cache_status) VALUES
+      (1,'Mia.Talks','talking','2026-07-01','cached'),
+      (2,'other','talking','2026-07-02','cached'),
+      (3,'Mia.Talks','dance','2026-07-03','cached')`);
+    if (owned) sqlite.exec("INSERT INTO model_creators VALUES (7,'mia.talks')");
+    const { sql, params } = buildMeFeedQuery(['talking'], { modelId: 7 });
+    assert.deepStrictEqual(sqlite.prepare(sql.replace(/\$\d+/g, '?')).all(...params).map(r => r.id), expected);
+  });
+}
+test("own creator's reel outside her niches hidden", () => {
+  const sqlite = makePostsDb();
+  sqlite.exec("INSERT INTO model_creators VALUES (7,'mia.talks'); INSERT INTO posts (id,account_handle,content_type,video_cache_status) VALUES (1,'mia.talks','dance','cached')");
+  const { sql, params } = buildMeFeedQuery(['talking'], { modelId: 7 });
+  assert.deepStrictEqual(sqlite.prepare(sql.replace(/\$\d+/g, '?')).all(...params), []);
+});

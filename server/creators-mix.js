@@ -12,9 +12,16 @@ async function getCreators(pool) {
     GROUP BY LOWER(TRIM(p.account_handle)), ${niche}
   `);
   const creators = new Map();
+  const ownership = await pool.query(`SELECT mc.username, mc.model_id, m.name
+    FROM model_creators mc JOIN models m ON m.id = mc.model_id ORDER BY mc.model_id`);
+  const owners = new Map();
+  for (const row of ownership.rows) {
+    if (!owners.has(row.username)) owners.set(row.username, []);
+    owners.get(row.username).push({ modelId: Number(row.model_id), name: row.name });
+  }
   for (const row of rows) {
     if (!creators.has(row.account_handle)) {
-      creators.set(row.account_handle, { account_handle: row.account_handle, post_count: 0, mix: [] });
+      creators.set(row.account_handle, { account_handle: row.account_handle, post_count: 0, mix: [], owners: owners.get(row.account_handle) || [] });
     }
     const creator = creators.get(row.account_handle);
     const count = Number(row.reel_count);

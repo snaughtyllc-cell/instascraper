@@ -1,4 +1,5 @@
 const { parseNiches } = require('./me-feed');
+const { modelScopeClause } = require('./model-scope');
 const { effectiveNicheExpr } = require('./sort-status');
 
 async function modelCanAccessPost(pool, modelId, postId, { requirePlayable = false } = {}) {
@@ -9,9 +10,11 @@ async function modelCanAccessPost(pool, modelId, postId, { requirePlayable = fal
   const niches = parseNiches(model.rows[0]);
   // Each placeholder is used once in ascending appearance order for SQLite.
   const params = [postId, modelId, modelId, modelId, ...niches];
+  const scope = modelScopeClause('posts', params.length + 1);
   const nicheClause = niches.length
-    ? ` OR ${effectiveNicheExpr()} IN (${niches.map((_, i) => `$${i + 5}`).join(', ')})`
+    ? ` OR (${effectiveNicheExpr()} IN (${niches.map((_, i) => `$${i + 5}`).join(', ')}) AND ${scope.clause})`
     : '';
+  if (niches.length) params.push(...scope.params(modelId));
   const playableClause = requirePlayable ? ` AND posts.video_cache_status = 'cached'` : '';
   const result = await pool.query(
     `SELECT posts.id

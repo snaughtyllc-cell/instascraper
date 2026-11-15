@@ -11,23 +11,31 @@ const emptyResult = () => ({ classified: 0, auto: 0, needsLook: 0, errored: 0, s
 async function attemptsToday(pool) {
   // Lifetime attempts on recently attempted rows conservatively bound 24h spend.
   // COUNT(*) would undercount retries and let a failing batch exceed the cap.
-  const result = await pool.query('SELECT COALESCE(SUM(ai_attempts),0) AS n FROM posts WHERE ai_last_attempt_at >= $1',
-    [new Date(Date.now() - 86400000).toISOString()]);
+  const cutoff = new Date(Date.now() - 86400000).toISOString();
+  const result = await pool.query(`SELECT COALESCE(SUM(n),0) AS n FROM (
+    SELECT COALESCE(SUM(ai_attempts),0) AS n FROM posts WHERE ai_last_attempt_at >= $1
+    UNION ALL SELECT COUNT(*) AS n FROM suggested_reels WHERE ai_classified_at >= $2
+  ) attempts`, [cutoff, cutoff]);
   return Number(result.rows[0].n);
+}
+
+async function withSortLock(work, { waitForIdle = true, skipped } = {}) {
+  if (running) {
+    if (!waitForIdle) return skipped;
+    await whenIdle;
+    return withSortLock(work, { waitForIdle, skipped });
+  }
+  running = true; // Posts and candidate reels share the same daily Gemini budget.
+  let release;
+  whenIdle = new Promise(resolve => { release = resolve; });
+  try { return await work(); }
+  finally { running = false; release(); }
 }
 
 async function runAutoSort({ pool = require('./db'), describe, cfg = sortConfig(), limit, videoDir, waitForIdle = false } = {}) {
   const result = emptyResult();
   if (!cfg.enabled) return result;
-  if (running) {
-    if (!waitForIdle) return result;
-    await whenIdle;
-    return runAutoSort({ pool, describe, cfg, limit, videoDir, waitForIdle });
-  }
-  running = true; // Acquire before the first await: sweep, cron and backfill share this lock.
-  let release;
-  whenIdle = new Promise(resolve => { release = resolve; });
-  try {
+  return withSortLock(async () => {
     // Recover a process exit after claiming the final attempt, even at the cap.
     await pool.query(`UPDATE posts SET sort_status='needs_look', content_type=NULL,
       ai_error=COALESCE(ai_error,'Classification interrupted after final attempt')
@@ -85,7 +93,7 @@ async function runAutoSort({ pool = require('./db'), describe, cfg = sortConfig(
       }
     }
     return result;
-  } finally { running = false; release(); }
+  }, { waitForIdle, skipped: result });
 }
 
 async function backfillEstimate(pool, cfg = sortConfig()) {
@@ -94,9 +102,12 @@ async function backfillEstimate(pool, cfg = sortConfig()) {
 }
 
 async function sortUsage(pool, cfg = sortConfig()) {
-  const result = await pool.query('SELECT COUNT(*) AS reels, COALESCE(SUM(ai_cost_usd),0) AS usd FROM posts WHERE ai_classified_at >= $1',
-    [new Date(Date.now() - 30 * 86400000).toISOString()]);
+  const cutoff = new Date(Date.now() - 30 * 86400000).toISOString();
+  const result = await pool.query(`SELECT COALESCE(SUM(reels),0) AS reels, COALESCE(SUM(usd),0) AS usd FROM (
+    SELECT COUNT(*) AS reels, COALESCE(SUM(ai_cost_usd),0) AS usd FROM posts WHERE ai_classified_at >= $1
+    UNION ALL SELECT COUNT(*) AS reels, COALESCE(SUM(ai_cost_usd),0) AS usd FROM suggested_reels WHERE ai_classified_at >= $2
+  ) usage`, [cutoff, cutoff]);
   return { reels30d: Number(result.rows[0].reels), usd30d: Number(result.rows[0].usd), today: await attemptsToday(pool), dailyMax: cfg.dailyMax };
 }
 
-module.exports = { runAutoSort, backfillEstimate, sortUsage };
+module.exports = { runAutoSort, backfillEstimate, sortUsage, attemptsToday, withSortLock };

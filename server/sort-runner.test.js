@@ -166,3 +166,12 @@ test('archive during classification is preserved', async t => {
   assert.equal((await runAutoSort(deps)).classified, 0);
   assert.equal(deps.pool.sqlite.prepare('SELECT sort_status FROM posts').get().sort_status, 'unsorted');
 });
+test('candidate sorts count toward usage totals and the post-sort daily cap', async t => {
+  const deps = await setup(t, 1);
+  deps.cfg.dailyMax = 2;
+  const now = new Date().toISOString();
+  deps.pool.sqlite.prepare('INSERT INTO suggested_reels(ai_classified_at,ai_cost_usd) VALUES(?,?)').run(now, 0.002);
+  deps.pool.sqlite.prepare('INSERT INTO suggested_reels(ai_classified_at,ai_cost_usd) VALUES(?,?)').run(now, 0.003);
+  assert.deepEqual(await sortUsage(deps.pool, deps.cfg), { reels30d: 2, usd30d: 0.005, today: 2, dailyMax: 2 });
+  assert.equal((await runAutoSort(deps)).classified, 0);
+});

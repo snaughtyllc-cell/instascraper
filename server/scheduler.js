@@ -6,6 +6,7 @@ const ContentIdeaAgent = require('./ai-agent');
 const { deliverBatch } = require('./delivery');
 const radar = require('./radar');
 const { runAutoSort } = require('./sort-runner');
+const { computeProposals } = require('./proposals');
 
 function cadenceConfig(env = process.env) {
   const num = (v, d) => { const n = Number(v); return Number.isFinite(n) && n >= 0 ? n : d; };
@@ -409,6 +410,13 @@ async function runSortCatchUp() {
   }
 }
 
+async function runWorkspaceProposals() {
+  try {
+    const result = await computeProposals(pool);
+    console.log(`[Workspaces] Proposed ${result.proposed} creator owners`);
+  } catch (error) { console.error('[Workspaces] proposals failed:', error.message); }
+}
+
 function startScheduler(scraper) {
   scraperInstance = scraper;
   cron.schedule('0 3 * * *', () => runAutoScrape()); // daily; cadence interval + per-cycle cap control actual spend
@@ -418,6 +426,7 @@ function startScheduler(scraper) {
   cron.schedule('0 0 * * 0', () => runEngagementRollup());
   cron.schedule('0 2 * * *', () => runAutoCleanup());
   cron.schedule('0 4 * * 1', () => runDiscovery());
+  cron.schedule('30 4 * * 1', () => runWorkspaceProposals());
   cron.schedule('0 6 * * 1', () => {
     if (!scraperInstance || !scraperInstance.apiKey) return;
     radar.runRadar(scraperInstance).catch(e => console.error('[Radar] cron run failed:', e.message));
@@ -430,6 +439,7 @@ function startScheduler(scraper) {
   // deploy instead of waiting up to 30 min for the first cron tick. Delayed so it
   // doesn't compete with cold-start request handling; runVideoSweep swallows its own errors.
   setTimeout(() => runVideoSweep(), 20000);
+  setTimeout(() => runWorkspaceProposals(), 60000);
   console.log('[Scheduler] All cron jobs registered');
 }
 

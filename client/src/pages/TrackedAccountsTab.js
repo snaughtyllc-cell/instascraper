@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { getTrackedAccounts, addTrackedAccount, updateTrackedAccount, removeTrackedAccount, scrapeNow, getSchedulerStatus, triggerJob, scrapeTrackedBulk, getCreators, getContentTypes } from '../api';
 
 function formatCount(n) {
@@ -19,8 +19,22 @@ function timeAgo(dateStr) {
   return `${Math.floor(days / 7)}w ago`;
 }
 
+function OwnerChips({ owners = [] }) {
+  return (
+    <div className="flex flex-wrap gap-1 mt-1" aria-label="Model owners">
+      {owners.length ? owners.map(owner => (
+        <span key={owner.modelId} className="px-1.5 py-0.5 rounded text-[10px] bg-gold/10 text-gold border border-gold/30">
+          {owner.name}
+        </span>
+      )) : <span className="text-[10px] text-gray-500">Unassigned</span>}
+    </div>
+  );
+}
+
 export default function TrackedAccountsTab() {
   const [accounts, setAccounts] = useState([]);
+  const [unassignedOnly, setUnassignedOnly] = useState(false);
+  const loadVersion = useRef(0);
   const [newUsername, setNewUsername] = useState('');
   const [newTags, setNewTags] = useState('');
   const [creatorMix, setCreatorMix] = useState({});
@@ -31,8 +45,12 @@ export default function TrackedAccountsTab() {
   const [bulkScraping, setBulkScraping] = useState(false);
 
   const load = useCallback(async () => {
+    const version = ++loadVersion.current;
     try {
-      const [tracked, creators, types] = await Promise.allSettled([getTrackedAccounts(), getCreators(), getContentTypes()]);
+      const [tracked, creators, types] = await Promise.allSettled([
+        getTrackedAccounts(unassignedOnly ? { unassigned: true } : undefined), getCreators(), getContentTypes(),
+      ]);
+      if (version !== loadVersion.current) return;
       if (tracked.status === 'rejected') throw tracked.reason;
       setAccounts(tracked.value.data);
       if (creators.status === 'fulfilled') {
@@ -46,10 +64,11 @@ export default function TrackedAccountsTab() {
         console.error('Failed to load type labels:', types.reason);
       }
     } catch (err) {
+      if (version !== loadVersion.current) return;
       console.error('Failed to load accounts:', err);
     }
     setLoading(false);
-  }, []);
+  }, [unassignedOnly]);
 
   const loadScheduler = useCallback(async () => {
     try {
@@ -104,7 +123,15 @@ export default function TrackedAccountsTab() {
   // Force-scrape every active account now, bypassing the cadence (still skips any
   // account whose previous job is still running). Costs one Apify run per account.
   const handleForceScrapeAll = async () => {
-    const usernames = accounts.filter(a => a.status === 'active').map(a => a.username);
+    let tracked = accounts;
+    if (unassignedOnly) {
+      try { tracked = (await getTrackedAccounts()).data; }
+      catch (err) {
+        window.alert('Failed to load accounts: ' + (err.response?.data?.error || err.message));
+        return;
+      }
+    }
+    const usernames = tracked.filter(a => a.status === 'active').map(a => a.username);
     if (usernames.length === 0) return;
     if (!window.confirm(`Force-scrape all ${usernames.length} active account(s) now? This ignores the scrape cadence and uses Apify for each.`)) return;
     setBulkScraping(true);
@@ -130,8 +157,9 @@ export default function TrackedAccountsTab() {
     );
   }
 
-  const active = accounts.filter(a => a.status === 'active');
-  const paused = accounts.filter(a => a.status === 'paused');
+  const visibleAccounts = unassignedOnly ? accounts.filter(a => !a.owners?.length) : accounts;
+  const active = visibleAccounts.filter(a => a.status === 'active');
+  const paused = visibleAccounts.filter(a => a.status === 'paused');
 
   return (
     <div className="space-y-6">
@@ -197,6 +225,23 @@ export default function TrackedAccountsTab() {
         </div>
       )}
 
+      <div className="flex flex-wrap items-center gap-2" role="group" aria-label="Creator ownership filter">
+        {[{ label: 'All Creators', value: false }, { label: 'Unassigned', value: true }].map(filter => (
+          <button
+            key={filter.label}
+            onClick={() => setUnassignedOnly(filter.value)}
+            aria-pressed={unassignedOnly === filter.value}
+            className={`px-3 py-1.5 rounded-lg text-xs font-medium border transition-colors ${
+              unassignedOnly === filter.value
+                ? 'bg-gold/10 border-gold/40 text-gold'
+                : 'bg-gray-800 border-gray-700 text-gray-300 hover:text-white hover:border-gray-600'
+            }`}
+          >
+            {filter.label}
+          </button>
+        ))}
+      </div>
+
       {/* Active Accounts */}
       <div className="bg-gray-900 rounded-xl border border-gray-800 overflow-hidden">
         <div className="px-5 py-4 border-b border-gray-800 flex items-center justify-between">
@@ -206,7 +251,7 @@ export default function TrackedAccountsTab() {
 
         {active.length === 0 ? (
           <div className="text-center py-12 text-gray-500">
-            No accounts tracked yet. Add one above to get started.
+            {unassignedOnly ? 'No active unassigned creators.' : 'No accounts tracked yet. Add one above to get started.'}
           </div>
         ) : (
           <div className="divide-y divide-gray-800">
@@ -232,6 +277,7 @@ export default function TrackedAccountsTab() {
                       </div>
                     )}
                   </div>
+                  <OwnerChips owners={account.owners} />
                   {creatorMix[account.username.toLowerCase()]?.length > 0 && (
                     <p className="mt-1 text-xs text-gray-300">
                       {creatorMix[account.username.toLowerCase()].map(({ type, pct }) => `${typeLabels[type] || type} ${pct}%`).join(' · ')}
@@ -285,6 +331,7 @@ export default function TrackedAccountsTab() {
               <div key={account.username} className="px-5 py-3.5 flex items-center gap-4 opacity-60">
                 <div className="flex-1 min-w-0">
                   <span className="text-sm font-semibold text-gray-400">@{account.username}</span>
+                  <OwnerChips owners={account.owners} />
                   <div className="text-xs text-gray-600 mt-0.5">
                     {formatCount(account.followers)} followers &middot; Last scraped {timeAgo(account.last_scraped_at)}
                   </div>

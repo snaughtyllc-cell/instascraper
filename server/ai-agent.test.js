@@ -104,3 +104,19 @@ test('personaBlock: includes the context when present', () => {
   assert.ok(out.includes('Flirty AZ party girl'));
   assert.match(out, /persona/i);
 });
+
+test('idea source reels limited to her creators when she has some', async () => {
+  const agent = new ContentIdeaAgent();
+  const queries = [];
+  agent.pool = { query: async (sql, params) => {
+    queries.push({ sql, params });
+    return { rows: /COUNT/.test(sql) ? [{ cnt: 3 }] : [] };
+  } };
+  await agent._queryTopContent('talking', ['dance'], 7);
+  assert.strictEqual(queries.length, 4);
+  for (const { sql, params } of queries) {
+    assert.match(sql, /model_creators/);
+    assert.deepStrictEqual(params.slice(2,4), [7,7]);
+    assert.deepStrictEqual([...sql.matchAll(/\$(\d+)/g)].map(m => Number(m[1])), params.map((_,i) => i+1));
+  }
+});

@@ -7,6 +7,7 @@ function makePool() {
   const sqlite = new Database(':memory:');
   sqlite.exec(`CREATE TABLE posts (id INTEGER PRIMARY KEY, content_type TEXT, sort_status TEXT, account_handle TEXT,
     soft_deleted INTEGER DEFAULT 0, archived INTEGER DEFAULT 0, video_cache_status TEXT DEFAULT 'cached');
+    CREATE TABLE model_creators (model_id INTEGER, username TEXT);
     CREATE TABLE models (id INTEGER PRIMARY KEY, primary_niche TEXT, secondary_niches TEXT);
     CREATE TABLE creator_types (account_handle TEXT, content_type TEXT);
     CREATE TABLE model_assigned_posts (model_id INTEGER, post_id INTEGER, status TEXT);
@@ -51,4 +52,22 @@ test('sorted reels match the model niches and requirePlayable gates saved reels'
   assert.strictEqual(await modelCanAccessPost(pool, 7, 1), true);
   pool.sqlite.exec("UPDATE posts SET video_cache_status = 'pending'; INSERT INTO model_saved_posts VALUES (7, 1)");
   assert.strictEqual(await modelCanAccessPost(pool, 7, 1, { requirePlayable: true }), false);
+});
+
+test('assigned reel from a non-owned creator still accessible', async () => {
+  const pool = makePool();
+  pool.sqlite.exec("INSERT INTO model_creators VALUES (7,'other'); INSERT INTO model_assigned_posts VALUES (7,1,'assigned')");
+  assert.strictEqual(await modelCanAccessPost(pool, 7, 1), true);
+});
+test('saved reel stays accessible after the creator is removed', async () => {
+  const pool = makePool();
+  pool.sqlite.exec("INSERT INTO model_creators VALUES (7,'other'); INSERT INTO model_saved_posts VALUES (7,1)");
+  assert.strictEqual(await modelCanAccessPost(pool, 7, 1), true);
+});
+test('sorted non-owned niche reel is inaccessible while owned mixed-case handle matches', async () => {
+  const pool = makePool();
+  pool.sqlite.exec("UPDATE posts SET sort_status='auto'; INSERT INTO model_creators VALUES (7,'other')");
+  assert.strictEqual(await modelCanAccessPost(pool, 7, 1), false);
+  pool.sqlite.exec("INSERT INTO model_creators VALUES (7,'creator'); UPDATE posts SET account_handle='Creator'");
+  assert.strictEqual(await modelCanAccessPost(pool, 7, 1), true);
 });

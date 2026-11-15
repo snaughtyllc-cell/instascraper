@@ -1,3 +1,4 @@
+const { modelScopeClause } = require('./model-scope');
 const { effectiveNicheExpr } = require('./sort-status');
 const Anthropic = require('@anthropic-ai/sdk');
 const pool = require('./db');
@@ -35,6 +36,7 @@ function personaBlock(model) {
 class ContentIdeaAgent {
   constructor(apiKey) {
     this.apiKey = apiKey;
+    this.pool = pool;
     if (apiKey) {
       this.client = new Anthropic({ apiKey });
     }
@@ -44,7 +46,7 @@ class ContentIdeaAgent {
     if (!this.client) throw new Error('ANTHROPIC_API_KEY not configured');
 
     // Load model
-    const modelResult = await pool.query('SELECT * FROM models WHERE id = $1', [modelId]);
+    const modelResult = await this.pool.query('SELECT * FROM models WHERE id = $1', [modelId]);
     const model = modelResult.rows[0];
     if (!model) throw new Error(`Model ${modelId} not found`);
 
@@ -53,13 +55,14 @@ class ContentIdeaAgent {
     // Get top content by niche
     const { primaryPosts, secondaryPosts, staleNiches } = await this._queryTopContent(
       model.primary_niche,
-      model.secondary_niches ? model.secondary_niches.split(',').map(s => s.trim()).filter(Boolean) : []
+      model.secondary_niches ? model.secondary_niches.split(',').map(s => s.trim()).filter(Boolean) : [],
+      modelId
     );
 
     const allPosts = [...primaryPosts, ...secondaryPosts];
     if (allPosts.length === 0) {
       // No content at all — create a warning card
-      await pool.query(
+      await this.pool.query(
         `INSERT INTO idea_cards (model_id, batch_id, concept, format, why_working, hook_line, source_niche, stale_warning, status)
          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'pending')`,
         [modelId, batchId, 'No trending content found in your niche this period.',
@@ -74,7 +77,7 @@ class ContentIdeaAgent {
     let freshIdeas = [];
     if (warning) {
       // Surface the failure as a clear warning card instead of silently storing nothing.
-      await pool.query(
+      await this.pool.query(
         `INSERT INTO idea_cards (model_id, batch_id, concept, format, why_working, hook_line, source_niche, stale_warning, status)
          VALUES ($1, $2, $3, '', '', '', $4, $5, 'pending')`,
         [modelId, batchId, warning, model.primary_niche, warning]
@@ -85,7 +88,7 @@ class ContentIdeaAgent {
 
       // Store idea cards
       for (const idea of freshIdeas) {
-        await pool.query(
+        await this.pool.query(
           `INSERT INTO idea_cards (model_id, batch_id, concept, format, why_working, hook_line, source_niche, source_post_ids, stale_warning)
            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
           [modelId, batchId, idea.concept, idea.format || '', idea.why_working || '',
@@ -97,7 +100,7 @@ class ContentIdeaAgent {
 
     // Add stale niche warnings
     for (const niche of staleNiches) {
-      await pool.query(
+      await this.pool.query(
         `INSERT INTO idea_cards (model_id, batch_id, concept, format, why_working, hook_line, source_niche, stale_warning)
          VALUES ($1, $2, $3, '', '', '', $4, $5)`,
         [modelId, batchId, `Limited fresh content for "${niche}" — consider scraping more accounts in this category.`,
@@ -113,34 +116,38 @@ class ContentIdeaAgent {
     return { batchId, ideaCount: freshIdeas.length, staleNiches, warning: warning || undefined };
   }
 
-  async _queryTopContent(primaryNiche, secondaryNiches) {
+  async _queryTopContent(primaryNiche, secondaryNiches, modelId) {
     const thirtyDaysAgo = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString();
     const staleNiches = [];
+    const scope = modelScopeClause('p', 3);
+    const scopeParams = scope.params(modelId);
 
     // Query primary niche posts
     const primaryLimit = secondaryNiches.length > 0 ? 21 : 30;
-    const primaryResult = await pool.query(
+    const primaryResult = await this.pool.query(
       `SELECT p.id, p.shortcode, p.caption, p.view_count, p.like_count, p.comment_count,
               p.er_percent, p.account_handle, p.post_url, ${effectiveNicheExpr('p')} as niche
        FROM posts p
        LEFT JOIN creator_types ct ON p.account_handle = ct.account_handle
        WHERE ${effectiveNicheExpr('p')} = $1
          AND posted_at >= $2
+         AND ${scope.clause}
          AND (soft_deleted = 0 OR soft_deleted IS NULL)
          AND (archived = 0 OR archived IS NULL)
        ORDER BY (COALESCE(p.view_count, 0) * 0.4 + COALESCE(p.like_count, 0) * 0.3 + COALESCE(p.er_percent, 0) * 30) DESC
-       LIMIT $3`,
-      [primaryNiche, thirtyDaysAgo, primaryLimit]
+       LIMIT $5`,
+      [primaryNiche, thirtyDaysAgo, ...scopeParams, primaryLimit]
     );
 
     // Check if primary niche is stale
-    const primaryFreshCount = await pool.query(
+    const primaryFreshCount = await this.pool.query(
       `SELECT COUNT(*) as cnt FROM posts p
        LEFT JOIN creator_types ct ON p.account_handle = ct.account_handle
        WHERE ${effectiveNicheExpr('p')} = $1
          AND posted_at >= $2
+         AND ${scope.clause}
          AND (soft_deleted = 0 OR soft_deleted IS NULL)`,
-      [primaryNiche, new Date(Date.now() - 14 * 24 * 60 * 60 * 1000).toISOString()]
+      [primaryNiche, new Date(Date.now() - 14 * 24 * 60 * 60 * 1000).toISOString(), ...scopeParams]
     );
     if (parseInt(primaryFreshCount.rows[0].cnt) < 3) staleNiches.push(primaryNiche);
 
@@ -149,29 +156,31 @@ class ContentIdeaAgent {
     if (secondaryNiches.length > 0) {
       const perNiche = Math.ceil(9 / secondaryNiches.length);
       for (const niche of secondaryNiches) {
-        const result = await pool.query(
+        const result = await this.pool.query(
           `SELECT p.id, p.shortcode, p.caption, p.view_count, p.like_count, p.comment_count,
                   p.er_percent, p.account_handle, p.post_url, ${effectiveNicheExpr('p')} as niche
            FROM posts p
            LEFT JOIN creator_types ct ON p.account_handle = ct.account_handle
            WHERE ${effectiveNicheExpr('p')} = $1
              AND posted_at >= $2
+             AND ${scope.clause}
              AND (soft_deleted = 0 OR soft_deleted IS NULL)
              AND (archived = 0 OR archived IS NULL)
            ORDER BY (COALESCE(p.view_count, 0) * 0.4 + COALESCE(p.like_count, 0) * 0.3 + COALESCE(p.er_percent, 0) * 30) DESC
-           LIMIT $3`,
-          [niche, thirtyDaysAgo, perNiche]
+           LIMIT $5`,
+          [niche, thirtyDaysAgo, ...scopeParams, perNiche]
         );
         secondaryPosts.push(...result.rows);
 
         // Check stale
-        const freshCount = await pool.query(
+        const freshCount = await this.pool.query(
           `SELECT COUNT(*) as cnt FROM posts p
            LEFT JOIN creator_types ct ON p.account_handle = ct.account_handle
            WHERE ${effectiveNicheExpr('p')} = $1
              AND posted_at >= $2
+             AND ${scope.clause}
              AND (soft_deleted = 0 OR soft_deleted IS NULL)`,
-          [niche, new Date(Date.now() - 14 * 24 * 60 * 60 * 1000).toISOString()]
+          [niche, new Date(Date.now() - 14 * 24 * 60 * 60 * 1000).toISOString(), ...scopeParams]
         );
         if (parseInt(freshCount.rows[0].cnt) < 3) staleNiches.push(niche);
       }
@@ -255,7 +264,7 @@ Weight "${model.primary_niche}" content (70%) over secondary niches (30%). Focus
   async _deduplicateIdeas(modelId, newIdeas) {
     // Fetch previous ideas from last 30 days
     const thirtyDaysAgo = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString();
-    const prevResult = await pool.query(
+    const prevResult = await this.pool.query(
       'SELECT concept FROM idea_cards WHERE model_id = $1 AND created_at >= $2',
       [modelId, thirtyDaysAgo]
     );

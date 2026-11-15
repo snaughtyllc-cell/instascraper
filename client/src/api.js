@@ -46,7 +46,7 @@ export const exportEngagement = (handle, format = 'csv') => {
 };
 
 // Tracked accounts
-export const getTrackedAccounts = () => api.get('/tracked');
+export const getTrackedAccounts = (params) => api.get('/tracked', { params });
 export const addTrackedAccount = (username, tags) => api.post('/tracked', { username, tags });
 export const updateTrackedAccount = (username, data) => api.patch(`/tracked/${username}`, data);
 export const removeTrackedAccount = (username) => api.delete(`/tracked/${username}`);
@@ -54,10 +54,10 @@ export const scrapeNow = (username) => api.post(`/tracked/${username}/scrape`);
 
 // Suggested accounts
 export const getSuggestedAccounts = (params) => api.get('/suggested', { params });
-export const approveSuggested = (username) => api.post(`/suggested/${username}/approve`);
+export const approveSuggested = (username, modelIds) => api.post(`/suggested/${encodeURIComponent(username)}/approve`, { modelIds });
 export const dismissSuggested = (username) => api.post(`/suggested/${username}/dismiss`);
 export const snoozeSuggested = (username) => api.post(`/suggested/${username}/snooze`);
-export const approveSuggestedBulk = (usernames) => api.post('/suggested/approve-bulk', { usernames });
+export const approveSuggestedBulk = (usernames, modelIds) => api.post('/suggested/approve-bulk', { usernames, modelIds });
 export const scrapeTrackedBulk = (usernames) => api.post('/tracked/scrape-bulk', { usernames });
 
 // Reel Radar (keyword-driven creator discovery)
@@ -119,3 +119,18 @@ export const getTrendingAudio = () => api.get('/audio/trending');
 export const getAudioReels = (audioId) => api.get(`/audio/${encodeURIComponent(audioId)}/reels`);
 
 export default api;
+
+// Model workspaces
+export const getWorkspace = (id) => api.get(`/workspaces/${id}`);
+export const getWorkspaceCreators = (id) => api.get(`/workspaces/${id}/creators`);
+export const addWorkspaceCreator = (id, username) => api.post(`/workspaces/${id}/creators`, { username });
+export const removeWorkspaceCreator = (id, username) => api.delete(`/workspaces/${id}/creators/${encodeURIComponent(username)}`);
+export const getWorkspaceReels = (id, page = 1) => api.get(`/workspaces/${id}/reels`, { params: { page } });
+export const getWorkspaceProposals = (id) => api.get(`/workspaces/${id}/proposals`);
+export const confirmWorkspaceProposal = (id, username) => api.post(`/workspaces/${id}/proposals/${encodeURIComponent(username)}/confirm`);
+export const rejectWorkspaceProposal = (id, username) => api.post(`/workspaces/${id}/proposals/${encodeURIComponent(username)}/reject`);
+export const confirmAllWorkspaceProposals = (id) => api.post(`/workspaces/${id}/proposals/confirm-all`);
+export const getWorkspaceSuggestions = (id) => api.get(`/workspaces/${id}/suggestions`);
+export const approveWorkspaceSuggestion = (id, username) => api.post(`/workspaces/${id}/suggestions/${encodeURIComponent(username)}/approve`);
+export const dismissWorkspaceSuggestion = (id, username) => api.post(`/workspaces/${id}/suggestions/${encodeURIComponent(username)}/dismiss`);
+export const snoozeWorkspaceSuggestion = (id, username) => api.post(`/workspaces/${id}/suggestions/${encodeURIComponent(username)}/snooze`);
