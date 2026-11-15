@@ -1,5 +1,6 @@
 import React, { useCallback, useEffect, useState } from 'react';
 import { getBackfillEstimate, getModelCockpit, getSortUsage, getStartFreshPreview, startBackfill, startFresh } from '../api';
+import { isStartFreshConfirmation } from '../utils/startFreshConfirmation';
 
 const FEEDBACK_LABELS = {
   want_to_make: 'Wants to make',
@@ -302,7 +303,14 @@ function AutoSortCard() {
         return;
       }
       const confirmation = window.prompt(`Hide all ${num(count)} reels? Tracked creators stay; next scrape refills; undo from Delete Log.\n\nType START FRESH to confirm.`);
-      if (confirmation !== 'START FRESH') return;
+      if (confirmation === null) {
+        setMessage('Start fresh cancelled — nothing was hidden.');
+        return;
+      }
+      if (!isStartFreshConfirmation(confirmation)) {
+        setError('Confirmation didn\'t match "START FRESH" — nothing was hidden.');
+        return;
+      }
       const result = await startFresh();
       setMessage(`Hidden ${num(result.data.hidden)} reels. Tracked creators stay; next scrape refills. Undo individual reels from Delete Log.`);
       await loadUsage();
