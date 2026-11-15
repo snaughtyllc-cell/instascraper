@@ -102,7 +102,7 @@ function checkProdSecrets(env = process.env) {
 
 app.use(cors((req, callback) => callback(null, corsOptionsForRequest(req))));
 app.use(browserSecurityHeaders);
-registerFilmApi(app, { pool });
+const reactRenderWorker = registerFilmApi(app, { pool });
 app.use(express.json());
 
 const SESSION_COOKIE_NAME = 'instascraper.sid';
@@ -1704,6 +1704,7 @@ async function boot() {
   }
   try {
     await initWithRetry(() => pool.initDB());
+    await reactRenderWorker.start();
     health.markReady();
     console.log('Database ready');
   } catch (err) {

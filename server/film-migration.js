@@ -13,6 +13,15 @@ async function ensureFilmTables(db, { isPg }) {
     created_at TEXT NOT NULL DEFAULT ${now},
     PRIMARY KEY (model_id, post_id)
   )`);
+  await db.query(`CREATE TABLE IF NOT EXISTS film_react_jobs (
+    job_id ${isPg ? 'UUID' : 'TEXT'} PRIMARY KEY,
+    state TEXT NOT NULL,
+    error TEXT,
+    payload_json TEXT,
+    drive_file_id TEXT,
+    created_at TEXT NOT NULL DEFAULT ${now},
+    updated_at TEXT NOT NULL DEFAULT ${now}
+  )`);
 }
 
 module.exports = { ensureFilmTables };

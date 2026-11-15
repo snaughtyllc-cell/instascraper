@@ -9,8 +9,9 @@ const { effectiveNicheExpr } = require('./sort-status');
 const { modelCanAccessPost } = require('./model-access');
 const modelTaste = require('./model-taste');
 const modelReactions = require('./model-reactions');
-const videos = require('./videos');
 const thumbnails = require('./thumbnails');
+const { isValidShortcode, ensureReactReference, getPinnedReferencePath, availableReferencePath } = require('./react-reference');
+const { createReactRenderWorker, validateRenderRequest } = require('./react-render');
 
 const MEDIA_TTL_SECONDS = 6 * 60 * 60;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -115,15 +116,23 @@ async function reelPresenter(pool, req, res) {
   };
 }
 
-function registerFilmApi(app, { pool }) {
+function registerFilmApi(app, { pool, reactWorker = createReactRenderWorker({ pool }) }) {
   const router = express.Router();
 
   router.get('/media/:reelId', signedMedia, asyncHandler(async (req, res) => {
-    const result = await pool.query(`SELECT posts.id, posts.video_cache_status FROM posts
-      WHERE posts.id = $1 AND ${VISIBLE_SORTED}`, [req.filmReelId]);
+    const result = await pool.query(`SELECT posts.id, posts.shortcode, posts.video_cache_status,
+      CASE WHEN ${VISIBLE_SORTED} THEN 1 ELSE 0 END AS film_visible
+      FROM posts WHERE posts.id = $1`, [req.filmReelId]);
     const post = result.rows[0];
-    if (!post || post.video_cache_status !== 'cached') return res.status(404).json({ error: 'reel_not_available' });
-    return sendCachedFile(res, videos.videoFilePath(post, videos.DEFAULT_VIDEO_DIR), { acceptRanges: true });
+    // Explicit service-authorized pins are also valid references when a reel
+    // has left the Find feed, including after the normal cache is pruned.
+    if (!post || (!getPinnedReferencePath(post.shortcode)
+      && (!post.film_visible || post.video_cache_status !== 'cached'))) {
+      return res.status(404).json({ error: 'reel_not_available' });
+    }
+    const file = availableReferencePath(post);
+    if (!file) return res.status(404).json({ error: 'reel_not_available' });
+    return sendCachedFile(res, file, { acceptRanges: true });
   }));
 
   router.get('/thumb/:reelId', signedMedia, asyncHandler(async (req, res) => {
@@ -142,6 +151,29 @@ function registerFilmApi(app, { pool }) {
     next();
   });
   router.use(express.json());
+
+  router.post('/react-reference', asyncHandler(async (req, res) => {
+    if (!isValidShortcode(req.body?.shortcode)) return res.status(400).json({ error: 'invalid_shortcode' });
+    const secret = process.env.FILM_MEDIA_SECRET;
+    if (!secret) return res.status(503).json({ error: 'media_unavailable' });
+    const reference = await ensureReactReference(pool, req.body.shortcode);
+    if (!reference) return res.status(404).json({ error: 'reel_not_available' });
+    const base = new URL(process.env.PUBLIC_BASE_URL || `${req.protocol}://${req.get('host')}`);
+    if (!['http:', 'https:'].includes(base.protocol)) throw new Error('Invalid PUBLIC_BASE_URL');
+    const exp = Math.floor(Date.now() / 1000) + MEDIA_TTL_SECONDS;
+    const url = new URL(`/film/v1/media/${reference.post.id}`, base);
+    url.searchParams.set('exp', String(exp));
+    url.searchParams.set('sig', signature(reference.post.id, exp, secret));
+    return res.json({ videoUrl: url.href, durationSec: reference.durationSec });
+  }));
+
+  router.post('/react-render', asyncHandler(async (req, res) => {
+    const error = validateRenderRequest(req.body);
+    if (error) return res.status(400).json({ error });
+    try { await reactWorker.enqueue(req.body); }
+    catch { return res.status(503).json({ error: 'render_unavailable' }); }
+    return res.status(202).json({ accepted: true });
+  }));
 
   router.use('/models/:hqProjectId', asyncHandler(async (req, res, next) => {
     const result = await pool.query("SELECT * FROM models WHERE hq_project_id = $1 AND status = 'active'", [req.params.hqProjectId.toLowerCase()]);
@@ -242,6 +274,7 @@ function registerFilmApi(app, { pool }) {
     return dbErrorMiddleware(error, req, res, next);
   });
   app.use('/film/v1', router);
+  return reactWorker;
 }
 
 module.exports = { registerFilmApi };
