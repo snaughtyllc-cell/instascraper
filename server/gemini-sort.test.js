@@ -3,7 +3,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs/promises');
 const os = require('node:os');
 const path = require('node:path');
-const { describeReel, redecideFromDescription, estimateCostUsd } = require('./gemini-sort');
+const { describeReel, redecideFromDescription, estimateCostUsd, cleanTranscript } = require('./gemini-sort');
 
 const types = [{ value: 'dance', label: 'Dance' }, { value: 'talking', label: 'Talking' }];
 function fake(result = {}) {
@@ -28,7 +28,9 @@ test('request uses low media resolution, json schema and the model', async t => 
   assert.equal(req.model, 'gemini-3.5-flash-lite');
   assert.equal(req.config.mediaResolution, 'MEDIA_RESOLUTION_LOW');
   assert.equal(req.config.responseMimeType, 'application/json');
-  assert.deepEqual(Object.keys(req.config.responseJsonSchema.properties), ['type', 'confidence', 'description', 'suggested_type', 'look_tags']);
+  assert.deepEqual(Object.keys(req.config.responseJsonSchema.properties), ['type', 'confidence', 'description', 'suggested_type', 'look_tags', 'transcript']);
+  assert.deepEqual(req.config.responseJsonSchema.properties.transcript, { anyOf: [{ type: 'string', maxLength: 4000 }, { type: 'null' }] });
+  assert.ok(req.config.responseJsonSchema.required.includes('transcript'));
   assert.deepEqual(req.config.thinkingConfig, { thinkingLevel: 'MINIMAL' });
   const parts = req.contents[0].parts;
   assert.equal(parts[0].videoMetadata.fps, 1);
@@ -117,4 +119,54 @@ test('look tags capped at five and malformed output becomes an empty list', asyn
   const client = fake({ text: JSON.stringify({ look_tags: vocabulary.map(tag => tag.value) }) });
   assert.equal((await redecideFromDescription({ types, lookTags: vocabulary }, { client })).lookTags.length, 5);
   assert.deepEqual((await redecideFromDescription({ types, lookTags }, { client: fake({ text: '{"look_tags":"brunette"}' }) })).lookTags, []);
+});
+
+test('describe transcribes original speech in the same call with no lyrics or translation', async t => {
+  const transcript = 'Hola, ¿cómo estás?\nEstoy bien.';
+  const client = fake({ text: JSON.stringify({ transcript }) });
+  const result = await describeReel({ filePath: await video(t), types }, { client });
+  assert.equal(client.calls.length, 1);
+  assert.equal(result.transcript, transcript);
+  const prompt = client.calls[0].contents[0].parts[1].text;
+  for (const rule of [/clear speech by the person on screen/, /VERBATIM in plain text/, /line breaks between sentences or lines/, /at most 4000 characters/, /Return null when there is no clear speech or only music or lyrics/, /never transcribe song lyrics/, /Do not translate: keep the original language/, /No speaker labels, timestamps or commentary/]) {
+    assert.match(prompt, rule);
+  }
+});
+
+test('describe normalizes missing or empty speech to null and bounds overlong output', async t => {
+  const filePath = await video(t);
+  for (const value of [null, undefined, '', '   ', false]) {
+    const result = await describeReel({ filePath, types }, { client: fake({ text: JSON.stringify({ transcript: value }) }) });
+    assert.equal(result.transcript, null);
+  }
+  const transcript = 'sentence. '.repeat(500);
+  const result = await describeReel({ filePath, types }, { client: fake({ text: JSON.stringify({ transcript }) }) });
+  assert.equal(result.transcript.length, 3999);
+  assert.ok(result.transcript.endsWith('.'));
+  assert.ok(transcript.startsWith(result.transcript));
+});
+
+test('text-only redecide never requests or returns a transcript', async () => {
+  const client = fake({ text: JSON.stringify({ transcript: 'Invented speech' }) });
+  const result = await redecideFromDescription({ description: 'A person speaking.', types }, { client, transcribe: true });
+  const request = client.calls[0];
+  assert.equal('transcript' in request.config.responseJsonSchema.properties, false);
+  assert.equal(request.config.responseJsonSchema.required.includes('transcript'), false);
+  assert.doesNotMatch(request.contents[0].parts[0].text, /transcri/i);
+  assert.equal('transcript' in result, false);
+});
+
+test('cleanTranscript truncates at sentence or word boundaries within 4000 characters', () => {
+  const sentence = `${'a'.repeat(3998)}. `;
+  assert.equal(cleanTranscript(`${sentence}More words.`), sentence.trimEnd());
+  const words = 'word '.repeat(900);
+  assert.equal(cleanTranscript(words), 'word '.repeat(800).trimEnd());
+  assert.equal(cleanTranscript(`${'a'.repeat(4000)} remainder`), 'a'.repeat(4000));
+  assert.equal(cleanTranscript('a'.repeat(4001)), null);
+  const original = `你好。\n${'bonjour '.repeat(550)}`;
+  const truncated = cleanTranscript(original);
+  assert.ok(truncated.length <= 4000);
+  assert.ok(truncated.endsWith('bonjour'));
+  assert.ok(original.startsWith(truncated));
+  assert.equal(cleanTranscript(' Hola.\r\nBien.\rGracias. '), 'Hola.\nBien.\nGracias.');
 });

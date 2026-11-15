@@ -24,6 +24,11 @@ test('first run adds columns, every existing reel unsorted', async () => {
   for (const name of ['sort_status', ...AI_COLUMNS.map((column) => column.name)]) {
     assert.ok(columns.includes(name), `${name} missing`);
   }
+  const transcript = db.sqlite.prepare('PRAGMA table_info(posts)').all().find(column => column.name === 'ai_transcript');
+  assert.strictEqual(transcript.type, 'TEXT');
+  assert.deepStrictEqual(db.sqlite.prepare('SELECT ai_transcript FROM posts ORDER BY id').all(), [
+    { ai_transcript: null }, { ai_transcript: null },
+  ]);
   assert.deepStrictEqual(db.sqlite.prepare('SELECT sort_status FROM posts ORDER BY id').all(), [
     { sort_status: 'unsorted' }, { sort_status: 'unsorted' },
   ]);

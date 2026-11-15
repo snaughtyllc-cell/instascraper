@@ -95,7 +95,7 @@ function redecideNeedsLook({ pool, redecide, cfg = sortConfig() }) {
   return state.promise;
 }
 
-function registerSortRoutes(app, { pool, runAutoSort, runLookBackfill, redecide, cfg = sortConfig() }) {
+function registerSortRoutes(app, { pool, runAutoSort, runLookBackfill, runTranscriptBackfill, redecide, cfg = sortConfig() }) {
   const route = (handler) => (req, res, next) => Promise.resolve(handler(req, res)).catch(next);
   const backgroundRedecide = () => {
     redecideNeedsLook({ pool, redecide, cfg }).catch((error) => console.error('[Sort] redecide:', error.message));
@@ -176,6 +176,24 @@ function registerSortRoutes(app, { pool, runAutoSort, runLookBackfill, redecide,
       }
     }).catch(error => console.error('[Look] backfill:', error.message))
       .finally(() => { lookBackfillRunning = false; });
+  }));
+
+  app.get('/sort/transcript-backfill/estimate', route(async (req, res) => {
+    res.json(await require('./transcript-backfill').transcriptBackfillEstimate(pool, cfg));
+  }));
+
+  let transcriptBackfillRunning = false;
+  app.post('/sort/transcript-backfill', route(async (req, res) => {
+    res.json({ started: true });
+    if (transcriptBackfillRunning) return;
+    transcriptBackfillRunning = true;
+    Promise.resolve().then(async () => {
+      while (true) {
+        const result = await (runTranscriptBackfill || require('./transcript-backfill').runTranscriptBackfill)({ pool, cfg });
+        if (result.skippedCap || !(result.transcribed || result.errored)) break;
+      }
+    }).catch(error => console.error('[Transcript] backfill:', error.message))
+      .finally(() => { transcriptBackfillRunning = false; });
   }));
 
   app.get('/sort/start-fresh/preview', route(async (req, res) => {

@@ -122,6 +122,6 @@ test('look backfill estimate counts only untagged cached sorted reels and report
   const estimate = await request('GET', '/sort/look-backfill/estimate');
   assert.equal(estimate.status, 200);
   assert.equal(estimate.body.count, 3);
-  assert.ok(Math.abs(estimate.body.estUsd - 3 * (3400 / 1e6 * 0.30 + 100 / 1e6 * 2.50)) < 1e-12);
+  assert.ok(Math.abs(estimate.body.estUsd - 3 * (3400 / 1e6 * 0.30 + 1600 / 1e6 * 2.50)) < 1e-12);
   assert.equal((await pool.query('SELECT COUNT(*) AS n FROM look_backfill_attempts')).rows[0].n, 0, 'estimating never starts a background call');
 });

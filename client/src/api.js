@@ -29,6 +29,8 @@ export const addCreatorLookTag = (handle, tag) => api.post(`/creators/${encodeUR
 export const removeCreatorLookTag = (handle, tag) => api.delete(`/creators/${encodeURIComponent(handle)}/look-tags/${encodeURIComponent(tag)}`);
 export const getLookBackfillEstimate = () => api.get('/sort/look-backfill/estimate');
 export const startLookBackfill = () => api.post('/sort/look-backfill');
+export const getTranscriptBackfillEstimate = () => api.get('/sort/transcript-backfill/estimate');
+export const startTranscriptBackfill = () => api.post('/sort/transcript-backfill');
 
 export const exportContent = (format = 'json', contentType = '') => {
   const params = new URLSearchParams({ format });

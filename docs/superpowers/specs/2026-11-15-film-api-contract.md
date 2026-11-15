@@ -28,6 +28,7 @@ Film (UI)  ──/api/filming/find/*──▶  HQ (knows the model)  ──/film
   "type": "talking", "typeLabel": "Talking",
   "lookTags": ["brunette", "bedroom"],
   "caption": "…",
+  "transcript": "The spoken words.\nThe next sentence.",
   "creatorHandle": "lenapolanski",
   "postedAt": "2026-11-10T18:22:00Z",
   "viewCount": 120000, "likeCount": 9100,
@@ -38,6 +39,8 @@ Film (UI)  ──/api/filming/find/*──▶  HQ (knows the model)  ──/film
   "saved": false
 }
 ```
+
+`transcript` is an additive `string | null` field, at most 4000 characters. It contains the verbatim clear speech by the person on screen in its original language, with line breaks between sentences or lines, for Film's teleprompter script. It has no speaker labels, timestamps or commentary, and never contains song lyrics. Missing transcripts and reels with no clear speech return `null` (including the internal empty-string sentinel).
 
 ## Endpoints (all under `/film/v1`, bearer required except media)
 

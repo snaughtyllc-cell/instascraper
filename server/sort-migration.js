@@ -2,6 +2,7 @@ const AI_COLUMNS = [
   { name: 'ai_type', type: 'TEXT' },
   { name: 'ai_confidence', type: 'REAL' },
   { name: 'ai_description', type: 'TEXT' },
+  { name: 'ai_transcript', type: 'TEXT' },
   { name: 'ai_suggested_type', type: 'TEXT' },
   { name: 'ai_model', type: 'TEXT' },
   { name: 'ai_classified_at', type: 'TEXT' },

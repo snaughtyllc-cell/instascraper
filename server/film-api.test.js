@@ -73,7 +73,7 @@ beforeEach(async () => {
   [1, 'Logan', 'talking', 'dance', '["brunette","bedroom","deleted-tag"]', projectId, 'film-model@example.test', bcrypt.hashSync('fake-model-password', 4), 1]);
   await pool.query("INSERT INTO models (id,name,primary_niche) VALUES (2,'Other model','skit')");
   await pool.query("INSERT INTO model_creators (model_id,username) VALUES (1,'mine'),(1,'liked'),(2,'outside')");
-  await addPost(101, { ai_look_tags: '["brunette","bedroom"]', caption: 'My caption' });
+  await addPost(101, { ai_look_tags: '["brunette","bedroom"]', caption: 'My caption', ai_transcript: 'My spoken words.\nMy next sentence.' });
   await addPost(102, { posted_at: '2026-11-14T18:22:00Z' });
   await addPost(103, { account_handle: 'liked', ai_look_tags: '["brunette","alt"]' });
   await addPost(104, { account_handle: 'outside' });
@@ -171,9 +171,9 @@ test('feed matches /me/feed ranking, paginates in order, and emits exactly the R
   assert.deepEqual(reels.map(row => row.id), me.body.posts.map(row => row.id));
   assert.deepEqual(reels.map(row => row.nicheMatch), [true, true, true, true, false]);
   const reel = response.body.reels[1];
-  assert.deepEqual(Object.keys(reel).sort(), ['id', 'type', 'typeLabel', 'lookTags', 'caption', 'creatorHandle', 'postedAt', 'viewCount', 'likeCount', 'nicheMatch', 'videoUrl', 'thumbUrl', 'instagramUrl', 'saved'].sort());
+  assert.deepEqual(Object.keys(reel).sort(), ['id', 'type', 'typeLabel', 'lookTags', 'caption', 'transcript', 'creatorHandle', 'postedAt', 'viewCount', 'likeCount', 'nicheMatch', 'videoUrl', 'thumbUrl', 'instagramUrl', 'saved'].sort());
   assert.deepEqual({ ...reel, videoUrl: undefined, thumbUrl: undefined }, {
-    id: 101, type: 'talking', typeLabel: 'Talking', lookTags: ['brunette', 'bedroom'], caption: 'My caption', creatorHandle: 'mine',
+    id: 101, type: 'talking', typeLabel: 'Talking', lookTags: ['brunette', 'bedroom'], caption: 'My caption', transcript: 'My spoken words.\nMy next sentence.', creatorHandle: 'mine',
     postedAt: '2026-11-10T18:22:00Z', viewCount: 120000, likeCount: 9100, nicheMatch: true,
     videoUrl: undefined, thumbUrl: undefined, instagramUrl: 'https://www.instagram.com/reel/film-101/', saved: false,
   });
@@ -187,6 +187,31 @@ test('feed matches /me/feed ranking, paginates in order, and emits exactly the R
   }
   process.env.PUBLIC_BASE_URL = 'https://public.example/';
   assert.equal(new URL((await request('GET', `${filmPath}/feed`)).body.reels[0].videoUrl).origin, 'https://public.example');
+});
+
+test('feed and saves return transcripts verbatim and expose missing or empty sentinels as null', async () => {
+  const transcript = 'No traduzcas mis palabras.\nEsta es la próxima línea.';
+  await pool.query('UPDATE posts SET ai_transcript = $1 WHERE id = $2', [transcript, 101]);
+  await pool.query('UPDATE posts SET ai_transcript = $1 WHERE id = $2', ['', 102]);
+  for (const suffix of ['/feed', '/saves']) {
+    if (suffix === '/saves') {
+      for (const id of [101, 102, 103]) await pool.query('INSERT INTO model_saved_posts (model_id,post_id,saved_at) VALUES ($1,$2,$3)', [1, id, '2026-11-15']);
+    }
+    const response = await request('GET', `${filmPath}${suffix}`);
+    assert.equal(response.status, 200);
+    const transcripts = new Map(response.body.reels.map(reel => [reel.id, reel.transcript]));
+    assert.equal(transcripts.get(101), transcript);
+    assert.equal(transcripts.get(102), null, 'empty-string sentinel is private storage state');
+    assert.equal(transcripts.get(103), null, 'missing transcript is an explicit null');
+  }
+});
+
+test('Film contract documents the additive transcript field and its limit', () => {
+  const contract = fs.readFileSync(path.join(__dirname, '../docs/superpowers/specs/2026-11-15-film-api-contract.md'), 'utf8');
+  assert.match(contract, /"transcript":/);
+  assert.match(contract, /`transcript`.*`string \| null`.*4000 characters/);
+  assert.match(contract, /original language/);
+  assert.match(contract, /never contains song lyrics/);
 });
 
 test('feed hard niche filtering, shuffle, and zero-creator fallback preserve scope', async () => {

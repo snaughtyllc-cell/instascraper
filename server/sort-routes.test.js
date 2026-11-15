@@ -267,7 +267,7 @@ test('look-backfill estimate reports cached sorted untagged reels', async t => {
   const response = await inProcessRequest(pool, 'GET', '/sort/look-backfill/estimate');
   assert.equal(response.status, 200);
   assert.equal(response.body.count, 1);
-  assert.ok(Math.abs(response.body.estUsd - 0.00127) < 1e-10);
+  assert.ok(Math.abs(response.body.estUsd - 0.00502) < 1e-10);
 });
 
 test('look-backfill starts in background, avoids duplicate loops and stops at cap', async t => {
@@ -296,6 +296,43 @@ test('redecide respects the shared daily cap before calling Gemini', async t => 
   let calls = 0;
   await redecideNeedsLook({ pool, cfg: { ...cfg, dailyMax: 0 }, redecide: async () => { calls++; return result('talking'); } });
   assert.equal(calls, 0);
+});
+
+test('text redecide leaves existing transcripts untouched', async t => {
+  const pool = await makeSortDb();
+  t.after(() => pool.sqlite.close());
+  pool.sqlite.exec("INSERT INTO posts(id,sort_status,ai_description,ai_transcript) VALUES(1,'needs_look','Speaking','Original speech'),(2,'needs_look','Speaking','')");
+  await redecideNeedsLook({ pool, cfg, redecide: async () => ({ ...result('talking'), transcript: 'Invented from description' }) });
+  assert.deepEqual(pool.sqlite.prepare('SELECT ai_transcript FROM posts ORDER BY id').all(), [{ ai_transcript: 'Original speech' }, { ai_transcript: '' }]);
+});
+
+test('transcript estimate route counts only cached sorted talking reels', async t => {
+  const pool = await makeSortDb();
+  t.after(() => pool.sqlite.close());
+  pool.sqlite.exec("INSERT INTO posts(id,sort_status,video_cache_status,content_type,ai_transcript) VALUES(1,'manual','cached','talking',NULL),(2,'auto','cached','dance',NULL),(3,'needs_look','cached','talking',NULL),(4,'auto','cached','talking','')");
+  const response = await inProcessRequest(pool, 'GET', '/sort/transcript-backfill/estimate');
+  assert.equal(response.status, 200);
+  assert.equal(response.body.count, 1);
+  assert.ok(Math.abs(response.body.estUsd - 0.00502) < 1e-10);
+});
+
+test('transcript backfill runs in background, avoids duplicate loops and stops at cap', async t => {
+  const pool = await makeSortDb();
+  t.after(() => pool.sqlite.close());
+  let release;
+  const active = new Promise(resolve => { release = resolve; });
+  let calls = 0;
+  const request = makeRequest(pool, { runTranscriptBackfill: async () => {
+    calls++;
+    await active;
+    return { transcribed: 1, errored: 0, skippedCap: 1 };
+  } });
+  assert.deepEqual((await request('POST', '/sort/transcript-backfill')).body, { started: true });
+  assert.deepEqual((await request('POST', '/sort/transcript-backfill')).body, { started: true });
+  assert.equal(calls, 1);
+  release();
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(calls, 1);
 });
 
 test('redecide errors consume the cap and log estimated cost', async t => {

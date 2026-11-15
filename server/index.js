@@ -54,6 +54,8 @@ function refreshProposalsAfterResponse(res, modelId) {
 
 const app = express();
 app.disable('x-powered-by');
+// Empty transcripts are an internal backfill sentinel; all JSON clients see null.
+app.set('json replacer', (key, value) => key === 'ai_transcript' && value === '' ? null : value);
 // Trust the first proxy hop (Railway) so req.ip is the real client IP, not the
 // proxy's. The login throttle keys on req.ip; without this, all clients collapse
 // to one bucket and the admin-login key degrades to a single global bucket an

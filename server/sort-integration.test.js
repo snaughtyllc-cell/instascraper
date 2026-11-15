@@ -52,6 +52,8 @@ test('all sort endpoints are behind admin authorization', async () => {
   for (const cookie of [undefined, modelCookie]) {
     assert.equal((await request('GET', '/sort/needs-look', undefined, cookie)).status, 403);
     assert.equal((await request('GET', '/admin/sort-usage', undefined, cookie)).status, 403);
+    assert.equal((await request('GET', '/sort/transcript-backfill/estimate', undefined, cookie)).status, 403);
+    assert.equal((await request('POST', '/sort/transcript-backfill', undefined, cookie)).status, 403);
   }
 });
 test('actual feed and ideas exclude unsorted source reels; saves preserve history', async () => {
@@ -97,6 +99,25 @@ test('per-reel type changes do not redecide the pile; only a new type does', asy
   assert.equal(reused.status, 200);
   assert.equal(redecideCalls, before + 1);
 });
+test('admin reel APIs expose the empty transcript sentinel as null', async () => {
+  await pool.query("UPDATE posts SET ai_transcript='' WHERE id IN (1,3)");
+  await pool.query('UPDATE posts SET ai_transcript=$1 WHERE id=$2', ['Hola.\nSin traducir.', 2]);
+  try {
+    const content = await request('GET', '/content', undefined, adminCookie);
+    assert.equal(content.data.posts.find(post => post.id === 1).ai_transcript, null);
+    assert.equal(content.data.posts.find(post => post.id === 2).ai_transcript, 'Hola.\nSin traducir.');
+    const workspace = await request('GET', '/workspaces/1/reels', undefined, adminCookie);
+    assert.equal(workspace.data.find(post => post.id === 1).ai_transcript, null);
+    const pile = await request('GET', '/sort/needs-look', undefined, adminCookie);
+    assert.equal(pile.data.posts.find(post => post.id === 3).ai_transcript, null);
+    const exported = await request('GET', '/export', undefined, adminCookie);
+    assert.equal(exported.data.find(post => post.id === 1).ai_transcript, null);
+    assert.equal((await pool.query('SELECT ai_transcript FROM posts WHERE id=1')).rows[0].ai_transcript, '', 'sentinel stays in storage');
+  } finally {
+    await pool.query('UPDATE posts SET ai_transcript=NULL WHERE id IN (1,2,3)');
+  }
+});
+
 test('start fresh can be undone with the existing delete-log restore endpoint', async () => {
   const fresh = await request('POST', '/sort/start-fresh', { confirm: true }, adminCookie);
   assert.deepEqual(fresh.data, { hidden: 4 });
