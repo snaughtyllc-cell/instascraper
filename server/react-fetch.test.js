@@ -119,7 +119,7 @@ test('unknown references atomically dedupe concurrent calls and publish ready pi
   assert.ok(results.every(result => result.state === 'fetching'));
   await f.worker.waitForIdle();
   assert.equal(f.launches.length, 1);
-  assert.equal(f.launches[0].actorId, 'apify~instagram-reel-scraper');
+  assert.equal(f.launches[0].actorId, 'apify~instagram-scraper');
   assert.equal(f.launches[0].purpose, 'react_ref');
   assert.equal(f.launches[0].query, 'reel:fresh_reel');
   assert.equal(f.completions[0].status, 'succeeded');
@@ -399,11 +399,11 @@ test('production Apify transport uses query auth, bounded retries, actor timeout
   assert.equal(starts, 2);
   assert.ok(requests.every(request => new URL(request.url).searchParams.get('token') === 'secret-token'
     && !request.opts.headers.Authorization));
-  assert.equal(new URL(requests[0].url).pathname, '/v2/acts/apify~instagram-reel-scraper/runs');
+  assert.equal(new URL(requests[0].url).pathname, '/v2/acts/apify~instagram-scraper/runs');
   assert.equal(new URL(requests[0].url).searchParams.get('timeout'), '120');
-  assert.equal(new URL(requests[0].url).searchParams.get('memory'), '512');
+  assert.ok(requests.every(request => !new URL(request.url).searchParams.has('memory')));
   assert.deepEqual(JSON.parse(requests[0].opts.body), {
-    directUrls: ['https://www.instagram.com/reel/apify_ref/'], resultsLimit: 1,
+    directUrls: ['https://www.instagram.com/reel/apify_ref/'], resultsType: 'posts', resultsLimit: 1,
   });
   assert.equal(f.db.prepare('SELECT state FROM film_react_refs').get().state, 'ready');
 });
@@ -419,24 +419,114 @@ test('production Apify transport never retries forbidden responses', async t => 
   assert.equal(f.db.prepare('SELECT error FROM film_react_refs').get().error, 'apify_failed');
 });
 
-test('reel actor runs first and only successful runs without usable URLs get one generic fallback', async t => {
-  for (const reelItems of [[], [{}], [{ error: 'not_found' }], [{ videoUrl: 'https://untrusted.example/a.mp4' }]]) {
+test('generic invalid input falls back once to reel with username without consuming extra launch capacity', async t => {
+  const requests = [], logs = [];
+  t.mock.method(console, 'error', line => logs.push(line));
+  const f = await fixture(t, { apify: undefined,
+    env: { APIFY_API_KEY: 'secret-token', REACT_FETCH_DAILY_MAX: '1' },
+    fetchImpl: async (url, opts) => {
+      requests.push({ url: new URL(url), input: opts.body && JSON.parse(opts.body) });
+      if (url.includes('/acts/apify~instagram-scraper/')) return {
+        ok: false, status: 400, json: async () => ({ error: { type: 'invalid-input', message: 'secret-token private-url' } }),
+      };
+      return { ok: true, json: async () => url.includes('/acts/')
+        ? { data: { id: 'reel-run', status: 'SUCCEEDED' } }
+        : [{ videoUrl: 'https://video.fbcdn.net/video.mp4' }] };
+    } });
+  await f.worker.request('invalid_ref');
+  await f.worker.waitForIdle();
+  assert.deepEqual(requests.filter(request => request.input).map(request => ({
+    actor: request.url.pathname, input: request.input,
+  })), [
+    { actor: '/v2/acts/apify~instagram-scraper/runs', input: {
+      directUrls: ['https://www.instagram.com/reel/invalid_ref/'], resultsType: 'posts', resultsLimit: 1,
+    } },
+    { actor: '/v2/acts/apify~instagram-reel-scraper/runs', input: {
+      username: ['https://www.instagram.com/reel/invalid_ref/'], resultsLimit: 1,
+    } },
+  ]);
+  assert.equal(requests.length, 3);
+  assert.ok(requests.every(request => !request.url.searchParams.has('memory')));
+  assert.deepEqual(logs, ['[React fetch] apify_http route=startRun actor=generic status=400 type=invalid-input']);
+  assert.deepEqual(f.launches.map(run => run.actorId), ['apify~instagram-reel-scraper']);
+  assert.deepEqual(f.completions.map(run => run.runId), ['reel-run']);
+  assert.equal(f.db.prepare('SELECT COUNT(*) AS n FROM film_react_ref_attempts').get().n, 1);
+  assert.equal(f.db.prepare('SELECT state FROM film_react_refs').get().state, 'ready');
+});
+
+test('invalid input from both actors is permanent for six hours without consuming the launch cap', async t => {
+  const actors = [], logs = [];
+  t.mock.method(console, 'error', line => logs.push(line));
+  const f = await fixture(t, { apify: undefined,
+    env: { APIFY_API_KEY: 'secret-token', REACT_FETCH_DAILY_MAX: '1' },
+    fetchImpl: async url => {
+      actors.push(new URL(url).pathname);
+      return { ok: false, status: 400, json: async () => ({ error: { type: 'invalid-input' } }) };
+    } });
+  await f.worker.request('both_invalid');
+  await f.worker.waitForIdle();
+  assert.deepEqual(actors, ['/v2/acts/apify~instagram-scraper/runs', '/v2/acts/apify~instagram-reel-scraper/runs']);
+  assert.deepEqual(logs, [
+    '[React fetch] apify_http route=startRun actor=generic status=400 type=invalid-input',
+    '[React fetch] apify_http route=startRun actor=reel status=400 type=invalid-input',
+    '[React fetch] failed code=apify_invalid_input',
+  ]);
+  assert.equal(f.db.prepare('SELECT error FROM film_react_refs').get().error, 'apify_invalid_input');
+  assert.equal(f.launches.length, 0);
+  assert.equal(f.db.prepare('SELECT COUNT(*) AS n FROM film_react_ref_attempts').get().n, 0);
+  f.advance(10 * 60000);
+  assert.deepEqual(await f.worker.request('both_invalid'), { state: 'unavailable', launched: false });
+  f.advance(6 * 3600000 - 10 * 60000 - 1);
+  assert.deepEqual(await f.worker.request('both_invalid'), { state: 'unavailable', launched: false });
+  assert.equal(actors.length, 2);
+  f.advance(1);
+  assert.deepEqual(await f.worker.request('both_invalid'), { state: 'fetching', launched: true });
+  await f.worker.waitForIdle();
+  assert.equal(actors.length, 4);
+  assert.equal(f.db.prepare('SELECT error FROM film_react_refs').get().error, 'apify_invalid_input');
+});
+
+test('other HTTP errors and invalid input outside startRun never trigger an actor fallback', async t => {
+  for (const [route, status, type] of [
+    ['startRun', 400, 'invalid-request'], ['startRun', 403, 'invalid-input'], ['getItems', 400, 'invalid-input'],
+  ]) {
+    const requests = [];
+    const f = await fixture(t, { apify: undefined, env: { APIFY_API_KEY: 'secret-token' },
+      fetchImpl: async url => {
+        requests.push(new URL(url).pathname);
+        if (route === 'getItems' && url.includes('/acts/')) {
+          return { ok: true, json: async () => ({ data: { id: 'generic-run', status: 'SUCCEEDED' } }) };
+        }
+        return { ok: false, status, json: async () => ({ error: { type } }) };
+      } });
+    await f.worker.request('http_error_ref');
+    await f.worker.waitForIdle();
+    assert.equal(requests.filter(url => url.includes('/acts/')).length, 1, `${route} ${status}`);
+    assert.ok(requests.every(url => !url.includes('instagram-reel-scraper')));
+    assert.equal(requests.length, route === 'getItems' ? 2 : 1);
+    assert.equal(f.db.prepare('SELECT error FROM film_react_refs').get().error, 'apify_failed');
+    assert.equal(f.launches.length, route === 'getItems' ? 1 : 0);
+  }
+});
+
+test('successful generic runs without usable URLs get one reel fallback', async t => {
+  for (const genericItems of [[], [{}], [{ error: 'not_found' }], [{ videoUrl: 'https://untrusted.example/a.mp4' }]]) {
     const calls = [];
     const f = await fixture(t, { apify: {
       startRun: async (actor, input) => {
         calls.push({ actor, input });
         return { id: `actor-${calls.length}`, status: 'SUCCEEDED' };
       },
-      getItems: async id => id === 'actor-1' ? reelItems : [{ videoUrl: 'https://video.fbcdn.net/video.mp4' }],
+      getItems: async id => id === 'actor-1' ? genericItems : [{ videoUrl: 'https://video.fbcdn.net/video.mp4' }],
     } });
     await f.worker.request('fallback_ref');
     await f.worker.waitForIdle();
     assert.deepEqual(calls, [
-      { actor: 'apify~instagram-reel-scraper', input: {
-        directUrls: ['https://www.instagram.com/reel/fallback_ref/'], resultsLimit: 1,
-      } },
       { actor: 'apify~instagram-scraper', input: {
         directUrls: ['https://www.instagram.com/reel/fallback_ref/'], resultsType: 'posts', resultsLimit: 1,
+      } },
+      { actor: 'apify~instagram-reel-scraper', input: {
+        username: ['https://www.instagram.com/reel/fallback_ref/'], resultsLimit: 1,
       } },
     ]);
     assert.deepEqual(f.completions.map(run => run.runId), ['actor-1', 'actor-2']);
@@ -445,7 +535,7 @@ test('reel actor runs first and only successful runs without usable URLs get one
   }
 });
 
-test('failed reel runs never fall back and a fallback respects the launch cap', async t => {
+test('failed generic runs never fall back and a fallback respects the launch cap', async t => {
   for (const status of ['FAILED', 'SUCCEEDED']) {
     let calls = 0;
     const f = await fixture(t, { env: { REACT_FETCH_DAILY_MAX: '1' }, apify: {
@@ -481,7 +571,7 @@ test('capacity errors keep fetching during backoff then fail busy with sanitized
     assert.deepEqual(pauses, [15000, 30000, 60000]);
     assert.equal(f.db.prepare('SELECT error FROM film_react_refs').get().error, 'apify_busy');
     assert.equal(f.db.prepare('SELECT COUNT(*) AS n FROM film_react_ref_attempts').get().n, 0);
-    assert.equal(logs.filter(line => line === `[React fetch] apify_http route=startRun status=${status} type=${type}`).length, 4);
+    assert.equal(logs.filter(line => line === `[React fetch] apify_http route=startRun actor=generic status=${status} type=${type}`).length, 4);
   }
   assert.equal(logs.filter(line => line === '[React fetch] failed code=apify_busy').length, 2);
   assert.ok(logs.every(line => !/secret-token|https:|limited_ref|message/.test(line)));

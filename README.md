@@ -75,6 +75,8 @@ pm2 save && pm2 startup
 | Variable | Required | Description |
 |----------|----------|-------------|
 | `APIFY_API_KEY` | Yes | Your Apify API key for Instagram scraping |
+| `REACT_APIFY_API_KEY` | No | Apify key for on-demand React reference fetches; falls back to `APIFY_API_KEY` |
+| `REACT_FETCH_MEMORY_MB` | No | Explicit positive integer for React fetch run memory; unset, empty, or invalid values omit Apify's `memory` query parameter |
 | `AUTH_PASSWORD` | Yes | Shared team password for login (≥8 chars, not a common value) |
 | `SESSION_SECRET` | Yes | Random string for session encryption (≥16 chars) |
 | `DATABASE_URL` | Production | PostgreSQL connection used for app data and durable login sessions |
@@ -87,6 +89,14 @@ pm2 save && pm2 startup
 > without `DATABASE_URL`, if `SESSION_SECRET` is missing/short/the dev default,
 > or if `AUTH_PASSWORD` is missing/weak. Set strong values before deploying, and
 > rotate any key that has ever been shared or committed.
+
+On-demand React reference fetches start the generic Instagram scraper with
+`directUrls`, `resultsType: 'posts'`, and `resultsLimit: 1`. A successful run
+without a usable video, or a `400 invalid-input` at launch, falls back once to
+the Reel Scraper with the reel URL in `username` and `resultsLimit: 1`. A final
+`400 invalid-input` becomes `apify_invalid_input` and retries after 6 hours.
+Existing `apify_failed` rows remain transient and can retry on the next request
+after the existing 10-minute window.
 
 ## Features
 
