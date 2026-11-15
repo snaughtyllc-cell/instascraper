@@ -40,11 +40,7 @@ async function probeDuration(file) {
   catch { return null; }
 }
 
-async function ensureReactReference(pool, shortcode, deps = {}) {
-  if (!isValidShortcode(shortcode)) return null;
-  const result = await pool.query('SELECT * FROM posts WHERE shortcode = $1 LIMIT 1', [shortcode]);
-  const post = result.rows[0];
-  if (!post) return null;
+async function ensurePostReference(post, shortcode, deps) {
   const fileSystem = deps.fs || fs;
   const pin = referenceFile(shortcode);
   const probe = deps.probeDuration || probeDuration;
@@ -81,4 +77,27 @@ async function ensureReactReference(pool, shortcode, deps = {}) {
   return { post, path: pin, durationSec: await probe(pin) };
 }
 
-module.exports = { isValidShortcode, getPinnedReferencePath, availableReferencePath, ensureReactReference };
+async function fetchedReference(pool, shortcode, deps) {
+  const fetched = await pool.query("SELECT duration_sec FROM film_react_refs WHERE shortcode = $1 AND state = 'ready'", [shortcode]);
+  const row = fetched.rows[0];
+  const file = referenceFile(shortcode);
+  if (!row || !usableFile(file, deps.fs || fs)) return null;
+  return { post: null, path: file, durationSec: row.duration_sec, fetched: true };
+}
+
+async function ensureReactReference(pool, shortcode, deps = {}) {
+  if (!isValidShortcode(shortcode)) return null;
+  const result = await pool.query('SELECT * FROM posts WHERE shortcode = $1 LIMIT 1', [shortcode]);
+  const post = result.rows[0];
+  if (!post) return fetchedReference(pool, shortcode, deps);
+  // A no-video post can acquire a fetched pin. Keep that reference's signed
+  // shortcode URL and stored duration while preserving ordinary cached media.
+  if (!post.video_url && !usableFile(videos.videoFilePath(post, videos.DEFAULT_VIDEO_DIR), deps.fs || fs)) {
+    const fetched = await fetchedReference(pool, shortcode, deps);
+    if (fetched) return fetched;
+  }
+  const reference = await ensurePostReference(post, shortcode, deps);
+  return reference || fetchedReference(pool, shortcode, deps);
+}
+
+module.exports = { isValidShortcode, referenceFile, usableFile, getPinnedReferencePath, availableReferencePath, ensureReactReference };

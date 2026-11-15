@@ -7,6 +7,10 @@ const vm = require('node:vm');
 const uploadUrl = 'https://www.googleapis.com/upload/drive/v3/files?uploadType=resumable&upload_id=SENTINEL_UPLOAD_SECRET';
 const rawUrl = 'https://hq.example.test/raw/SENTINEL_RAW_SECRET.mp4?signature=SENTINEL_RAW_SIGNATURE';
 const key = 'SENTINEL_SERVICE_KEY';
+const apifyKey = 'SENTINEL_APIFY_KEY';
+const reactMediaUrl = 'https://scraper.example/film/v1/react-media/AbCdE123?exp=1234567890&sig=SENTINEL_MEDIA_SIGNATURE';
+const apifyDatasetUrl = 'https://api.apify.com/v2/datasets/SENTINEL_DATASET/items?token=SENTINEL_APIFY_KEY';
+const instagramVideoUrl = 'https://scontent.cdninstagram.com/video.mp4?sig=SENTINEL_CDN_SIGNATURE';
 
 // Exercise the actual initialization hooks with a fake SDK. Tests never patch
 // HTTP modules or create a Sentry transport, even if the developer has a DSN.
@@ -20,7 +24,7 @@ function instrument(env = {}) {
   const context = {
     require: name => name === '@sentry/node' ? sdk
       : name === 'dotenv' ? { config() {} } : require(name),
-    process: { env: { SENTRY_DSN: 'fake-dsn', HQ_PUBLIC_URL: 'https://hq.example.test', FILM_SERVICE_KEY: key, ...env } },
+    process: { env: { SENTRY_DSN: 'fake-dsn', HQ_PUBLIC_URL: 'https://hq.example.test', FILM_SERVICE_KEY: key, APIFY_API_KEY: apifyKey, ...env } },
     __dirname, module, URL,
   };
   vm.runInNewContext(fs.readFileSync(path.join(__dirname, 'instrument.js'), 'utf8'), context);
@@ -32,12 +36,16 @@ test('Sentry remains inert without a DSN', () => {
   assert.equal(instrument({ SENTRY_DSN: '' }), undefined);
 });
 
-test('HTTP instrumentation excludes Drive capabilities and all allowed HQ source paths', () => {
+test('HTTP instrumentation excludes media capabilities, Apify and all allowed HQ source paths', () => {
   const http = instrument().integrations[0].options;
-  for (const url of [uploadUrl, rawUrl, 'https://hq.example.test/api/filming/react/callback']) {
+  for (const url of [uploadUrl, rawUrl, reactMediaUrl, apifyDatasetUrl, instagramVideoUrl,
+    '/FILM/v1/REACT-MEDIA/AbCdE123/?exp=123&sig=secret',
+    'https://video.fbcdn.net/video.mp4?sig=secret', 'https://video.instagram.com/video.mp4?sig=secret',
+    'https://hq.example.test/api/filming/react/callback']) {
     assert.equal(http.ignoreOutgoingRequests(url), true);
   }
-  for (const url of ['https://example.test/resource', 'https://www.googleapis.com/drive/v3/files', 'https://hq.example.test.attacker.test/raw', 'malformed']) {
+  for (const url of ['https://example.test/resource', 'https://www.googleapis.com/drive/v3/files', 'https://hq.example.test.attacker.test/raw',
+    'https://api.apify.com.attacker.test/items', 'https://fbcdn.net.attacker.test/video', 'malformed']) {
     assert.equal(http.ignoreOutgoingRequests(url), false);
   }
   for (const url of ['/film/v1/react-render', '/FILM/v1/REACT-RENDER/?ignored=1', 'https://scraper.example/film/v1/react-render']) {
@@ -57,6 +65,13 @@ test('sensitive breadcrumbs and structured logs cannot carry URLs or credentials
     { category: 'console', message: JSON.stringify({ uploadUrl }) },
     { category: 'console', message: `Bearer ${key}` },
     { category: 'console', data: { upload_id: 'SENTINEL_UPLOAD_SECRET' } },
+    { category: 'http', data: { url: reactMediaUrl } },
+    { category: 'http', data: { url: apifyDatasetUrl } },
+    { category: 'http', data: { url: instagramVideoUrl } },
+    { category: 'console', message: 'GET /film/v1/media/123?exp=1&sig=SENTINEL_MEDIA_SIGNATURE failed' },
+    { category: 'console', message: 'GET /film/v1/thumb/123?exp=1&sig=SENTINEL_MEDIA_SIGNATURE failed' },
+    { category: 'console', message: 'GET /FILM/v1/REACT-MEDIA/AbCdE123?exp=1&sig=SENTINEL_MEDIA_SIGNATURE failed' },
+    { category: 'console', message: `Apify request failed with ${apifyKey}` },
   ]) {
     assert.equal(options.beforeBreadcrumb(breadcrumb), null);
     assert.equal(options.beforeSendLog(breadcrumb), null);
@@ -98,6 +113,13 @@ test('final event filter drops secrets anywhere and keeps unrelated telemetry in
     { message: `request failed ${uploadUrl}` },
     { extra: { source: rawUrl } },
     { request: { headers: { Authorization: `Bearer ${key}` } } },
+    { extra: { request: apifyDatasetUrl } },
+    { message: `Download failed ${instagramVideoUrl}` },
+    { request: { url: reactMediaUrl } },
+    { request: { url: '/FILM/v1/REACT-MEDIA/AbCdE123/', query_string: 'exp=1&sig=SENTINEL_MEDIA_SIGNATURE' } },
+    { sdkProcessingMetadata: { normalizedRequest: { url: reactMediaUrl, query_string: 'sig=SENTINEL_MEDIA_SIGNATURE' } } },
+    { sdkProcessingMetadata: { normalizedRequest: { url: '/film/v1/media/123', query_string: 'sig=SENTINEL_MEDIA_SIGNATURE' } } },
+    { message: `Apify token ${apifyKey}` },
   ]) assert.equal(options.beforeSend(event), null);
   const unrelated = {
     message: 'normal server failure', request: { url: 'https://scraper.example/models', headers: { 'X-Request-ID': 'abc' }, data: { name: 'model' } },

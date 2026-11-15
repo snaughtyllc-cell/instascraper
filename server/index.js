@@ -43,6 +43,7 @@ const { reelLookMatch } = require('./look-match');
 const { loadTaste, tasteForFeed, refreshTaste } = require('./model-taste');
 const { computeProposals } = require('./proposals');
 const { registerFilmApi } = require('./film-api');
+const { createReactFetchWorker } = require('./react-fetch');
 
 function refreshProposalsAfterResponse(res, modelId) {
   res.once('finish', () => {
@@ -102,7 +103,8 @@ function checkProdSecrets(env = process.env) {
 
 app.use(cors((req, callback) => callback(null, corsOptionsForRequest(req))));
 app.use(browserSecurityHeaders);
-const reactRenderWorker = registerFilmApi(app, { pool });
+const reactFetchWorker = createReactFetchWorker({ pool });
+const reactRenderWorker = registerFilmApi(app, { pool, reactFetchWorker });
 app.use(express.json());
 
 const SESSION_COOKIE_NAME = 'instascraper.sid';
@@ -1704,6 +1706,7 @@ async function boot() {
   }
   try {
     await initWithRetry(() => pool.initDB());
+    await reactFetchWorker.start();
     await reactRenderWorker.start();
     health.markReady();
     console.log('Database ready');

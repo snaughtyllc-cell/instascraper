@@ -85,6 +85,29 @@ test('queue is durable, case-insensitively idempotent and removes all temporary 
   assert.deepEqual(fs.readdirSync(f.dir), []);
 });
 
+test('Instagram renders resolve ready fetched references without adding posts', async t => {
+  const { db, pool } = await database(t), f = fixture(t);
+  db.exec('CREATE TABLE posts (id INTEGER PRIMARY KEY, shortcode TEXT, video_url TEXT)');
+  db.prepare(`INSERT INTO film_react_refs (shortcode,state,duration_sec) VALUES (?,?,?)`)
+    .run('fetched_ref', 'ready', 3);
+  const referenceDir = process.env.REACT_REF_DIR;
+  process.env.REACT_REF_DIR = path.join(f.dir, 'references');
+  t.after(() => {
+    if (referenceDir === undefined) delete process.env.REACT_REF_DIR;
+    else process.env.REACT_REF_DIR = referenceDir;
+  });
+  fs.mkdirSync(process.env.REACT_REF_DIR);
+  const referencePath = path.join(process.env.REACT_REF_DIR, 'fetched_ref.mp4');
+  fs.writeFileSync(referencePath, 'fetched reference');
+  const worker = createReactRenderWorker({ pool, ...f.dependencies });
+  await worker.enqueue(request({ reference: { kind: 'instagram', shortcode: 'fetched_ref' } }));
+  await worker.waitForIdle();
+  assert.equal(f.callbacks[0].state, 'done');
+  assert.equal(f.renders[0].referencePath, referencePath);
+  assert.equal(db.prepare('SELECT COUNT(*) AS n FROM posts').get().n, 0);
+  assert.equal(fs.readFileSync(referencePath, 'utf8'), 'fetched reference');
+});
+
 test('worker passes trusted thread and priority configuration instead of request overrides', async t => {
   for (const [configured, expected] of [
     [{}, { threads: 2, nice: 10 }],

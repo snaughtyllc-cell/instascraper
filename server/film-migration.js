@@ -22,6 +22,25 @@ async function ensureFilmTables(db, { isPg }) {
     created_at TEXT NOT NULL DEFAULT ${now},
     updated_at TEXT NOT NULL DEFAULT ${now}
   )`);
+  await db.query(`CREATE TABLE IF NOT EXISTS film_react_refs (
+    shortcode TEXT PRIMARY KEY,
+    state TEXT NOT NULL,
+    error TEXT,
+    duration_sec REAL,
+    attempts INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL DEFAULT ${now},
+    updated_at TEXT NOT NULL DEFAULT ${now}
+  )`);
+  // Preserve every accepted launch, including retries of the same shortcode, so
+  // the rolling daily cap survives restarts and cannot be bypassed by failures.
+  await db.query(`CREATE TABLE IF NOT EXISTS film_react_ref_attempts (
+    attempt_id TEXT PRIMARY KEY,
+    shortcode TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    started_at TEXT
+  )`);
+  await db.query(`CREATE INDEX IF NOT EXISTS film_react_ref_attempts_started
+    ON film_react_ref_attempts (started_at)`);
 }
 
 module.exports = { ensureFilmTables };

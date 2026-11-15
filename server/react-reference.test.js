@@ -139,3 +139,44 @@ test('legacy cached media does not require a React-compatible shortcode', () => 
   assert.equal(availableReferencePath({ id: 42, shortcode: null }), cache);
   assert.equal(availableReferencePath({ shortcode: '../outside' }), null);
 });
+
+test('ready fetched references resolve without posts or a fresh download', async () => {
+  fs.mkdirSync(path.dirname(pin), { recursive: true });
+  fs.writeFileSync(pin, 'fetched mp4');
+  const queries = [];
+  const fetchedPool = { query: async (sql, params) => {
+    queries.push(sql);
+    assert.deepEqual(params, [post.shortcode]);
+    return { rows: sql.includes('FROM posts') ? [] : [{ duration_sec: 4.5 }] };
+  } };
+  const reference = await ensureReactReference(fetchedPool, post.shortcode, {
+    downloadVideo: () => assert.fail('fetched references do not download posts'),
+    probeDuration: () => assert.fail('use the stored duration'),
+  });
+  assert.deepEqual(reference, { post: null, path: pin, durationSec: 4.5, fetched: true });
+  assert.equal(queries.length, 2);
+  assert.match(queries[1], /state = 'ready'/);
+  fs.unlinkSync(pin);
+  assert.equal(await ensureReactReference(fetchedPool, post.shortcode), null, 'missing ready files fail closed');
+  fs.symlinkSync(cache, pin);
+  fs.writeFileSync(cache, 'outside reference');
+  assert.equal(await ensureReactReference(fetchedPool, post.shortcode), null, 'symlinks fail closed');
+});
+
+test('a post without usable video can fall back to a ready fetched reference', async () => {
+  fs.mkdirSync(path.dirname(pin), { recursive: true });
+  fs.writeFileSync(pin, 'fetched mp4');
+  const fetchedPool = { query: async sql => ({ rows: sql.includes('FROM posts')
+    ? [{ ...post, video_url: null }] : [{ duration_sec: 4.5 }] }) };
+  assert.deepEqual(await ensureReactReference(fetchedPool, post.shortcode, {
+    downloadVideo: () => assert.fail('a ready fetched reference needs no post download'),
+    probeDuration: () => assert.fail('use the fetched duration'),
+  }), { post: null, path: pin, durationSec: 4.5, fetched: true });
+});
+
+test('unready fetched rows and orphan pins cannot resolve an unknown shortcode', async () => {
+  fs.mkdirSync(path.dirname(pin), { recursive: true });
+  fs.writeFileSync(pin, 'orphan pin');
+  const absentPool = { query: async () => ({ rows: [] }) };
+  assert.equal(await ensureReactReference(absentPool, post.shortcode), null);
+});
