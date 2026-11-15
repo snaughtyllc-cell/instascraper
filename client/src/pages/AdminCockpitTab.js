@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useState } from 'react';
-import { getBackfillEstimate, getModelCockpit, getSortUsage, getStartFreshPreview, startBackfill, startFresh, getLookTags, addLookTag, deleteLookTag, getLookBackfillEstimate, startLookBackfill, getTranscriptBackfillEstimate, startTranscriptBackfill } from '../api';
+import { getBackfillEstimate, getModelCockpit, getSortUsage, getStartFreshPreview, startBackfill, startFresh, getLookTags, addLookTag, deleteLookTag, getLookBackfillEstimate, startLookBackfill, getTranscriptBackfillEstimate, startTranscriptBackfill, getTalkingRecheckEstimate, startTalkingRecheck } from '../api';
 import { isStartFreshConfirmation } from '../utils/startFreshConfirmation';
+import ContentTypesManager from '../components/ContentTypesManager';
 
 const FEEDBACK_LABELS = {
   want_to_make: 'Wants to make',
@@ -74,6 +75,8 @@ export default function AdminCockpitTab() {
       )}
 
       <AutoSortCard />
+      <TalkingRecheckCard models={models} />
+      <ContentTypesManager />
       <LookTagsCard />
       <TranscriptsCard />
 
@@ -313,6 +316,72 @@ function LookTagsCard() {
       <button onClick={backfill} disabled={Boolean(busy) || !estimate} className="rounded-lg bg-gold px-4 py-2 text-sm font-semibold text-gray-950 hover:bg-gold-light disabled:opacity-50">{busy === 'backfill' ? 'Preparing…' : 'Tag existing reels'}</button>
       <p className="text-xs text-gray-400">{estimate ? `${num(estimate.count)} eligible reels · estimated ${cost(estimate.estUsd)}` : 'Loading estimate…'}</p>
       <button type="button" disabled={Boolean(busy)} onClick={() => act('refresh', async () => {})} className="text-xs text-gray-400 underline underline-offset-4">Refresh</button>
+    </div>
+    {message && <p role="status" className="text-sm text-emerald-300">{message}</p>}
+    {error && <p role="alert" className="text-sm text-red-300">{error}</p>}
+  </section>;
+}
+
+function TalkingRecheckCard({ models }) {
+  const [modelId, setModelId] = useState('');
+  const [estimate, setEstimate] = useState(null);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState('');
+  const [message, setMessage] = useState('');
+  const load = useCallback(async () => (await getTalkingRecheckEstimate(modelId || undefined)).data, [modelId]);
+  useEffect(() => {
+    let active = true;
+    setEstimate(null);
+    setError('');
+    setMessage('');
+    load().then(data => { if (active) setEstimate(data); }).catch(err => {
+      if (active) setError(err.response?.data?.error || err.message);
+    });
+    return () => { active = false; };
+  }, [load]);
+  const cost = value => Number(value || 0).toLocaleString(undefined, { style: 'currency', currency: 'USD', minimumFractionDigits: 2, maximumFractionDigits: 4 });
+  const recheck = async () => {
+    setBusy(true);
+    setError('');
+    setMessage('');
+    try {
+      const data = await load();
+      setEstimate(data);
+      if (!Number(data.count)) { setMessage('No auto-sorted talking reels are available to re-check.'); return; }
+      const priority = modelId ? ' Within unchecked reels, the selected model’s workspace creators run first.' : '';
+      if (!window.confirm(`Re-check ${num(data.count)} auto-sorted talking reels? Estimated cost: ${cost(data.estUsd)}. Types, transcripts and look tags will be updated. Manual reels stay unchanged. The shared daily AI cap applies.${priority}`)) return;
+      await startTalkingRecheck(modelId || undefined);
+      setMessage('Talking re-check started. The count includes reels that correctly remain Talking.');
+      setEstimate(await load());
+    } catch (err) {
+      setError(err.response?.data?.error || err.message);
+    } finally {
+      setBusy(false);
+    }
+  };
+  const refresh = async () => {
+    setBusy(true);
+    setError('');
+    try { setEstimate(await load()); }
+    catch (err) { setError(err.response?.data?.error || err.message); }
+    finally { setBusy(false); }
+  };
+  return <section aria-labelledby="talking-recheck-title" className="space-y-4 rounded-xl border border-gray-800 bg-gray-900 p-5">
+    <div>
+      <h3 id="talking-recheck-title" className="text-lg font-semibold text-white">Re-check talking reels</h3>
+      <p className="mt-1 text-sm text-gray-400">Review AI talking labels to catch lip sync and clear transcripts from recorded audio. Unchecked reels run before previously checked reels; cache errors run last.</p>
+    </div>
+    <label className="flex flex-wrap items-center gap-3 text-sm text-gray-400">
+      <span>Prioritize model workspace</span>
+      <select disabled={busy} value={modelId} onChange={event => setModelId(event.target.value)} className="rounded-lg border border-gray-700 bg-gray-800 px-3 py-2 text-sm text-white">
+        <option value="">All creators</option>
+        {models.map(model => <option key={model.id} value={model.id}>{model.name}</option>)}
+      </select>
+    </label>
+    <div className="flex flex-wrap items-center gap-3">
+      <button onClick={recheck} disabled={busy || !estimate} className="rounded-lg bg-gold px-4 py-2 text-sm font-semibold text-gray-950 hover:bg-gold-light disabled:opacity-50">{busy ? 'Preparing…' : 'Re-check talking reels'}</button>
+      <p className="text-xs text-gray-400">{estimate ? `${num(estimate.count)} eligible reels · estimated ${cost(estimate.estUsd)}${modelId && estimate.priorityCount != null ? ` · ${num(estimate.priorityCount)} from this workspace` : ''}` : 'Loading estimate…'}</p>
+      <button type="button" disabled={busy} onClick={refresh} className="text-xs text-gray-400 underline underline-offset-4">Refresh</button>
     </div>
     {message && <p role="status" className="text-sm text-emerald-300">{message}</p>}
     {error && <p role="alert" className="text-sm text-red-300">{error}</p>}

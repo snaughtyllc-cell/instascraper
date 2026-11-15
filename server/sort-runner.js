@@ -1,6 +1,6 @@
 const fs = require('node:fs/promises');
 const { decideSort, sortConfig } = require('./sort-status');
-const { describeReel, estimateCostUsd, makeGeminiClient, cleanAiLookTags, cleanTranscript } = require('./gemini-sort');
+const { describeReel, estimateCostUsd, makeGeminiClient, cleanAiLookTags, cleanTranscript, cleanAudioKind } = require('./gemini-sort');
 
 let running = false;
 let whenIdle = Promise.resolve();
@@ -47,7 +47,7 @@ async function runAutoSort({ pool = require('./db'), describe, cfg = sortConfig(
     result.skippedCap = Math.max(0, requested - available);
     const batch = Math.min(requested, available);
     if (!batch) return result;
-    const types = (await pool.query('SELECT value,label FROM content_types ORDER BY sort_order,label')).rows;
+    const types = (await pool.query('SELECT value,label,description FROM content_types ORDER BY sort_order,label')).rows;
     const lookTags = (await pool.query("SELECT value,label,category FROM look_tags WHERE category <> 'custom' ORDER BY category,sort_order,label")).rows;
     const candidates = (await pool.query(`SELECT * FROM posts WHERE ${candidateClause} ORDER BY posted_at DESC, id DESC LIMIT $2`, [cfg.maxAttempts, batch])).rows;
     if (!describe) {
@@ -74,9 +74,9 @@ async function runAutoSort({ pool = require('./db'), describe, cfg = sortConfig(
         const cost = estimateCostUsd(ai.usage || {}, cfg);
         const update = await pool.query(`UPDATE posts SET content_type=$1, sort_status=$2,
           ai_type=$3, ai_confidence=$4, ai_description=$5, ai_suggested_type=$6, ai_model=$7,
-          ai_classified_at=$8, ai_cost_usd=$9, ai_look_tags=$10, ai_transcript=$11, ai_error=NULL
-          WHERE id=$12 AND sort_status='unsorted' AND ${liveClause}`,
-        [decision.contentType, decision.sortStatus, ai.type, ai.confidence, ai.description, ai.suggestedType, cfg.model, new Date().toISOString(), cost, JSON.stringify(cleanAiLookTags(ai.lookTags, lookTags)), cleanTranscript(ai.transcript), post.id]);
+          ai_classified_at=$8, ai_cost_usd=$9, ai_look_tags=$10, ai_transcript=$11, ai_audio_kind=$12, ai_error=NULL
+          WHERE id=$13 AND sort_status='unsorted' AND ${liveClause}`,
+        [decision.contentType, decision.sortStatus, ai.type, ai.confidence, ai.description, ai.suggestedType, cfg.model, new Date().toISOString(), cost, JSON.stringify(cleanAiLookTags(ai.lookTags, lookTags)), ai.audioKind === 'own_speech' ? cleanTranscript(ai.transcript) : null, cleanAudioKind(ai.audioKind), post.id]);
         console.log(`[Sort] reel=${post.id} status=${decision.sortStatus} estimated_usd=${cost.toFixed(6)}`);
         if (update.rowCount) {
           result.classified++;

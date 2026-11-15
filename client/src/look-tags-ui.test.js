@@ -10,10 +10,11 @@ jest.mock('./api', () => ({
   getModelCockpit: jest.fn(), getSortUsage: jest.fn(), getLookTags: jest.fn(),
   getLookBackfillEstimate: jest.fn(), startLookBackfill: jest.fn(),
   getTranscriptBackfillEstimate: jest.fn(), startTranscriptBackfill: jest.fn(),
+  getTalkingRecheckEstimate: jest.fn(), startTalkingRecheck: jest.fn(),
   addLookTag: jest.fn(), deleteLookTag: jest.fn(),
   getWorkspace: jest.fn(), getWorkspaceCreators: jest.fn(), getWorkspaceProposals: jest.fn(),
   getWorkspaceSuggestions: jest.fn(), getWorkspaceReels: jest.fn(), getWorkspaceTaste: jest.fn(),
-  getContentTypes: jest.fn(), addCreatorLookTag: jest.fn(), removeCreatorLookTag: jest.fn(),
+  getContentTypes: jest.fn(), addContentType: jest.fn(), updateContentType: jest.fn(), addCreatorLookTag: jest.fn(), removeCreatorLookTag: jest.fn(),
 }));
 
 const vocabulary = [
@@ -38,6 +39,9 @@ beforeEach(() => {
   api.startLookBackfill.mockResolvedValue({ data: { started: true } });
   api.getTranscriptBackfillEstimate.mockResolvedValue({ data: { count: 4, estUsd: 0.02008 } });
   api.startTranscriptBackfill.mockResolvedValue({ data: { started: true } });
+  api.getTalkingRecheckEstimate.mockResolvedValue({ data: { count: 6, estUsd: 0.03012 } });
+  api.startTalkingRecheck.mockResolvedValue({ data: { started: true } });
+  api.getContentTypes.mockResolvedValue({ data: [{ id: 1, value: 'talking', label: 'Talking', description: 'Their own live speech.' }] });
 });
 afterEach(async () => {
   await act(async () => { root.unmount(); });
@@ -157,6 +161,76 @@ test('cockpit skips transcript backfill when the refreshed estimate is empty', a
   expect(confirm).not.toHaveBeenCalled();
   expect(api.startTranscriptBackfill).not.toHaveBeenCalled();
   expect(card.querySelector('[role="status"]').textContent).toContain('No cached talking reels');
+});
+
+test('talking recheck refreshes the estimate and cancellation never starts work', async () => {
+  api.getTalkingRecheckEstimate.mockResolvedValueOnce({ data: { count: 6, estUsd: 0.03012 } })
+    .mockResolvedValue({ data: { count: 3, estUsd: 0.01506 } });
+  const confirm = jest.spyOn(window, 'confirm').mockReturnValue(false);
+  await render(<AdminCockpitTab />);
+  const card = container.querySelector('section[aria-labelledby="talking-recheck-title"]');
+  expect(card.textContent).toContain('6 eligible reels');
+  await click(button('Re-check talking reels', card));
+  expect(confirm).toHaveBeenCalledTimes(1);
+  expect(confirm.mock.calls[0][0]).toContain('Re-check 3 auto-sorted talking reels');
+  expect(confirm.mock.calls[0][0]).toContain('$0.0151');
+  expect(confirm.mock.calls[0][0]).toContain('Manual reels stay unchanged');
+  expect(api.startTalkingRecheck).not.toHaveBeenCalled();
+});
+
+test('talking recheck confirms and sends the selected model priority', async () => {
+  api.getModelCockpit.mockResolvedValue({ data: { models: [{ id: 7, name: 'Logan' }] } });
+  api.getTalkingRecheckEstimate.mockResolvedValue({ data: { count: 6, estUsd: 0.03012, priorityCount: 2 } });
+  jest.spyOn(window, 'confirm').mockReturnValue(true);
+  await render(<AdminCockpitTab />);
+  const card = container.querySelector('section[aria-labelledby="talking-recheck-title"]');
+  await change(card.querySelector('select'), '7');
+  expect(api.getTalkingRecheckEstimate).toHaveBeenLastCalledWith('7');
+  expect(card.textContent).toContain('2 from this workspace');
+  await click(button('Re-check talking reels', card));
+  expect(api.startTalkingRecheck).toHaveBeenCalledWith('7');
+  expect(card.querySelector('[role="status"]').textContent).toContain('Talking re-check started');
+});
+
+test('talking recheck skips confirmation when no reels remain', async () => {
+  api.getTalkingRecheckEstimate.mockResolvedValue({ data: { count: 0, estUsd: 0 } });
+  const confirm = jest.spyOn(window, 'confirm');
+  await render(<AdminCockpitTab />);
+  const card = container.querySelector('section[aria-labelledby="talking-recheck-title"]');
+  await click(button('Re-check talking reels', card));
+  expect(confirm).not.toHaveBeenCalled();
+  expect(api.startTalkingRecheck).not.toHaveBeenCalled();
+  expect(card.querySelector('[role="status"]').textContent).toContain('No auto-sorted talking reels');
+});
+
+test('content types manager shows definitions and saves edits and new types', async () => {
+  const types = [{ id: 1, value: 'talking', label: 'Talking', description: 'Their own live speech.' }];
+  api.getContentTypes.mockImplementation(async () => ({ data: [...types] }));
+  api.updateContentType.mockImplementation(async (id, fields) => {
+    Object.assign(types.find(type => type.id === id), fields);
+    return { data: types.find(type => type.id === id) };
+  });
+  api.addContentType.mockImplementation(async (label, description) => {
+    const type = { id: 2, value: 'lipsync', label, description };
+    types.push(type);
+    return { data: type };
+  });
+  await render(<AdminCockpitTab />);
+  const card = container.querySelector('section[aria-labelledby="content-types-title"]');
+  expect(card.textContent).toContain('Their own live speech.');
+  await click(card.querySelector('button[aria-label="Edit Talking content type"]'));
+  await change(card.querySelector('input'), 'Speaking');
+  await change(card.querySelector('textarea'), 'The speaker uses their own voice.');
+  await act(async () => { Simulate.submit(card.querySelector('form')); });
+  expect(api.updateContentType).toHaveBeenCalledWith(1, { label: 'Speaking', description: 'The speaker uses their own voice.' });
+  expect(card.textContent).toContain('The speaker uses their own voice.');
+  expect(card.textContent).toContain('talking');
+  await change(card.querySelector('input'), 'Lip sync');
+  await change(card.querySelector('textarea'), 'Mouthing someone else’s recorded audio.');
+  await act(async () => { Simulate.submit(card.querySelector('form')); });
+  expect(api.addContentType).toHaveBeenCalledWith('Lip sync', 'Mouthing someone else’s recorded audio.');
+  expect(card.textContent).toContain('Mouthing someone else’s recorded audio.');
+  expect(card.querySelector('textarea').value).toBe('');
 });
 
 test('workspace shows parsed looks, creator shares, manual tags, taste and edit action', async () => {

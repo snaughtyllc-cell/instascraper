@@ -28,7 +28,7 @@ async function setup(t, { source = 'Mia.Talks', count = 3 } = {}) {
     CREATE TABLE model_suggestions (model_id INTEGER, username TEXT, fit REAL, reason TEXT,
       status TEXT DEFAULT 'pending', snoozed_until TEXT, reviewed_at TEXT, created_at TEXT,
       PRIMARY KEY(model_id,username));
-    CREATE TABLE content_types (value TEXT, label TEXT, sort_order INTEGER DEFAULT 0);
+    CREATE TABLE content_types (value TEXT, label TEXT, description TEXT, sort_order INTEGER DEFAULT 0);
     INSERT INTO models(id,name,primary_niche) VALUES(1,'Logan','talking'),(2,'Gigi','dance');
     INSERT INTO models(id,name,primary_niche,status) VALUES(3,'Inactive','talking','paused');
     INSERT INTO content_types(value,label) VALUES('talking','Talking'),('dance','Dance');
@@ -57,7 +57,7 @@ async function setup(t, { source = 'Mia.Talks', count = 3 } = {}) {
     },
     describe: async ({ filePath }) => {
       await fs.access(filePath);
-      return { type: 'talking', confidence: 0.9, usage: { inTokens: 1000, outTokens: 50 } };
+      return { type: 'talking', confidence: 0.9, audioKind: 'own_speech', usage: { inTokens: 1000, outTokens: 50 } };
     },
   };
 }
@@ -87,7 +87,7 @@ test("source boost uses only that model's creators and comma-separated tokens", 
   const deps = await setup(t, { source: 'other, MIA.TALKS, elsewhere' });
   deps.pool.sqlite.exec("UPDATE models SET primary_niche='talking' WHERE id=2");
   let n = 0;
-  deps.describe = async () => ({ type: ++n === 1 ? 'talking' : 'dance', confidence: 0.9 });
+  deps.describe = async () => ({ type: ++n === 1 ? 'talking' : 'dance', confidence: 0.9, audioKind: 'own_speech' });
   assert.deepEqual((await routeCandidate('candidate', deps)).routed, [1]);
   const row = deps.pool.sqlite.prepare('SELECT * FROM model_suggestions').get();
   assert.equal(row.fit, 1 / 3 + 0.25);
@@ -104,6 +104,17 @@ test('expired candidate reels → no routing, no throw', async t => {
   assert.equal(deps.pool.sqlite.prepare('SELECT COUNT(*) AS n FROM model_suggestions').get().n, 0);
   assert.match(deps.pool.sqlite.prepare('SELECT ai_error FROM suggested_reels LIMIT 1').get().ai_error, /403/);
   assert.deepEqual(await fs.readdir(deps.videoDir), []);
+});
+
+test('candidate routing uses type definitions and cannot route music as talking', async t => {
+  const deps = await setup(t, { source: '' });
+  deps.pool.sqlite.exec("INSERT INTO content_types(value,label,description) VALUES('lipsync','Lip sync','Mouths along to music'); UPDATE content_types SET description='Live own speech' WHERE value='talking'; INSERT INTO models(id,name,primary_niche) VALUES(4,'Lip sync model','lipsync')");
+  deps.describe = async input => {
+    assert.equal(input.types.find(type => type.value === 'talking').description, 'Live own speech');
+    return { type: 'talking', confidence: 0.9, audioKind: 'music_or_trending_audio' };
+  };
+  assert.deepEqual((await routeCandidate('candidate', deps)).routed, [4]);
+  assert.deepEqual(deps.pool.sqlite.prepare('SELECT ai_type,ai_confidence FROM suggested_reels').all(), Array(3).fill({ ai_type: 'lipsync', ai_confidence: 0.9 }));
 });
 
 test('transient download responses get bounded retries and a permanent 403 never does', async t => {

@@ -9,7 +9,7 @@ const { sortUsage } = require('./sort-runner');
 
 const cfg = { ...sortConfig({ GEMINI_API_KEY: 'fake-key' }), dailyMax: 100 };
 function result(type, confidence = 0.9) {
-  return { type, confidence, description: 'A person speaking.', suggestedType: null, usage: { inTokens: 10, outTokens: 5 } };
+  return { type, confidence, description: 'A person speaking.', audioKind: 'own_speech', suggestedType: null, usage: { inTokens: 10, outTokens: 5 } };
 }
 async function withApp(pool, work, options = {}) {
   await work(makeRequest(pool, options));
@@ -48,7 +48,7 @@ test('create suggested type reuses existing value', async () => {
 
 test('redecideNeedsLook promotes confident reels and leaves uncertain reels alone', async () => {
   const pool = await makeSortDb();
-  pool.sqlite.exec("INSERT INTO posts (id, sort_status, ai_description, ai_cost_usd) VALUES (1, 'needs_look', 'A person speaking.', 0.001), (2, 'needs_look', 'Unclear.', NULL), (3, 'manual', 'A person speaking.', NULL)");
+  pool.sqlite.exec("INSERT INTO posts (id, sort_status, ai_description, ai_cost_usd, ai_audio_kind) VALUES (1, 'needs_look', 'A person speaking.', 0.001, 'own_speech'), (2, 'needs_look', 'Unclear.', NULL, 'own_speech'), (3, 'manual', 'A person speaking.', NULL, 'own_speech')");
   const redecide = async ({ description }) => result('talking', description === 'Unclear.' ? 0.5 : 0.9);
   await redecideNeedsLook({ pool, redecide, cfg });
   const rows = pool.sqlite.prepare('SELECT id, content_type, sort_status, ai_cost_usd FROM posts ORDER BY id').all();
@@ -301,7 +301,7 @@ test('redecide respects the shared daily cap before calling Gemini', async t => 
 test('text redecide leaves existing transcripts untouched', async t => {
   const pool = await makeSortDb();
   t.after(() => pool.sqlite.close());
-  pool.sqlite.exec("INSERT INTO posts(id,sort_status,ai_description,ai_transcript) VALUES(1,'needs_look','Speaking','Original speech'),(2,'needs_look','Speaking','')");
+  pool.sqlite.exec("INSERT INTO posts(id,sort_status,ai_description,ai_transcript,ai_audio_kind) VALUES(1,'needs_look','Speaking','Original speech','own_speech'),(2,'needs_look','Speaking','','own_speech')");
   await redecideNeedsLook({ pool, cfg, redecide: async () => ({ ...result('talking'), transcript: 'Invented from description' }) });
   assert.deepEqual(pool.sqlite.prepare('SELECT ai_transcript FROM posts ORDER BY id').all(), [{ ai_transcript: 'Original speech' }, { ai_transcript: '' }]);
 });
@@ -370,4 +370,81 @@ test('redecide shares the sort lock and counts successful cost once', async t =>
   assert.equal(usage.today, 1);
   const post = pool.sqlite.prepare('SELECT ai_cost_usd FROM posts').get();
   assert.ok(Math.abs(usage.usd30d - post.ai_cost_usd) < 1e-10);
+});
+
+test('text redecide preserves stored audio evidence and clears transcripts without known own speech', async t => {
+  const pool = await makeSortDb();
+  t.after(() => pool.sqlite.close());
+  pool.sqlite.exec(`INSERT INTO content_types(value,label,description) VALUES('lipsync','Lip sync','Mouths recorded audio.');
+    UPDATE content_types SET description='Own live speech.' WHERE value='talking';
+    INSERT INTO posts(id,sort_status,ai_description,ai_audio_kind,ai_transcript)
+    VALUES(1,'needs_look','Speaking','music_or_trending_audio','Lyrics'),
+      (2,'needs_look','Speaking',NULL,'Unverified speech'),
+      (3,'needs_look','Speaking','own_speech','Original speech')`);
+  const inputs = [];
+  await redecideNeedsLook({ pool, cfg, redecide: async input => {
+    inputs.push(input);
+    return { ...result('talking'), audioKind: 'own_speech', transcript: 'Invented transcript' };
+  } });
+  assert.deepEqual(inputs.map(input => input.audioKind), ['music_or_trending_audio', null, 'own_speech']);
+  assert.equal(inputs[0].types.find(type => type.value === 'talking').description, 'Own live speech.');
+  assert.deepEqual(pool.sqlite.prepare('SELECT content_type,sort_status,ai_audio_kind,ai_transcript FROM posts ORDER BY id').all(), [
+    { content_type: 'lipsync', sort_status: 'auto', ai_audio_kind: 'music_or_trending_audio', ai_transcript: null },
+    { content_type: null, sort_status: 'needs_look', ai_audio_kind: null, ai_transcript: null },
+    { content_type: 'talking', sort_status: 'auto', ai_audio_kind: 'own_speech', ai_transcript: 'Original speech' },
+  ]);
+});
+
+test('talking recheck estimate excludes manual reels and includes workspace priority count', async t => {
+  const pool = await makeSortDb();
+  t.after(() => pool.sqlite.close());
+  pool.sqlite.exec(`INSERT INTO models(id) VALUES(7);
+    INSERT INTO model_creators(model_id,username) VALUES(7,'creator');
+    INSERT INTO posts(id,sort_status,video_cache_status,content_type,account_handle)
+    VALUES(1,'manual','cached','talking','creator'),(2,'auto','cached','talking','creator'),
+      (3,'auto','cached','talking','another'),(4,'auto','cached','dance','creator')`);
+  const response = await inProcessRequest(pool, 'GET', '/sort/talking-recheck/estimate?modelId=7');
+  assert.equal(response.status, 200);
+  assert.equal(response.body.count, 2);
+  assert.equal(response.body.priorityCount, 1);
+  assert.ok(Math.abs(response.body.estUsd - 2 * 0.00502) < 1e-10);
+});
+
+test('talking recheck requires confirmation and validates optional workspace model', async t => {
+  const pool = await makeSortDb();
+  t.after(() => pool.sqlite.close());
+  let calls = 0;
+  const request = makeRequest(pool, { runTalkingRecheck: async () => { calls++; } });
+  assert.equal((await request('POST', '/sort/talking-recheck', {})).status, 400);
+  for (const modelId of ['0', '-1', '1x', '1.5', '2147483648', '9007199254740992']) {
+    assert.equal((await request('GET', `/sort/talking-recheck/estimate?modelId=${modelId}`)).status, 400);
+    assert.equal((await request('POST', `/sort/talking-recheck?modelId=${modelId}`, { confirm: true })).status, 400);
+  }
+  assert.equal((await request('GET', '/sort/talking-recheck/estimate?modelId=999')).status, 404);
+  assert.equal((await request('POST', '/sort/talking-recheck?modelId=999', { confirm: true })).status, 404);
+  assert.equal(calls, 0);
+});
+
+test('talking recheck starts one background job and does not loop on still-talking results', async t => {
+  const pool = await makeSortDb();
+  t.after(() => pool.sqlite.close());
+  pool.sqlite.exec('INSERT INTO models(id) VALUES(7)');
+  let release;
+  const active = new Promise(resolve => { release = resolve; });
+  const options = [];
+  const request = makeRequest(pool, { runTalkingRecheck: async input => {
+    options.push(input);
+    await active;
+    return { rechecked: 1, auto: 1, needsLook: 0, errored: 0, skippedCap: 0 };
+  } });
+  assert.deepEqual((await request('POST', '/sort/talking-recheck?modelId=7', { confirm: true })).body, { started: true });
+  assert.deepEqual((await request('POST', '/sort/talking-recheck', { confirm: true })).body, { started: true });
+  assert.equal(options.length, 1);
+  assert.equal(options[0].modelId, 7);
+  release();
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(options.length, 1, 'one run owns its finite candidate snapshot');
+  assert.deepEqual((await request('POST', '/sort/talking-recheck', { confirm: true })).body, { started: true });
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(options.length, 2, 'a later explicit confirmation may start another job');
 });

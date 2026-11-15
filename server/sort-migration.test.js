@@ -26,6 +26,10 @@ test('first run adds columns, every existing reel unsorted', async () => {
   }
   const transcript = db.sqlite.prepare('PRAGMA table_info(posts)').all().find(column => column.name === 'ai_transcript');
   assert.strictEqual(transcript.type, 'TEXT');
+  assert.strictEqual(db.sqlite.prepare('PRAGMA table_info(posts)').all().find(column => column.name === 'ai_audio_kind').type, 'TEXT');
+  assert.deepStrictEqual(db.sqlite.prepare('SELECT ai_audio_kind FROM posts ORDER BY id').all(), [
+    { ai_audio_kind: null }, { ai_audio_kind: null },
+  ]);
   assert.deepStrictEqual(db.sqlite.prepare('SELECT ai_transcript FROM posts ORDER BY id').all(), [
     { ai_transcript: null }, { ai_transcript: null },
   ]);

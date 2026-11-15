@@ -5,7 +5,11 @@ const os = require('node:os');
 const path = require('node:path');
 const { describeReel, redecideFromDescription, estimateCostUsd, cleanTranscript } = require('./gemini-sort');
 
-const types = [{ value: 'dance', label: 'Dance' }, { value: 'talking', label: 'Talking' }];
+const types = [
+  { value: 'dance', label: 'Dance', description: 'The main activity is dancing to music.' },
+  { value: 'talking', label: 'Talking', description: 'The person speaks their own words to camera in their live voice.' },
+  { value: 'lipsync', label: 'Lip sync', description: 'The person mouths along to pre-recorded music or someone else\'s audio.' },
+];
 function fake(result = {}) {
   const calls = [];
   return { calls, models: { generateContent: async args => {
@@ -28,14 +32,20 @@ test('request uses low media resolution, json schema and the model', async t => 
   assert.equal(req.model, 'gemini-3.5-flash-lite');
   assert.equal(req.config.mediaResolution, 'MEDIA_RESOLUTION_LOW');
   assert.equal(req.config.responseMimeType, 'application/json');
-  assert.deepEqual(Object.keys(req.config.responseJsonSchema.properties), ['type', 'confidence', 'description', 'suggested_type', 'look_tags', 'transcript']);
+  assert.deepEqual(Object.keys(req.config.responseJsonSchema.properties), ['type', 'confidence', 'description', 'suggested_type', 'look_tags', 'audio_kind', 'transcript']);
+  assert.deepEqual(req.config.responseJsonSchema.properties.audio_kind, { type: 'string', enum: ['own_speech', 'music_or_trending_audio', 'other_voice', 'none'] });
+  assert.ok(req.config.responseJsonSchema.required.includes('audio_kind'));
   assert.deepEqual(req.config.responseJsonSchema.properties.transcript, { anyOf: [{ type: 'string', maxLength: 4000 }, { type: 'null' }] });
   assert.ok(req.config.responseJsonSchema.required.includes('transcript'));
   assert.deepEqual(req.config.thinkingConfig, { thinkingLevel: 'MINIMAL' });
   const parts = req.contents[0].parts;
   assert.equal(parts[0].videoMetadata.fps, 1);
   assert.equal(parts[0].inlineData.mimeType, 'video/mp4');
-  for (const type of types) assert.ok(parts[1].text.includes(type.value));
+  for (const type of types) {
+    assert.ok(parts[1].text.includes(type.value));
+    assert.ok(parts[1].text.includes(type.description));
+  }
+  for (const rule of [/mouth movement synced to a song or trending sound/, /someone else's voice/, /lip sync \(type lipsync\), NOT talking/]) assert.match(parts[1].text, rule);
   assert.deepEqual(out.usage, { inTokens: 3400, outTokens: 80 });
 });
 test('unknown type coerced to null', async () => {
@@ -123,7 +133,7 @@ test('look tags capped at five and malformed output becomes an empty list', asyn
 
 test('describe transcribes original speech in the same call with no lyrics or translation', async t => {
   const transcript = 'Hola, ¿cómo estás?\nEstoy bien.';
-  const client = fake({ text: JSON.stringify({ transcript }) });
+  const client = fake({ text: JSON.stringify({ audio_kind: 'own_speech', transcript }) });
   const result = await describeReel({ filePath: await video(t), types }, { client });
   assert.equal(client.calls.length, 1);
   assert.equal(result.transcript, transcript);
@@ -136,11 +146,11 @@ test('describe transcribes original speech in the same call with no lyrics or tr
 test('describe normalizes missing or empty speech to null and bounds overlong output', async t => {
   const filePath = await video(t);
   for (const value of [null, undefined, '', '   ', false]) {
-    const result = await describeReel({ filePath, types }, { client: fake({ text: JSON.stringify({ transcript: value }) }) });
+    const result = await describeReel({ filePath, types }, { client: fake({ text: JSON.stringify({ audio_kind: 'own_speech', transcript: value }) }) });
     assert.equal(result.transcript, null);
   }
   const transcript = 'sentence. '.repeat(500);
-  const result = await describeReel({ filePath, types }, { client: fake({ text: JSON.stringify({ transcript }) }) });
+  const result = await describeReel({ filePath, types }, { client: fake({ text: JSON.stringify({ audio_kind: 'own_speech', transcript }) }) });
   assert.equal(result.transcript.length, 3999);
   assert.ok(result.transcript.endsWith('.'));
   assert.ok(transcript.startsWith(result.transcript));
@@ -154,6 +164,23 @@ test('text-only redecide never requests or returns a transcript', async () => {
   assert.equal(request.config.responseJsonSchema.required.includes('transcript'), false);
   assert.doesNotMatch(request.contents[0].parts[0].text, /transcri/i);
   assert.equal('transcript' in result, false);
+});
+
+test('describe drops transcripts unless the video reports own speech', async t => {
+  const filePath = await video(t);
+  for (const audioKind of ['music_or_trending_audio', 'other_voice', 'none', 'invalid', null, undefined]) {
+    const result = await describeReel({ filePath, types }, { client: fake({ text: JSON.stringify({ audio_kind: audioKind, transcript: 'Lyrics or dubbed words' }) }) });
+    assert.equal(result.transcript, null);
+    assert.equal(result.audioKind, ['music_or_trending_audio', 'other_voice', 'none'].includes(audioKind) ? audioKind : null);
+  }
+});
+
+test('text redecide reuses verified audio and ignores invented audio output', async () => {
+  const client = fake({ text: JSON.stringify({ audio_kind: 'own_speech' }) });
+  const result = await redecideFromDescription({ types, audioKind: 'music_or_trending_audio' }, { client });
+  assert.equal(result.audioKind, 'music_or_trending_audio');
+  assert.equal('audio_kind' in client.calls[0].config.responseJsonSchema.properties, false);
+  assert.match(client.calls[0].contents[0].parts[0].text, /"audio_kind":"music_or_trending_audio"/);
 });
 
 test('cleanTranscript truncates at sentence or word boundaries within 4000 characters', () => {

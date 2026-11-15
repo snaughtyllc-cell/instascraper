@@ -7,10 +7,11 @@ async function makeSortDb() {
   sqlite.exec(`CREATE TABLE posts (id INTEGER PRIMARY KEY, shortcode TEXT, account_handle TEXT,
     caption TEXT, posted_at TEXT, video_cache_status TEXT, content_type TEXT, archived INTEGER DEFAULT 0,
     soft_deleted INTEGER DEFAULT 0, soft_deleted_at TEXT, tag TEXT);
-    CREATE TABLE content_types (id INTEGER PRIMARY KEY, value TEXT UNIQUE, label TEXT, sort_order INTEGER DEFAULT 0, created_at TEXT);
+    CREATE TABLE content_types (id INTEGER PRIMARY KEY, value TEXT UNIQUE, label TEXT, description TEXT, sort_order INTEGER DEFAULT 0, created_at TEXT);
     INSERT INTO content_types (value,label) VALUES ('dance','Dance'),('talking','Talking');
     CREATE TABLE tracked_accounts (username TEXT PRIMARY KEY);
     CREATE TABLE models (id INTEGER PRIMARY KEY);
+    CREATE TABLE model_creators (model_id INTEGER NOT NULL, username TEXT NOT NULL, PRIMARY KEY (model_id, username));
     CREATE TABLE suggested_reels (id INTEGER PRIMARY KEY, ai_classified_at TEXT, ai_cost_usd REAL);
     CREATE TABLE deletion_log (id INTEGER PRIMARY KEY, post_id INTEGER, shortcode TEXT, account_handle TEXT, reason TEXT);`);
   const db = { sqlite, query: async (sql, params = []) => {

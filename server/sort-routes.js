@@ -1,6 +1,6 @@
 const { slugifyTypeLabel, validateTypeLabel } = require('./content-types');
 const { decideSort, sortConfig } = require('./sort-status');
-const { redecideFromDescription, makeGeminiClient, estimateCostUsd, cleanAiLookTags } = require('./gemini-sort');
+const { redecideFromDescription, makeGeminiClient, estimateCostUsd, cleanAiLookTags, cleanAudioKind } = require('./gemini-sort');
 const { withSortLock, attemptsToday } = require('./sort-runner');
 
 const LIVE = '(soft_deleted = 0 OR soft_deleted IS NULL) AND (archived = 0 OR archived IS NULL)';
@@ -40,30 +40,32 @@ function redecideNeedsLook({ pool, redecide, cfg = sortConfig() }) {
       const currentCfg = state.cfg;
       const available = Math.max(0, currentCfg.dailyMax - await attemptsToday(pool));
       if (!available) break;
-      const types = (await pool.query('SELECT value, label FROM content_types ORDER BY sort_order, label')).rows;
+      const types = (await pool.query('SELECT value, label, description FROM content_types ORDER BY sort_order, label')).rows;
       const lookTags = (await pool.query("SELECT value,label,category FROM look_tags WHERE category <> 'custom' ORDER BY category,sort_order,label")).rows;
-      const rows = (await pool.query(`SELECT id, caption, ai_description FROM posts
+      const rows = (await pool.query(`SELECT id, caption, ai_description, ai_audio_kind FROM posts
         WHERE sort_status = 'needs_look' AND ai_description IS NOT NULL AND ai_description <> '' AND ${LIVE}
         ORDER BY id LIMIT $1`, [available])).rows;
       for (const row of rows) {
         let attemptId;
         let cost = estimateCostUsd({ inTokens: 1000, outTokens: 100 }, currentCfg);
         try {
-          const input = { description: row.ai_description, caption: row.caption || '', types, lookTags };
+          const audioKind = cleanAudioKind(row.ai_audio_kind);
+          const input = { description: row.ai_description, caption: row.caption || '', audioKind, types, lookTags };
           const attempt = await pool.query(`INSERT INTO look_backfill_attempts(post_id,attempted_at,cost_usd)
             VALUES($1,$2,$3) RETURNING id`, [row.id, new Date().toISOString(), cost]);
           attemptId = attempt.rows[0].id;
           const ai = state.redecide
             ? await state.redecide(input, { model: currentCfg.model })
             : await redecideFromDescription(input, { client: client || (client = makeGeminiClient(process.env.GEMINI_API_KEY)), model: currentCfg.model });
-          const decision = decideSort({ ai, typeValues: types.map((type) => type.value), threshold: currentCfg.minConfidence });
+          const decision = decideSort({ ai: { ...ai, audioKind }, typeValues: types.map((type) => type.value), threshold: currentCfg.minConfidence });
           cost = ai.usage ? estimateCostUsd(ai.usage, currentCfg) : cost;
           const update = await pool.transaction(async db => {
             const update = await db.query(`UPDATE posts SET content_type = $1, sort_status = $2,
               ai_type = $3, ai_confidence = $4, ai_description = $5, ai_suggested_type = $6,
               ai_model = $7, ai_classified_at = $8, ai_error = NULL,
               ai_cost_usd = COALESCE(ai_cost_usd, 0) + $9,
-              ai_look_tags = COALESCE($10, ai_look_tags)
+              ai_look_tags = COALESCE($10, ai_look_tags),
+              ai_transcript = CASE WHEN ai_audio_kind = 'own_speech' THEN ai_transcript ELSE NULL END
               WHERE id = $11 AND sort_status = 'needs_look' AND ${LIVE}`,
             [decision.contentType, decision.sortStatus, ai.type, ai.confidence, ai.description,
               ai.suggestedType || null, currentCfg.model, new Date().toISOString(), cost,
@@ -95,7 +97,7 @@ function redecideNeedsLook({ pool, redecide, cfg = sortConfig() }) {
   return state.promise;
 }
 
-function registerSortRoutes(app, { pool, runAutoSort, runLookBackfill, runTranscriptBackfill, redecide, cfg = sortConfig() }) {
+function registerSortRoutes(app, { pool, runAutoSort, runLookBackfill, runTranscriptBackfill, runTalkingRecheck, redecide, cfg = sortConfig() }) {
   const route = (handler) => (req, res, next) => Promise.resolve(handler(req, res)).catch(next);
   const backgroundRedecide = () => {
     redecideNeedsLook({ pool, redecide, cfg }).catch((error) => console.error('[Sort] redecide:', error.message));
@@ -194,6 +196,40 @@ function registerSortRoutes(app, { pool, runAutoSort, runLookBackfill, runTransc
       }
     }).catch(error => console.error('[Transcript] backfill:', error.message))
       .finally(() => { transcriptBackfillRunning = false; });
+  }));
+
+  const recheckModelId = async (req, res) => {
+    if (req.query.modelId === undefined) return undefined;
+    const raw = String(req.query.modelId);
+    const modelId = Number(raw);
+    if (!/^\d+$/.test(raw) || !Number.isSafeInteger(modelId) || modelId <= 0 || modelId > 2147483647) {
+      res.status(400).json({ error: 'Invalid modelId' });
+      return null;
+    }
+    if (!(await pool.query('SELECT id FROM models WHERE id=$1', [modelId])).rows.length) {
+      res.status(404).json({ error: 'Model not found' });
+      return null;
+    }
+    return modelId;
+  };
+
+  app.get('/sort/talking-recheck/estimate', route(async (req, res) => {
+    const modelId = await recheckModelId(req, res);
+    if (modelId === null) return;
+    res.json(await require('./talking-recheck').talkingRecheckEstimate(pool, cfg, { modelId }));
+  }));
+
+  let talkingRecheckRunning = false;
+  app.post('/sort/talking-recheck', route(async (req, res) => {
+    if (req.body?.confirm !== true) return res.status(400).json({ error: 'Confirmation required' });
+    const modelId = await recheckModelId(req, res);
+    if (modelId === null) return;
+    res.json({ started: true });
+    if (talkingRecheckRunning) return;
+    talkingRecheckRunning = true;
+    Promise.resolve().then(() => (runTalkingRecheck || require('./talking-recheck').runTalkingRecheck)({ pool, cfg, modelId }))
+      .catch(error => console.error('[Talking recheck]:', error.message))
+      .finally(() => { talkingRecheckRunning = false; });
   }));
 
   app.get('/sort/start-fresh/preview', route(async (req, res) => {
