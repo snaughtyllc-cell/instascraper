@@ -20,7 +20,8 @@ async function fixture(t, options = {}) {
   const db = new Database(':memory:');
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'react-fetch-test-'));
   t.after(() => { db.close(); fs.rmSync(dir, { recursive: true, force: true }); });
-  db.exec('CREATE TABLE models (id INTEGER PRIMARY KEY); CREATE TABLE posts (shortcode TEXT PRIMARY KEY)');
+  db.exec(`CREATE TABLE models (id INTEGER PRIMARY KEY); CREATE TABLE posts (shortcode TEXT PRIMARY KEY);
+    CREATE TABLE apify_runs (run_id TEXT PRIMARY KEY, purpose TEXT, query TEXT, started_at TEXT)`);
   const pool = { query: async (sql, values = []) => {
     assert.deepEqual([...sql.matchAll(/\$(\d+)/g)].map(match => Number(match[1])), values.map((_, index) => index + 1));
     const stmt = db.prepare(sql.replace(/\$\d+/g, '?'));
@@ -43,7 +44,11 @@ async function fixture(t, options = {}) {
   const launches = [], completions = [], probes = [];
   const dependencies = { pool, env: { REACT_REF_DIR: dir }, now: () => time,
     budgetStatus: async () => ({ over: false }),
-    recordRunLaunch: async (_pool, info) => launches.push(info),
+    recordRunLaunch: async (_pool, info) => {
+      launches.push(info);
+      db.prepare('INSERT OR IGNORE INTO apify_runs VALUES (?,?,?,?)')
+        .run(info.runId, info.purpose, info.query, new Date(info.nowMs).toISOString().replace(/\.\d{3}Z$/, 'Z'));
+    },
     recordRunCompletion: async (_pool, info) => completions.push(info),
     apify: { startRun: async (actor, input) => ({ id: `run-${launches.length}`, status: 'SUCCEEDED', usageTotalUsd: 0.002 }),
       getItems: async () => [{ videoUrl: 'https://video.cdninstagram.com/reel.mp4' }] },
@@ -65,7 +70,7 @@ test('unknown references atomically dedupe concurrent calls and publish ready pi
   assert.ok(results.every(result => result.state === 'fetching'));
   await f.worker.waitForIdle();
   assert.equal(f.launches.length, 1);
-  assert.equal(f.launches[0].actorId, 'apify~instagram-scraper');
+  assert.equal(f.launches[0].actorId, 'apify~instagram-reel-scraper');
   assert.equal(f.launches[0].purpose, 'react_ref');
   assert.equal(f.launches[0].query, 'reel:fresh_reel');
   assert.equal(f.completions[0].status, 'succeeded');
@@ -88,7 +93,7 @@ test('separate workers share an atomic cap and shortcode claim', async t => {
 });
 
 test('retry after six hours retains every launch in the rolling daily cap', async t => {
-  const f = await fixture(t, { env: { REACT_FETCH_DAILY_MAX: '2' },
+  const f = await fixture(t, { env: { REACT_FETCH_DAILY_MAX: '4' },
     apify: { startRun: async () => ({ id: 'failed-run', status: 'SUCCEEDED' }), getItems: async () => [{ error: 'not_found' }] } });
   await f.worker.request('failed_ref');
   await f.worker.waitForIdle();
@@ -99,11 +104,11 @@ test('retry after six hours retains every launch in the rolling daily cap', asyn
   await f.worker.waitForIdle();
   f.advance(6 * 3600000);
   assert.deepEqual(await f.worker.request('failed_ref'), { state: 'unavailable', launched: false });
-  assert.equal(f.launches.length, 2);
+  assert.equal(f.launches.length, 4);
   f.advance(12 * 3600000 + 1);
   assert.equal((await f.worker.request('failed_ref')).launched, true);
   await f.worker.waitForIdle();
-  assert.equal(f.launches.length, 3);
+  assert.equal(f.launches.length, 6);
 });
 
 test('budget over and zero daily cap reject without creating references or launching', async t => {
@@ -275,8 +280,8 @@ test('missing ready files refetch and invalid shortcodes never create rows', asy
   assert.equal(f.db.prepare('SELECT COUNT(*) AS n FROM film_react_refs').get().n, 1);
 });
 
-test('concurrency stays at most two and invalid fractional configuration makes progress', async t => {
-  for (const configured of ['0.5', '9', '1']) {
+test('concurrency defaults to one, stays at most two and rejects fractional configuration', async t => {
+  for (const configured of [undefined, '0.5', '9', '1']) {
     const gate = deferred();
     let active = 0, peak = 0;
     const f = await fixture(t, { env: { REACT_FETCH_CONCURRENCY: configured }, download: async (post, opts) => {
@@ -288,7 +293,7 @@ test('concurrency stays at most two and invalid fractional configuration makes p
     } });
     await Promise.all(['queue_one', 'queue_two', 'queue_three'].map(code => f.worker.request(code)));
     await tick();
-    assert.equal(active, configured === '1' ? 1 : 2);
+    assert.equal(active, configured === '9' ? 2 : 1);
     gate.resolve();
     await f.worker.waitForIdle();
     assert.ok(peak <= 2);
@@ -327,10 +332,10 @@ test('existing capped downloader enforces video type/host/size and retries only 
   }
 });
 
-test('production Apify transport uses bearer auth, bounded retries, actor timeout and exact input', async t => {
+test('production Apify transport uses query auth, bounded retries, actor timeout and exact input', async t => {
   const requests = [];
   let starts = 0;
-  const f = await fixture(t, { apify: undefined, env: { APIFY_API_KEY: 'secret-token', REACT_FETCH_TIMEOUT_SEC: '12' },
+  const f = await fixture(t, { apify: undefined, env: { APIFY_API_KEY: 'secret-token', REACT_FETCH_TIMEOUT_SEC: '120' },
     sleep: async () => {}, fetchImpl: async (url, opts) => {
       requests.push({ url, opts });
       if (url.includes('/acts/')) {
@@ -343,10 +348,13 @@ test('production Apify transport uses bearer auth, bounded retries, actor timeou
   await f.worker.request('apify_ref');
   await f.worker.waitForIdle();
   assert.equal(starts, 2);
-  assert.ok(requests.every(request => !request.url.includes('secret-token') && request.opts.headers.Authorization === 'Bearer secret-token'));
-  assert.match(requests[0].url, /apify~instagram-scraper\/runs\?timeout=12$/);
+  assert.ok(requests.every(request => new URL(request.url).searchParams.get('token') === 'secret-token'
+    && !request.opts.headers.Authorization));
+  assert.equal(new URL(requests[0].url).pathname, '/v2/acts/apify~instagram-reel-scraper/runs');
+  assert.equal(new URL(requests[0].url).searchParams.get('timeout'), '120');
+  assert.equal(new URL(requests[0].url).searchParams.get('memory'), '512');
   assert.deepEqual(JSON.parse(requests[0].opts.body), {
-    directUrls: ['https://www.instagram.com/reel/apify_ref/'], resultsType: 'posts', resultsLimit: 1,
+    directUrls: ['https://www.instagram.com/reel/apify_ref/'], resultsLimit: 1,
   });
   assert.equal(f.db.prepare('SELECT state FROM film_react_refs').get().state, 'ready');
 });
@@ -360,4 +368,84 @@ test('production Apify transport never retries forbidden responses', async t => 
   assert.equal(calls, 1);
   assert.equal(f.launches.length, 0);
   assert.equal(f.db.prepare('SELECT error FROM film_react_refs').get().error, 'apify_failed');
+});
+
+test('reel actor runs first and only successful runs without usable URLs get one generic fallback', async t => {
+  for (const reelItems of [[], [{}], [{ error: 'not_found' }], [{ videoUrl: 'https://untrusted.example/a.mp4' }]]) {
+    const calls = [];
+    const f = await fixture(t, { apify: {
+      startRun: async (actor, input) => {
+        calls.push({ actor, input });
+        return { id: `actor-${calls.length}`, status: 'SUCCEEDED' };
+      },
+      getItems: async id => id === 'actor-1' ? reelItems : [{ videoUrl: 'https://video.fbcdn.net/video.mp4' }],
+    } });
+    await f.worker.request('fallback_ref');
+    await f.worker.waitForIdle();
+    assert.deepEqual(calls, [
+      { actor: 'apify~instagram-reel-scraper', input: {
+        directUrls: ['https://www.instagram.com/reel/fallback_ref/'], resultsLimit: 1,
+      } },
+      { actor: 'apify~instagram-scraper', input: {
+        directUrls: ['https://www.instagram.com/reel/fallback_ref/'], resultsType: 'posts', resultsLimit: 1,
+      } },
+    ]);
+    assert.deepEqual(f.completions.map(run => run.runId), ['actor-1', 'actor-2']);
+    assert.equal(f.db.prepare('SELECT COUNT(*) AS n FROM film_react_ref_attempts WHERE started_at IS NOT NULL').get().n, 2);
+    assert.equal(f.db.prepare('SELECT state FROM film_react_refs').get().state, 'ready');
+  }
+});
+
+test('failed reel runs never fall back and a fallback respects the launch cap', async t => {
+  for (const status of ['FAILED', 'SUCCEEDED']) {
+    let calls = 0;
+    const f = await fixture(t, { env: { REACT_FETCH_DAILY_MAX: '1' }, apify: {
+      startRun: async () => { calls++; return { id: 'single-run', status }; }, getItems: async () => [],
+    } });
+    await f.worker.request('single_ref');
+    await f.worker.waitForIdle();
+    assert.equal(calls, 1);
+    assert.equal(f.db.prepare('SELECT error FROM film_react_refs').get().error, status === 'FAILED' ? 'apify_failed' : 'apify_busy');
+    assert.equal(f.db.prepare('SELECT COUNT(*) AS n FROM film_react_ref_attempts').get().n, 1);
+  }
+});
+
+test('capacity errors keep fetching during backoff then fail busy with sanitized attempt diagnostics', async t => {
+  const logs = [];
+  t.mock.method(console, 'error', line => logs.push(line));
+  for (const [status, type] of [[402, 'payment-required'], [400, 'actor-memory-limit-exceeded']]) {
+    let calls = 0, f;
+    const pauses = [];
+    f = await fixture(t, { apify: undefined, env: { APIFY_API_KEY: 'secret-token' },
+      fetchImpl: async () => {
+        calls++;
+        return { ok: false, status, json: async () => ({ error: { type, message: 'secret-token https://private.example/' } }) };
+      },
+      sleep: async ms => {
+        pauses.push(ms);
+        assert.equal(f.db.prepare('SELECT state FROM film_react_refs').get().state, 'fetching');
+      },
+    });
+    await f.worker.request('limited_ref');
+    await f.worker.waitForIdle();
+    assert.equal(calls, 4);
+    assert.deepEqual(pauses, [15000, 30000, 60000]);
+    assert.equal(f.db.prepare('SELECT error FROM film_react_refs').get().error, 'apify_busy');
+    assert.equal(f.db.prepare('SELECT COUNT(*) AS n FROM film_react_ref_attempts').get().n, 0);
+    assert.equal(logs.filter(line => line === `[React fetch] apify_http route=startRun status=${status} type=${type}`).length, 4);
+  }
+  assert.equal(logs.filter(line => line === '[React fetch] failed code=apify_busy').length, 2);
+  assert.ok(logs.every(line => !/secret-token|https:|limited_ref|message/.test(line)));
+});
+
+test('network failures persist apify_network and log only the static failure code', async t => {
+  const logs = [];
+  t.mock.method(console, 'error', line => logs.push(line));
+  const f = await fixture(t, { apify: undefined, env: { APIFY_API_KEY: 'secret-token' },
+    fetchImpl: async () => { throw new Error('https://api.apify.com/?token=secret-token'); } });
+  await f.worker.request('network_ref');
+  await f.worker.waitForIdle();
+  assert.equal(f.db.prepare('SELECT error FROM film_react_refs').get().error, 'apify_network');
+  assert.deepEqual(logs, ['[React fetch] failed code=apify_network']);
+  assert.equal(f.db.prepare('SELECT COUNT(*) AS n FROM film_react_ref_attempts').get().n, 0);
 });

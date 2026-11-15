@@ -1194,6 +1194,7 @@ module.exports.hasActiveJob = hasActiveJob;
 module.exports.extractViews = extractViews;
 module.exports.isErrorStubResponse = isErrorStubResponse;
 module.exports.isErrorStub = isErrorStub;
+module.exports.REEL_ACTOR_ID = REEL_ACTOR_ID;
 module.exports.GENERIC_ACTOR_ID = GENERIC_ACTOR_ID;
 module.exports.pickTopReels = pickTopReels;
 module.exports.scoreReels = scoreReels;

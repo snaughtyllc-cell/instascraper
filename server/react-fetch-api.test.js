@@ -33,7 +33,9 @@ async function fixture(t, worker) {
       else process.env[name] = value;
     }
   });
-  db.exec('CREATE TABLE models (id INTEGER PRIMARY KEY); CREATE TABLE posts (id INTEGER PRIMARY KEY, shortcode TEXT, video_url TEXT)');
+  db.exec(`CREATE TABLE models (id INTEGER PRIMARY KEY);
+    CREATE TABLE posts (id INTEGER PRIMARY KEY, shortcode TEXT, video_url TEXT);
+    CREATE TABLE apify_runs (run_id TEXT PRIMARY KEY, purpose TEXT, query TEXT, started_at TEXT)`);
   const pool = { query: async (sql, values = []) => {
     assert.deepEqual([...sql.matchAll(/\$(\d+)/g)].map(match => Number(match[1])), values.map((_, index) => index + 1));
     const statement = db.prepare(sql.replace(/\$\d+/g, '?'));
@@ -205,7 +207,7 @@ test('concurrent missing-reference requests share one fetch and become playable 
     assert.equal(failed.status, 404);
     assert.deepEqual(failed.body, { error: 'reel_not_available' });
     assert.equal(f.db.prepare('SELECT state FROM film_react_refs WHERE shortcode = ?').get('stub_123').state, 'failed');
-    assert.equal(launchCount, 2, 'recent failed references do not launch again');
+    assert.equal(launchCount, 3, 'recent failed references do not launch again after the generic fallback');
     assert.equal(f.db.prepare('SELECT COUNT(*) AS count FROM posts').get().count, 0);
   } finally {
     release();
@@ -336,4 +338,60 @@ test('prefetch deduplicates and skips posts, pins and already active references'
   assert.deepEqual(response.body, { queued: 1 });
   assert.deepEqual(calls, ['fetching_123', 'failed_123', 'unknown_123']);
   assert.equal(f.db.prepare('SELECT COUNT(*) AS count FROM posts').get().count, 1);
+});
+
+test('prefetch queues a section of references and drains serially by default', async t => {
+  const f = await fixture(t);
+  const shortcodes = Array.from({ length: 18 }, (_, index) => `serial_${String(index).padStart(2, '0')}`);
+  const launches = [], completed = [], releases = new Map(), waiters = new Map();
+  let downloading = 0, releaseAll = false;
+  const worker = createReactFetchWorker({ pool: f.pool, env: { REACT_REF_DIR: f.dir, APIFY_API_KEY: 'fake-key' },
+    apify: {
+      startRun: async (actor, input) => {
+        const shortcode = new URL(input.directUrls[0]).pathname.split('/')[2];
+        launches.push(shortcode);
+        return { id: shortcode, status: 'SUCCEEDED' };
+      },
+      getItems: async () => [{ videoUrl: 'https://video.cdninstagram.com/video.mp4' }],
+    },
+    download: async (post, { videoDir }) => {
+      downloading++;
+      const held = releaseAll ? Promise.resolve() : new Promise(resolve => releases.set(post.shortcode, resolve));
+      waiters.get(downloading)?.();
+      await held;
+      fs.writeFileSync(path.join(videoDir, `${post.shortcode}.mp4`), '0123456789');
+      completed.push(post.shortcode);
+      return { status: 'cached' };
+    },
+    probe: async () => ({ durationSec: 4.5 }), budgetStatus: async () => ({ blocked: false }),
+    recordRunLaunch: async () => {}, recordRunCompletion: async () => {},
+  });
+  const app = express();
+  registerFilmApi(app, { pool: f.pool, reactWorker: { enqueue: async () => {} }, reactFetchWorker: worker });
+  const prefetch = () => appRequest(app, { method: 'POST', path: '/film/v1/react-prefetch',
+    body: { shortcodes }, headers: { Authorization: 'Bearer api-key' } });
+  const waitForDownload = count => downloading >= count ? Promise.resolve()
+    : new Promise(resolve => waiters.set(count, resolve));
+  try {
+    const response = await prefetch();
+    assert.equal(response.status, 202);
+    assert.deepEqual(response.body, { queued: 18 });
+    await waitForDownload(1);
+    assert.deepEqual(launches, [shortcodes[0]], 'the other 17 references wait in the queue');
+    assert.equal(f.db.prepare("SELECT COUNT(*) AS count FROM film_react_refs WHERE state='fetching'").get().count, 18);
+    assert.deepEqual((await prefetch()).body, { queued: 0 }, 'queued references are deduplicated');
+    for (let index = 0; index < shortcodes.length; index++) {
+      await waitForDownload(index + 1);
+      assert.deepEqual(launches, shortcodes.slice(0, index + 1), 'the next run waits for the preceding download');
+      assert.deepEqual(completed, shortcodes.slice(0, index));
+      releases.get(shortcodes[index])();
+    }
+    await worker.waitForIdle();
+    assert.deepEqual(completed, shortcodes);
+    assert.equal(f.db.prepare("SELECT COUNT(*) AS count FROM film_react_refs WHERE state='ready'").get().count, 18);
+  } finally {
+    releaseAll = true;
+    for (const release of releases.values()) release();
+    await worker.waitForIdle();
+  }
 });
