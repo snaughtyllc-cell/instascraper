@@ -5,7 +5,7 @@ const { attemptsToday, withSortLock } = require('./sort-runner');
 
 const eligible = `sort_status IN ('auto','manual','needs_look') AND video_cache_status='cached'
   AND ai_look_tags IS NULL AND (soft_deleted=0 OR soft_deleted IS NULL) AND (archived=0 OR archived IS NULL)`;
-const estimatedUsage = { inTokens: 3400, outTokens: 100 };
+const estimatedUsage = { inTokens: 3400, outTokens: 1600 };
 
 async function lookBackfillEstimate(pool, cfg = sortConfig()) {
   const count = Number((await pool.query(`SELECT COUNT(*) AS n FROM posts WHERE ${eligible}`)).rows[0].n);

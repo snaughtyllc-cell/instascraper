@@ -144,7 +144,7 @@ test('human edit during classification wins', async t => {
 });
 test('repeated failures cannot bypass daily cap; estimate and usage report totals', async t => {
   const deps = await setup(t, 1); deps.cfg.dailyMax = 2;
-  assert.deepEqual(await backfillEstimate(deps.pool, deps.cfg), { count: 1, estUsd: 0.00122 });
+  assert.deepEqual(await backfillEstimate(deps.pool, deps.cfg), { count: 1, estUsd: 0.00502 });
   deps.describe = async () => { throw new Error('failure'); };
   await runAutoSort(deps); await runAutoSort(deps);
   assert.equal((await runAutoSort(deps)).errored, 0);
@@ -186,4 +186,16 @@ test('auto-sort stores ai_look_tags as JSON array', async t => {
   };
   await runAutoSort(deps);
   assert.equal(deps.pool.sqlite.prepare('SELECT ai_look_tags FROM posts').get().ai_look_tags, '["brunette"]');
+});
+
+test('auto-sort stores bounded speech and replaces a previous transcript with null for no speech', async t => {
+  const deps = await setup(t, 3);
+  deps.pool.sqlite.exec("UPDATE posts SET ai_transcript='Previous speech'");
+  const transcripts = [null, ' Hola.\r\nBien. ', 'word '.repeat(900)];
+  deps.describe = async () => ({ ...ai, transcript: transcripts.shift() });
+  assert.equal((await runAutoSort(deps)).classified, 3);
+  const rows = deps.pool.sqlite.prepare('SELECT ai_transcript FROM posts ORDER BY id DESC').all();
+  assert.equal(rows[0].ai_transcript, null);
+  assert.equal(rows[1].ai_transcript, 'Hola.\nBien.');
+  assert.equal(rows[2].ai_transcript, 'word '.repeat(800).trimEnd());
 });

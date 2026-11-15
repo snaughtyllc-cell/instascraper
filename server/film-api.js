@@ -101,6 +101,7 @@ async function reelPresenter(pool, req, res) {
       typeLabel: labels.get(type) || allowedNicheOptions([type], [])[0]?.label || type,
       lookTags: parseTagList(post.ai_look_tags),
       caption: post.caption || '',
+      transcript: post.ai_transcript || null,
       creatorHandle: post.account_handle || '',
       postedAt: post.posted_at || null,
       viewCount: Number(post.view_count) || 0,

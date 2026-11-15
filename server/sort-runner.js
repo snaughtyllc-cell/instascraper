@@ -1,6 +1,6 @@
 const fs = require('node:fs/promises');
 const { decideSort, sortConfig } = require('./sort-status');
-const { describeReel, estimateCostUsd, makeGeminiClient, cleanAiLookTags } = require('./gemini-sort');
+const { describeReel, estimateCostUsd, makeGeminiClient, cleanAiLookTags, cleanTranscript } = require('./gemini-sort');
 
 let running = false;
 let whenIdle = Promise.resolve();
@@ -74,9 +74,9 @@ async function runAutoSort({ pool = require('./db'), describe, cfg = sortConfig(
         const cost = estimateCostUsd(ai.usage || {}, cfg);
         const update = await pool.query(`UPDATE posts SET content_type=$1, sort_status=$2,
           ai_type=$3, ai_confidence=$4, ai_description=$5, ai_suggested_type=$6, ai_model=$7,
-          ai_classified_at=$8, ai_cost_usd=$9, ai_look_tags=$10, ai_error=NULL
-          WHERE id=$11 AND sort_status='unsorted' AND ${liveClause}`,
-        [decision.contentType, decision.sortStatus, ai.type, ai.confidence, ai.description, ai.suggestedType, cfg.model, new Date().toISOString(), cost, JSON.stringify(cleanAiLookTags(ai.lookTags, lookTags)), post.id]);
+          ai_classified_at=$8, ai_cost_usd=$9, ai_look_tags=$10, ai_transcript=$11, ai_error=NULL
+          WHERE id=$12 AND sort_status='unsorted' AND ${liveClause}`,
+        [decision.contentType, decision.sortStatus, ai.type, ai.confidence, ai.description, ai.suggestedType, cfg.model, new Date().toISOString(), cost, JSON.stringify(cleanAiLookTags(ai.lookTags, lookTags)), cleanTranscript(ai.transcript), post.id]);
         console.log(`[Sort] reel=${post.id} status=${decision.sortStatus} estimated_usd=${cost.toFixed(6)}`);
         if (update.rowCount) {
           result.classified++;
@@ -100,7 +100,7 @@ async function runAutoSort({ pool = require('./db'), describe, cfg = sortConfig(
 
 async function backfillEstimate(pool, cfg = sortConfig()) {
   const count = Number((await pool.query(`SELECT COUNT(*) AS n FROM posts WHERE ${candidateClause}`, [cfg.maxAttempts])).rows[0].n);
-  return { count, estUsd: count * estimateCostUsd({ inTokens: 3400, outTokens: 80 }, cfg) };
+  return { count, estUsd: count * estimateCostUsd({ inTokens: 3400, outTokens: 1600 }, cfg) };
 }
 
 async function sortUsage(pool, cfg = sortConfig()) {

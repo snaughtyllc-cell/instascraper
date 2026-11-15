@@ -2,6 +2,7 @@ import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { saveNotes, archivePost, setPostContentType } from '../api';
 import API_URL from '../api-base';
 import { LookTagChips } from './LookTags';
+import Transcript from './Transcript';
 
 function formatCount(n) {
   if (!n) return '0';
@@ -282,6 +283,7 @@ export default function ContentCard({
         </div>
 
         <LookTagChips tags={post.ai_look_tags} />
+        <Transcript transcript={post.ai_transcript} />
 
         {/* Caption */}
         {post.caption && (

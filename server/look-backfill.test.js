@@ -65,7 +65,7 @@ test('estimate counts only untagged cached sorted reels', async t => {
     UPDATE posts SET archived=1 WHERE id=8`);
   const estimate = await lookBackfillEstimate(deps.pool, deps.cfg);
   assert.equal(estimate.count, 3);
-  assert.ok(Math.abs(estimate.estUsd - 3 * 0.00127) < 1e-10);
+  assert.ok(Math.abs(estimate.estUsd - 3 * 0.00502) < 1e-10);
 });
 
 test('backfill and regular sort share lock and daily cap', async t => {

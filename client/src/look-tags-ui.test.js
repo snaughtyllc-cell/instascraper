@@ -9,6 +9,7 @@ import * as api from './api';
 jest.mock('./api', () => ({
   getModelCockpit: jest.fn(), getSortUsage: jest.fn(), getLookTags: jest.fn(),
   getLookBackfillEstimate: jest.fn(), startLookBackfill: jest.fn(),
+  getTranscriptBackfillEstimate: jest.fn(), startTranscriptBackfill: jest.fn(),
   addLookTag: jest.fn(), deleteLookTag: jest.fn(),
   getWorkspace: jest.fn(), getWorkspaceCreators: jest.fn(), getWorkspaceProposals: jest.fn(),
   getWorkspaceSuggestions: jest.fn(), getWorkspaceReels: jest.fn(), getWorkspaceTaste: jest.fn(),
@@ -35,6 +36,8 @@ beforeEach(() => {
   api.getSortUsage.mockResolvedValue({ data: { reels30d: 0, usd30d: 0, today: 0, dailyMax: 10 } });
   api.getLookBackfillEstimate.mockResolvedValue({ data: { count: 8, estUsd: 0.01016 } });
   api.startLookBackfill.mockResolvedValue({ data: { started: true } });
+  api.getTranscriptBackfillEstimate.mockResolvedValue({ data: { count: 4, estUsd: 0.02008 } });
+  api.startTranscriptBackfill.mockResolvedValue({ data: { started: true } });
 });
 afterEach(async () => {
   await act(async () => { root.unmount(); });
@@ -118,6 +121,42 @@ test('cockpit adds and deletes vocabulary tags through the form', async () => {
   await click(lookCard().querySelector('button[aria-label="Delete Soft glam tag"]'));
   expect(api.deleteLookTag).toHaveBeenCalledWith(5);
   expect(lookCard().textContent).not.toContain('Soft glam');
+});
+
+test('cockpit confirms the refreshed transcript estimate and cancellation does not start work', async () => {
+  api.getTranscriptBackfillEstimate.mockResolvedValueOnce({ data: { count: 4, estUsd: 0.02008 } })
+    .mockResolvedValue({ data: { count: 3, estUsd: 0.01506 } });
+  const confirm = jest.spyOn(window, 'confirm').mockReturnValue(false);
+  await render(<AdminCockpitTab />);
+  const card = container.querySelector('section[aria-labelledby="transcripts-title"]');
+  expect(card.textContent).toContain('4 eligible reels');
+  expect(card.textContent).toContain('$0.0201');
+  await click(button('Transcribe existing talking reels', card));
+  expect(confirm).toHaveBeenCalledTimes(1);
+  expect(confirm.mock.calls[0][0]).toContain('Transcribe 3 existing talking reels');
+  expect(confirm.mock.calls[0][0]).toContain('$0.0151');
+  expect(confirm.mock.calls[0][0]).toContain('shared daily AI cap');
+  expect(api.startTranscriptBackfill).not.toHaveBeenCalled();
+});
+
+test('cockpit starts transcript backfill only after confirmation', async () => {
+  jest.spyOn(window, 'confirm').mockReturnValue(true);
+  await render(<AdminCockpitTab />);
+  const card = container.querySelector('section[aria-labelledby="transcripts-title"]');
+  await click(button('Transcribe existing talking reels', card));
+  expect(api.startTranscriptBackfill).toHaveBeenCalledTimes(1);
+  expect(card.querySelector('[role="status"]').textContent).toContain('Transcription started');
+});
+
+test('cockpit skips transcript backfill when the refreshed estimate is empty', async () => {
+  api.getTranscriptBackfillEstimate.mockResolvedValue({ data: { count: 0, estUsd: 0 } });
+  const confirm = jest.spyOn(window, 'confirm');
+  await render(<AdminCockpitTab />);
+  const card = container.querySelector('section[aria-labelledby="transcripts-title"]');
+  await click(button('Transcribe existing talking reels', card));
+  expect(confirm).not.toHaveBeenCalled();
+  expect(api.startTranscriptBackfill).not.toHaveBeenCalled();
+  expect(card.querySelector('[role="status"]').textContent).toContain('No cached talking reels');
 });
 
 test('workspace shows parsed looks, creator shares, manual tags, taste and edit action', async () => {
