@@ -1,3 +1,4 @@
+const { effectiveNicheExpr } = require('./sort-status');
 // server/audio.js — Trending Audio ("Reel Radar, but for sounds").
 // Ranks the audio tracks used by the reels we ALREADY scrape (musicInfo captured
 // on posts.audio_*), so models see which sounds are heating up in their lane.
@@ -51,7 +52,7 @@ function buildTrendingAudioQuery(niches, { all = false, cutoffIso, minReels = 2 
   let nicheClause = '';
   if (!all) {
     const ph = list.map((_, i) => `$${i + 2}`).join(', ');
-    nicheClause = ` AND COALESCE(posts.content_type, ct.content_type) IN (${ph})`;
+    nicheClause = ` AND ${effectiveNicheExpr()} IN (${ph})`;
     params.push(...list);
   }
   const minIdx = params.length + 1;
@@ -86,7 +87,7 @@ function buildAudioReelsQuery(audioId, niches, { all = false, limit = 12 } = {})
     const list = (Array.isArray(niches) ? niches : []).filter(Boolean);
     if (list.length === 0) return { sql: null, params: [] };
     const ph = list.map((_, i) => `$${i + 2}`).join(', ');
-    nicheClause = ` AND COALESCE(posts.content_type, ct.content_type) IN (${ph})`;
+    nicheClause = ` AND ${effectiveNicheExpr()} IN (${ph})`;
     params.push(...list);
   }
   const limIdx = params.length + 1;
@@ -94,7 +95,7 @@ function buildAudioReelsQuery(audioId, niches, { all = false, limit = 12 } = {})
   const sql = `
     SELECT posts.id, posts.shortcode, posts.audio_id, posts.view_count, posts.account_handle,
            posts.caption, posts.post_url, posts.posted_at,
-           COALESCE(posts.content_type, ct.content_type) AS niche
+           ${effectiveNicheExpr()} AS niche
     FROM posts
     LEFT JOIN creator_types ct ON posts.account_handle = ct.account_handle
     WHERE posts.audio_id = $1
@@ -126,7 +127,7 @@ async function trendingAudio(db, { niches = [], all = false, cfg = audioConfig()
   if (!all) {
     const list = (Array.isArray(niches) ? niches : []).filter(Boolean);
     const nph = list.map((_, i) => `$${ids.length + 1 + i}`).join(', ');
-    if (list.length) { nicheClause = ` AND COALESCE(posts.content_type, ct.content_type) IN (${nph})`; exParams.push(...list); }
+    if (list.length) { nicheClause = ` AND ${effectiveNicheExpr()} IN (${nph})`; exParams.push(...list); }
   }
   const exSql = `
     SELECT posts.id, posts.shortcode, posts.audio_id, posts.view_count, posts.account_handle, posts.post_url

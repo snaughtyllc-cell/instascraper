@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react';
-import { getContent, getCreators, exportContent, importUrls, bulkUpdateContent, getContentTypes, addContentType, getModels, assignPostsToModel } from '../api';
+import { getContent, exportContent, importUrls, bulkUpdateContent, getContentTypes, addContentType, getModels, assignPostsToModel } from '../api';
 import BulkActionBar from '../components/BulkActionBar';
 import ContentCard from '../components/ContentCard';
 import FilterBar from '../components/FilterBar';
@@ -11,8 +11,8 @@ export default function LibraryTab() {
   const [totalPages, setTotalPages] = useState(0);
   const [page, setPage] = useState(1);
   const [accounts, setAccounts] = useState([]);
-  const [creatorTypes, setCreatorTypes] = useState({});
   const [contentTypes, setContentTypes] = useState([]);
+  const [exportType, setExportType] = useState('');
   const [models, setModels] = useState([]);
   const [assignModelId, setAssignModelId] = useState('');
   const [assigning, setAssigning] = useState(false);
@@ -24,7 +24,6 @@ export default function LibraryTab() {
   const [filters, setFilters] = useState({
     sort: 'newest',
     search: '',
-    tag: '',
     account: '',
     contentType: '',
     minViews: '',
@@ -76,17 +75,6 @@ export default function LibraryTab() {
     return () => obs.disconnect();
   }, [autoplayInView, posts]);
 
-  const loadCreatorTypes = useCallback(async () => {
-    try {
-      const { data } = await getCreators();
-      const map = {};
-      for (const c of data) {
-        if (c.content_type) map[c.account_handle] = c.content_type;
-      }
-      setCreatorTypes(map);
-    } catch {}
-  }, []);
-
   const loadContentTypes = useCallback(async () => {
     try {
       const { data } = await getContentTypes();
@@ -114,8 +102,6 @@ export default function LibraryTab() {
     try {
       const params = { page, limit: 24 };
       if (filters.sort) params.sort = filters.sort;
-      if (filters.tag === '__untagged__') params.untagged = 'true';
-      else if (filters.tag) params.tag = filters.tag;
       if (filters.search) params.search = filters.search;
       if (filters.account) params.account = filters.account;
       if (filters.contentType) params.contentType = filters.contentType;
@@ -138,10 +124,9 @@ export default function LibraryTab() {
 
   useEffect(() => {
     loadContent();
-    loadCreatorTypes();
     loadContentTypes();
     loadModels();
-  }, [loadContent, loadCreatorTypes, loadContentTypes, loadModels]);
+  }, [loadContent, loadContentTypes, loadModels]);
 
   const handleFilterChange = (key, value) => {
     setFilters((f) => ({ ...f, [key]: value }));
@@ -165,7 +150,6 @@ export default function LibraryTab() {
       await bulkUpdateContent([...selected], action, value);
       clearSelection();
       loadContent();
-      loadCreatorTypes();
     } catch (err) {
       console.error('Bulk action failed:', err);
       alert('Bulk action failed: ' + (err.response?.data?.error || err.message));
@@ -193,7 +177,6 @@ export default function LibraryTab() {
 
   const handleUpdate = () => {
     loadContent();
-    loadCreatorTypes();
   };
 
   const handleImport = async () => {
@@ -258,18 +241,32 @@ export default function LibraryTab() {
         </div>
       )}
 
+      <div className="flex flex-wrap items-center gap-3">
+        <label htmlFor="export-content-type" className="text-sm text-gray-400">Export content type</label>
+        <select
+          id="export-content-type"
+          value={exportType}
+          onChange={(e) => setExportType(e.target.value)}
+          className="rounded-lg border border-gray-700 bg-gray-800 px-3 py-2 text-sm text-white"
+        >
+          <option value="">All sorted reels</option>
+          {contentTypes.map((type) => <option key={type.value} value={type.value}>{type.label}</option>)}
+        </select>
+        <button onClick={() => exportContent('csv', exportType)} className="rounded-lg border border-gray-700 bg-gray-800 px-3 py-2 text-sm text-gray-300 hover:bg-gray-700">Export CSV</button>
+      </div>
+
       <FilterBar
         filters={filters}
         accounts={accounts}
         contentTypes={contentTypes}
         total={total}
         onChange={handleFilterChange}
-        onExport={() => exportContent('json')}
+        onExport={() => exportContent('json', exportType)}
       />
 
       <BulkActionBar
         count={selected.size}
-        onTag={(t) => handleBulk('tag', t)}
+        contentTypes={contentTypes}
         onArchive={(a) => handleBulk('archive', a)}
         onSetType={(ct) => handleBulk('content-type', ct)}
         onSelectAll={selectAllOnPage}
@@ -324,7 +321,6 @@ export default function LibraryTab() {
             <ContentCard
               key={post.id}
               post={post}
-              creatorTypes={creatorTypes}
               contentTypes={contentTypes}
               onAddContentType={handleAddContentType}
               onUpdate={handleUpdate}

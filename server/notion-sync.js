@@ -1,3 +1,4 @@
+const { effectiveNicheExpr } = require('./sort-status');
 // Notion → InstaScraper onboarding sync. Read-only. Source: Creator Personas DB.
 // Pure mapping functions here; I/O boundaries (fetch, derive, seed) added in later tasks.
 
@@ -129,13 +130,13 @@ Return:
 }
 
 // Count "fresh" (cached, live, non-deleted) reels in a niche — mirrors me-feed's PLAYABLE
-// definition (video_cache_status = 'cached'). Niche matches posts.content_type OR the
-// creator's default (creator_types.content_type), same COALESCE the feed/idea-agent use.
+// definition (video_cache_status = 'cached') and the same per-reel sorted type
+// visibility rule as the feed and idea agent.
 async function countFreshNicheReels(pool, niche) {
   const res = await pool.query(
     `SELECT COUNT(*) AS cnt FROM posts p
      LEFT JOIN creator_types ct ON p.account_handle = ct.account_handle
-     WHERE COALESCE(p.content_type, ct.content_type) = $1
+     WHERE ${effectiveNicheExpr('p')} = $1
        AND p.video_cache_status = 'cached'
        AND (p.soft_deleted = 0 OR p.soft_deleted IS NULL)
        AND (p.archived = 0 OR p.archived IS NULL)`,

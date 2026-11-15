@@ -740,7 +740,9 @@ class InstagramScraper {
 
     // Fire-and-forget: cache thumbnails for the just-scraped posts while URLs are fresh.
     sweepThumbnails({ batchLimit: 80 }).catch(err => console.error('[Sweep] post-scrape sweep failed:', err.message));
-    require('./videos').sweepVideos({ batchLimit: 60 }).catch(err => console.error('[Sweep] post-scrape video sweep failed:', err.message));
+    require('./videos').sweepVideos({ batchLimit: 60 })
+      .then(() => require('./sort-runner').runAutoSort({ pool }).catch(err => console.error('[Sort] post-scrape failed:', err.message)))
+      .catch(err => console.error('[Sweep] post-scrape video sweep failed:', err.message));
   }
 
   _passesFilters(post, filters) {
@@ -1159,7 +1161,9 @@ class InstagramScraper {
 
     // Fire-and-forget: same drain as the main scrape path, so URL-imported videos
     // aren't stranded 'pending' until some unrelated future scrape sweeps them.
-    require('./videos').sweepVideos({ batchLimit: 60 }).catch(err => console.error('[Sweep] post-scrape video sweep failed:', err.message));
+    require('./videos').sweepVideos({ batchLimit: 60 })
+      .then(() => require('./sort-runner').runAutoSort({ pool }).catch(err => console.error('[Sort] post-scrape failed:', err.message)))
+      .catch(err => console.error('[Sweep] post-scrape video sweep failed:', err.message));
 
     return { imported: count, total: cleanUrls.length, scraped: items.length };
   }

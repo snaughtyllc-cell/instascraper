@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useState } from 'react';
-import { getModelCockpit } from '../api';
+import { getBackfillEstimate, getModelCockpit, getSortUsage, getStartFreshPreview, startBackfill, startFresh } from '../api';
 
 const FEEDBACK_LABELS = {
   want_to_make: 'Wants to make',
@@ -71,6 +71,8 @@ export default function AdminCockpitTab() {
           {error}
         </div>
       )}
+
+      <AutoSortCard />
 
       <div className="grid grid-cols-2 gap-3 lg:grid-cols-6">
         {[
@@ -241,5 +243,102 @@ function Metric({ label, value, tone = 'text-white' }) {
       <p className="text-xs uppercase tracking-wide text-gray-600 md:hidden">{label}</p>
       <p className={`text-sm font-semibold ${tone}`}>{typeof value === 'number' ? num(value) : value}</p>
     </div>
+  );
+}
+
+function AutoSortCard() {
+  const [usage, setUsage] = useState(null);
+  const [busy, setBusy] = useState('');
+  const [error, setError] = useState('');
+  const [message, setMessage] = useState('');
+
+  const loadUsage = useCallback(async () => {
+    try {
+      const { data } = await getSortUsage();
+      setUsage(data);
+    } catch (err) {
+      setError(err.response?.data?.error || err.message);
+    }
+  }, []);
+
+  useEffect(() => {
+    loadUsage();
+    const interval = setInterval(loadUsage, 30000);
+    return () => clearInterval(interval);
+  }, [loadUsage]);
+
+  const handleBackfill = async () => {
+    setBusy('backfill');
+    setError('');
+    setMessage('');
+    try {
+      const { data } = await getBackfillEstimate();
+      const count = Number(data.count || 0);
+      if (count === 0) {
+        setMessage('No cached reels are waiting to be sorted.');
+        return;
+      }
+      const cost = Number(data.estUsd || 0).toLocaleString(undefined, { style: 'currency', currency: 'USD', minimumFractionDigits: 2, maximumFractionDigits: 4 });
+      if (!window.confirm(`Sort ${num(count)} existing reels? Estimated cost: ${cost}. The daily cap still applies.`)) return;
+      await startBackfill();
+      setMessage('Sorting started. Progress and spend update here as reels are processed.');
+      await loadUsage();
+    } catch (err) {
+      setError(err.response?.data?.error || err.message);
+    } finally {
+      setBusy('');
+    }
+  };
+
+  const handleStartFresh = async () => {
+    setBusy('fresh');
+    setError('');
+    setMessage('');
+    try {
+      const { data } = await getStartFreshPreview();
+      const count = Number(data.count || 0);
+      if (count === 0) {
+        setMessage('There are no reels to hide.');
+        return;
+      }
+      const confirmation = window.prompt(`Hide all ${num(count)} reels? Tracked creators stay; next scrape refills; undo from Delete Log.\n\nType START FRESH to confirm.`);
+      if (confirmation !== 'START FRESH') return;
+      const result = await startFresh();
+      setMessage(`Hidden ${num(result.data.hidden)} reels. Tracked creators stay; next scrape refills. Undo individual reels from Delete Log.`);
+      await loadUsage();
+    } catch (err) {
+      setError(err.response?.data?.error || err.message);
+    } finally {
+      setBusy('');
+    }
+  };
+
+  return (
+    <section aria-labelledby="auto-sort-title" className="space-y-4 rounded-xl border border-gray-800 bg-gray-900 p-5">
+      <div>
+        <h3 id="auto-sort-title" className="text-lg font-semibold text-white">Auto-sort</h3>
+        <p className="mt-1 text-sm text-gray-400">Cached reels are sorted automatically. Unsure reels wait in Needs a look.</p>
+      </div>
+      <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
+        <div>
+          <p className="text-xs text-gray-500">Reels sorted · 30 days</p>
+          <p className="mt-1 text-xl font-semibold text-white">{usage ? num(usage.reels30d) : '—'}</p>
+        </div>
+        <div>
+          <p className="text-xs text-gray-500">Estimated spend · 30 days</p>
+          <p className="mt-1 text-xl font-semibold text-white">{usage ? Number(usage.usd30d || 0).toLocaleString(undefined, { style: 'currency', currency: 'USD', minimumFractionDigits: 2, maximumFractionDigits: 4 }) : '—'}</p>
+        </div>
+        <div>
+          <p className="text-xs text-gray-500">Attempts · last 24 hours / cap</p>
+          <p className="mt-1 text-xl font-semibold text-white">{usage ? `${num(usage.today)} / ${num(usage.dailyMax)}` : '—'}</p>
+        </div>
+      </div>
+      <div className="flex flex-wrap gap-3">
+        <button onClick={handleBackfill} disabled={Boolean(busy)} className="rounded-lg bg-gold px-4 py-2 text-sm font-semibold text-gray-950 hover:bg-gold-light disabled:opacity-50">{busy === 'backfill' ? 'Preparing...' : 'Sort existing reels'}</button>
+        <button onClick={handleStartFresh} disabled={Boolean(busy)} className="rounded-lg border border-red-500/40 bg-red-500/10 px-4 py-2 text-sm font-semibold text-red-300 hover:bg-red-500/20 disabled:opacity-50">{busy === 'fresh' ? 'Preparing...' : 'Start fresh'}</button>
+      </div>
+      {message && <p role="status" className="text-sm text-emerald-300">{message}</p>}
+      {error && <p role="alert" className="text-sm text-red-300">{error}</p>}
+    </section>
   );
 }

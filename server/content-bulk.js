@@ -1,14 +1,9 @@
 // Pure builder for the bulk content UPDATE. Validates against the same
 // allow-lists the single-item /content routes use, coerces ids to positive
 // integers, and returns a portable `id IN ($2,$3,…)` UPDATE (never ANY()).
-const TAG_VALUES = ['recreate', 'reference', 'skip', null];
-
 function buildBulkUpdate(action, value, ids, validTypeValues = []) {
   let column, param;
-  if (action === 'tag') {
-    if (!TAG_VALUES.includes(value)) return { error: 'Invalid tag' };
-    column = 'tag'; param = value;
-  } else if (action === 'content-type') {
+  if (action === 'content-type') {
     if (![...validTypeValues, null].includes(value)) return { error: 'Invalid content type' };
     column = 'content_type'; param = value;
   } else if (action === 'archive') {
@@ -24,7 +19,8 @@ function buildBulkUpdate(action, value, ids, validTypeValues = []) {
   if (cleanIds.length === 0) return { sql: null, params: [], ids: [] };
 
   const placeholders = cleanIds.map((_, i) => `$${i + 2}`).join(',');
-  const sql = `UPDATE posts SET ${column} = $1 WHERE id IN (${placeholders})`;
+  const manual = action === 'content-type' ? ", sort_status = 'manual'" : '';
+  const sql = `UPDATE posts SET ${column} = $1${manual} WHERE id IN (${placeholders})`;
   return { sql, params: [param, ...cleanIds], ids: cleanIds };
 }
 

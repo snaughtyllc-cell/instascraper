@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useCallback } from 'react';
-import { getTrackedAccounts, addTrackedAccount, updateTrackedAccount, removeTrackedAccount, scrapeNow, getSchedulerStatus, triggerJob, scrapeTrackedBulk } from '../api';
+import { getTrackedAccounts, addTrackedAccount, updateTrackedAccount, removeTrackedAccount, scrapeNow, getSchedulerStatus, triggerJob, scrapeTrackedBulk, getCreators, getContentTypes } from '../api';
 
 function formatCount(n) {
   if (!n) return '0';
@@ -23,6 +23,8 @@ export default function TrackedAccountsTab() {
   const [accounts, setAccounts] = useState([]);
   const [newUsername, setNewUsername] = useState('');
   const [newTags, setNewTags] = useState('');
+  const [creatorMix, setCreatorMix] = useState({});
+  const [typeLabels, setTypeLabels] = useState({});
   const [loading, setLoading] = useState(true);
   const [scheduler, setScheduler] = useState(null);
   const [scraping, setScraping] = useState({});
@@ -30,8 +32,19 @@ export default function TrackedAccountsTab() {
 
   const load = useCallback(async () => {
     try {
-      const { data } = await getTrackedAccounts();
-      setAccounts(data);
+      const [tracked, creators, types] = await Promise.allSettled([getTrackedAccounts(), getCreators(), getContentTypes()]);
+      if (tracked.status === 'rejected') throw tracked.reason;
+      setAccounts(tracked.value.data);
+      if (creators.status === 'fulfilled') {
+        setCreatorMix(Object.fromEntries(creators.value.data.map((creator) => [creator.account_handle.toLowerCase(), creator.mix || []])));
+      } else {
+        console.error('Failed to load creator mix:', creators.reason);
+      }
+      if (types.status === 'fulfilled') {
+        setTypeLabels(Object.fromEntries(types.value.data.map((type) => [type.value, type.label])));
+      } else {
+        console.error('Failed to load type labels:', types.reason);
+      }
     } catch (err) {
       console.error('Failed to load accounts:', err);
     }
@@ -219,6 +232,11 @@ export default function TrackedAccountsTab() {
                       </div>
                     )}
                   </div>
+                  {creatorMix[account.username.toLowerCase()]?.length > 0 && (
+                    <p className="mt-1 text-xs text-gray-300">
+                      {creatorMix[account.username.toLowerCase()].map(({ type, pct }) => `${typeLabels[type] || type} ${pct}%`).join(' · ')}
+                    </p>
+                  )}
                   <div className="text-xs text-gray-500 mt-0.5">
                     {formatCount(account.followers)} followers &middot; {account.post_count || 0} posts &middot; {account.avg_er || 0}% avg ER &middot; Scraped {timeAgo(account.last_scraped_at)}
                   </div>

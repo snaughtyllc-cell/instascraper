@@ -1,3 +1,4 @@
+const { effectiveNicheExpr } = require('./sort-status');
 const Anthropic = require('@anthropic-ai/sdk');
 const pool = require('./db');
 
@@ -120,10 +121,10 @@ class ContentIdeaAgent {
     const primaryLimit = secondaryNiches.length > 0 ? 21 : 30;
     const primaryResult = await pool.query(
       `SELECT p.id, p.shortcode, p.caption, p.view_count, p.like_count, p.comment_count,
-              p.er_percent, p.account_handle, p.post_url, COALESCE(p.content_type, ct.content_type) as niche
+              p.er_percent, p.account_handle, p.post_url, ${effectiveNicheExpr('p')} as niche
        FROM posts p
        LEFT JOIN creator_types ct ON p.account_handle = ct.account_handle
-       WHERE COALESCE(p.content_type, ct.content_type) = $1
+       WHERE ${effectiveNicheExpr('p')} = $1
          AND posted_at >= $2
          AND (soft_deleted = 0 OR soft_deleted IS NULL)
          AND (archived = 0 OR archived IS NULL)
@@ -136,7 +137,7 @@ class ContentIdeaAgent {
     const primaryFreshCount = await pool.query(
       `SELECT COUNT(*) as cnt FROM posts p
        LEFT JOIN creator_types ct ON p.account_handle = ct.account_handle
-       WHERE COALESCE(p.content_type, ct.content_type) = $1
+       WHERE ${effectiveNicheExpr('p')} = $1
          AND posted_at >= $2
          AND (soft_deleted = 0 OR soft_deleted IS NULL)`,
       [primaryNiche, new Date(Date.now() - 14 * 24 * 60 * 60 * 1000).toISOString()]
@@ -150,10 +151,10 @@ class ContentIdeaAgent {
       for (const niche of secondaryNiches) {
         const result = await pool.query(
           `SELECT p.id, p.shortcode, p.caption, p.view_count, p.like_count, p.comment_count,
-                  p.er_percent, p.account_handle, p.post_url, COALESCE(p.content_type, ct.content_type) as niche
+                  p.er_percent, p.account_handle, p.post_url, ${effectiveNicheExpr('p')} as niche
            FROM posts p
            LEFT JOIN creator_types ct ON p.account_handle = ct.account_handle
-           WHERE COALESCE(p.content_type, ct.content_type) = $1
+           WHERE ${effectiveNicheExpr('p')} = $1
              AND posted_at >= $2
              AND (soft_deleted = 0 OR soft_deleted IS NULL)
              AND (archived = 0 OR archived IS NULL)
@@ -167,7 +168,7 @@ class ContentIdeaAgent {
         const freshCount = await pool.query(
           `SELECT COUNT(*) as cnt FROM posts p
            LEFT JOIN creator_types ct ON p.account_handle = ct.account_handle
-           WHERE COALESCE(p.content_type, ct.content_type) = $1
+           WHERE ${effectiveNicheExpr('p')} = $1
              AND posted_at >= $2
              AND (soft_deleted = 0 OR soft_deleted IS NULL)`,
           [niche, new Date(Date.now() - 14 * 24 * 60 * 60 * 1000).toISOString()]

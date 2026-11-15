@@ -1,12 +1,6 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
-import { tagPost, saveNotes, archivePost, setCreatorType, setPostContentType } from '../api';
+import { saveNotes, archivePost, setPostContentType } from '../api';
 import API_URL from '../api-base';
-
-const TAG_OPTIONS = [
-  { value: 'recreate', label: 'Recreate', icon: '\u2705', color: 'bg-green-600' },
-  { value: 'reference', label: 'Reference', icon: '\uD83D\uDCCC', color: 'bg-blue-600' },
-  { value: 'skip', label: 'Skip', icon: '\u274C', color: 'bg-red-600' },
-];
 
 function formatCount(n) {
   if (!n) return '0';
@@ -46,7 +40,6 @@ const BADGE_POSITIONS = {
 
 export default function ContentCard({
   post,
-  creatorTypes = {},
   contentTypes = [],
   onAddContentType,
   onUpdate,
@@ -79,18 +72,13 @@ export default function ContentCard({
   // requireAuth (not requireAdmin), so model sessions can fetch it.
   const thumbnailSrc = cardId ? `${API_URL}/thumb/${cardId}` : post.thumbnail_url;
   const videoSrc = cardId ? `${API_URL}/video/${cardId}` : post.video_url;
+  const hasVideo = post.video_cache_status === 'cached' || !!post.video_url;
 
   // If the video URL fails to load (Instagram's signed URLs expire within
   // hours/days of a scrape), fall back to the cached thumbnail instead of a
   // gray screen. Reset the flag when the URL changes so a re-scraped/refreshed
   // URL gets another attempt.
-  useEffect(() => { setVideoFailed(false); }, [post.video_url]);
-
-  const handleTag = async (tag) => {
-    const newTag = post.tag === tag ? null : tag;
-    await tagPost(post.id, newTag);
-    onUpdate();
-  };
+  useEffect(() => { setVideoFailed(false); }, [post.video_url, post.video_cache_status]);
 
   const handleNotesChange = useCallback((e) => {
     const val = e.target.value;
@@ -112,11 +100,6 @@ export default function ContentCard({
     await apply(val || null);
   };
 
-  const handleCreatorType = (e) => maybeAdd(e.target.value, (v) =>
-    setCreatorType(post.account_handle, v).then(onUpdate).catch((err) => {
-      window.alert('Could not set creator type: ' + (err.response?.data?.error || err.message));
-      onUpdate();
-    }));
   const handlePostType = (e) => maybeAdd(e.target.value, (v) =>
     setPostContentType(post.id, v).then(onUpdate).catch((err) => {
       window.alert('Could not set video type: ' + (err.response?.data?.error || err.message));
@@ -127,8 +110,6 @@ export default function ContentCard({
     await archivePost(post.id, !post.archived);
     onUpdate();
   };
-
-  const tagBadge = TAG_OPTIONS.find((t) => t.value === post.tag);
 
   const cardRef = useRef(null);
   useEffect(() => {
@@ -169,7 +150,7 @@ export default function ContentCard({
             </svg>
           </button>
         )}
-        {(showVideo || (autoplayInView && isActive)) && post.video_url && !videoFailed ? (
+        {(showVideo || (autoplayInView && isActive)) && hasVideo && !videoFailed ? (
           <>
             <video
               src={videoSrc}
@@ -205,9 +186,10 @@ export default function ContentCard({
                 }
               }}
             />
-            {!autoplayInView && post.video_url && (
+            {!autoplayInView && hasVideo && (
               <button
                 onClick={() => setShowVideo(true)}
+                aria-label={`Play reel by @${post.account_handle}`}
                 className="absolute inset-0 flex items-center justify-center bg-black/30 opacity-0 group-hover:opacity-100 transition-opacity"
               >
                 <div className="w-14 h-14 rounded-full bg-white/90 flex items-center justify-center">
@@ -220,15 +202,14 @@ export default function ContentCard({
           </>
         )}
 
-        {/* Tag badge */}
-        {tagBadge && (
-          <div className={`absolute top-2 right-2 ${tagBadge.color} px-2 py-0.5 rounded-full text-xs font-medium text-white`}>
-            {tagBadge.icon} {tagBadge.label}
+        {isLibrary && (
+          <div className="absolute top-2 right-2 rounded-full bg-black/80 px-2 py-1 text-xs text-gray-200 opacity-0 transition-opacity group-hover:opacity-100 group-focus-within:opacity-100 pointer-events-none">
+            {post.sort_status || 'unsorted'}
+            {post.ai_confidence != null && ` · ${Math.round(Number(post.ai_confidence) * 100)}% AI`}
           </div>
         )}
 
-        {/* ER badge — bottom-left so it never collides with the select checkbox
-            (top-left) or the tag badge (top-right) */}
+        {/* ER badge */}
         {post.er_label && (
           <div className={`absolute bottom-2 left-2 z-10 ${ER_COLORS[post.er_label] || ER_COLORS.Low} px-2 py-0.5 rounded-full text-xs font-bold`}>
             {post.er_percent}% ER
@@ -318,52 +299,20 @@ export default function ContentCard({
 
         {isLibrary && (
           <>
-            {/* Tags */}
+            {/* Per-reel content type */}
             <div className="flex gap-1.5">
-              {TAG_OPTIONS.map((opt) => (
-                <button
-                  key={opt.value}
-                  onClick={() => handleTag(opt.value)}
-                  className={`flex-1 px-2 py-1.5 rounded-lg text-xs font-medium transition-all border ${
-                    post.tag === opt.value
-                      ? `${opt.color} border-transparent text-white`
-                      : 'bg-gray-800 border-gray-700 text-gray-400 hover:text-white hover:border-gray-600'
-                  }`}
-                >
-                  {opt.icon} {opt.label}
-                </button>
-              ))}
-            </div>
-
-            {/* Content Type Selectors */}
-            <div className="flex gap-1.5">
-              <select
-                value={creatorTypes[post.account_handle] || ''}
-                onChange={handleCreatorType}
-                title="Creator default type"
-                className={`flex-1 px-2 py-1.5 rounded-lg text-xs border transition-all ${
-                  creatorTypes[post.account_handle]
-                    ? 'bg-purple-600/20 border-purple-600/40 text-purple-300'
-                    : 'bg-gray-800 border-gray-700 text-gray-500'
-                }`}
-              >
-                <option value="">Creator...</option>
-                {contentTypes.map((ct) => (
-                  <option key={ct.value} value={ct.value}>{ct.label}</option>
-                ))}
-                <option value="__add__">＋ Add new type…</option>
-              </select>
               <select
                 value={post.content_type || ''}
                 onChange={handlePostType}
-                title="Override type for this video only"
+                aria-label="Reel content type"
+                title="Content type for this reel"
                 className={`flex-1 px-2 py-1.5 rounded-lg text-xs border transition-all ${
                   post.content_type
                     ? 'bg-orange-600/20 border-orange-600/40 text-orange-300'
                     : 'bg-gray-800 border-gray-700 text-gray-500'
                 }`}
               >
-                <option value="">Video...</option>
+                <option value="">No type (hidden)</option>
                 {contentTypes.map((ct) => (
                   <option key={ct.value} value={ct.value}>{ct.label}</option>
                 ))}

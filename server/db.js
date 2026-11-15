@@ -1,4 +1,5 @@
 const path = require('path');
+const { ensureSortStatus, SORT_COLUMNS } = require('./sort-migration');
 
 const USE_PG = !!process.env.DATABASE_URL;
 
@@ -33,6 +34,7 @@ const SQLITE_MIGRATIONS = [
   `ALTER TABLE models ADD COLUMN character_context TEXT`,
   `ALTER TABLE models ADD COLUMN persona_statement TEXT`,
   `ALTER TABLE models ADD COLUMN comfort_ceiling TEXT`,
+  ...SORT_COLUMNS.map(({ name, type }) => `ALTER TABLE posts ADD COLUMN ${name} ${type}`),
 ];
 
 // ─── Unified DB interface: .query(sql, params) → { rows } ──────
@@ -67,7 +69,7 @@ if (USE_PG) {
 } else {
   // SQLite (local dev)
   const Database = require('better-sqlite3');
-  const sqlite = new Database(path.join(__dirname, 'instascraper.db'));
+  const sqlite = new Database(process.env.SQLITE_PATH || path.join(__dirname, 'instascraper.db'));
   sqlite.pragma('journal_mode = WAL');
   sqlite.pragma('foreign_keys = ON');
 
@@ -92,7 +94,7 @@ if (USE_PG) {
       convertedSql = convertedSql.replace(/COUNT\(\*\)\s*FILTER\s*\(WHERE\s+([^)]+)\)/gi, "SUM(CASE WHEN $1 THEN 1 ELSE 0 END)");
 
       const trimmed = convertedSql.trim();
-      const isSelect = /^SELECT/i.test(trimmed);
+      const isSelect = /^(SELECT|PRAGMA)\b/i.test(trimmed);
       const isInsert = /^INSERT/i.test(trimmed);
       const isCreate = /^CREATE/i.test(trimmed);
 
@@ -436,6 +438,7 @@ async function initDB() {
       `ALTER TABLE models ADD COLUMN IF NOT EXISTS character_context TEXT`,
       `ALTER TABLE models ADD COLUMN IF NOT EXISTS persona_statement TEXT`,
       `ALTER TABLE models ADD COLUMN IF NOT EXISTS comfort_ceiling TEXT`,
+      ...SORT_COLUMNS.map(({ name, type }) => `ALTER TABLE posts ADD COLUMN IF NOT EXISTS ${name} ${type}`),
     ];
     for (const sql of migrations) {
       try { await db.query(sql); } catch (e) { /* ignore */ }
@@ -445,6 +448,8 @@ async function initDB() {
       try { await db.query(sql); } catch (e) { /* column already exists */ }
     }
   }
+
+  await ensureSortStatus(db, { isPg: USE_PG });
 
   // [R1-#6] AFTER the migration loops (email now exists). Case-insensitive unique for
   // non-empty emails; partial + expression index works on Postgres AND SQLite.

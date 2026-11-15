@@ -12,6 +12,7 @@ function makeDb() {
   const s = new Database(':memory:');
   s.exec(`CREATE TABLE posts (
     id INTEGER PRIMARY KEY, shortcode TEXT, content_type TEXT, account_handle TEXT, posted_at TEXT,
+    sort_status TEXT DEFAULT 'auto',
     view_count INTEGER, caption TEXT, post_url TEXT, video_cache_status TEXT,
     soft_deleted INTEGER DEFAULT 0, archived INTEGER DEFAULT 0,
     audio_id TEXT, audio_title TEXT, audio_author TEXT, is_original_audio INTEGER)`);
@@ -116,4 +117,35 @@ test('trendingAudio niche-scoped: aggregation AND example reels stay within the 
   assert.strictEqual(out.length, 1);
   assert.strictEqual(out[0].reel_count, 2, 'dance reel excluded from the count');
   assert.deepStrictEqual(out[0].exampleReels.map(r => r.id).sort(), [1, 2], 'the high-view dance reel is NOT an example');
+});
+
+function seedUnsortedAudio(db) {
+  db.sqlite.prepare(`INSERT INTO posts (id, shortcode, account_handle, posted_at, view_count, audio_id, content_type, sort_status, video_cache_status) VALUES
+    (1,'sorted1','a','${daysAgo(1)}',100,'A','talking','auto','cached'),
+    (2,'sorted2','b','${daysAgo(1)}',200,'A','talking','manual','cached'),
+    (3,'unsorted','c','${daysAgo(1)}',9999,'A','talking','unsorted','cached')`).run();
+  db.sqlite.prepare("INSERT INTO creator_types VALUES ('c', 'talking')").run();
+}
+
+test('buildTrendingAudioQuery excludes an unsorted reel audio', () => {
+  const db = makeDb();
+  seedUnsortedAudio(db);
+  const { sql, params } = buildTrendingAudioQuery(['talking'], { cutoffIso: daysAgo(30), minReels: 2 });
+  const rows = db.query(sql, params).rows;
+  assert.strictEqual(rows[0].reel_count, 2);
+  assert.strictEqual(rows[0].total_views, 300);
+});
+
+test('buildAudioReelsQuery excludes an unsorted reel audio', () => {
+  const db = makeDb();
+  seedUnsortedAudio(db);
+  const { sql, params } = buildAudioReelsQuery('A', ['talking']);
+  assert.deepStrictEqual(db.query(sql, params).rows.map((row) => row.id), [2, 1]);
+});
+
+test('trendingAudio example query excludes an unsorted reel audio', async () => {
+  const db = makeDb();
+  seedUnsortedAudio(db);
+  const rows = await trendingAudio(db, { niches: ['talking'], nowMs: NOW, examples: 3 });
+  assert.deepStrictEqual(rows[0].exampleReels.map((row) => row.id), [2, 1]);
 });
