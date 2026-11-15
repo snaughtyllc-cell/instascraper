@@ -9,6 +9,7 @@ const { ensureFilmTables } = require('./film-migration');
 const { sortConfig } = require('./sort-status');
 const { attemptsToday, sortUsage } = require('./sort-runner');
 const { createReactAnalysisWorker, analysisFile } = require('./react-analysis');
+const { markDanceReference } = require('./react-reference');
 const { analyzeFrames, mergeLayout, parseSilences, snapCreatorCues, muteCreator } = require('./react-analysis-media');
 
 function frame(seam = null) {
@@ -151,6 +152,29 @@ test('startup analyses older pins, recovers queued work, fails interrupted runni
   assert.equal((await worker.getResult('queued')).state, 'ready');
   assert.deepEqual(await worker.getResult('running'), { state: 'failed', analysis: null });
   assert.equal(s.pool.sqlite.prepare("SELECT error FROM film_react_analysis WHERE shortcode='running'").get().error, 'worker_restarted');
+});
+
+test('startup and later discovery skip dance-only pins while explicit React still analyzes them', async t => {
+  const s = await setup(t);
+  markDanceReference('dance_pin', s.deps.env);
+  const original = await s.original('dance_pin');
+  await s.pool.query("INSERT INTO film_react_refs(shortcode,state,duration_sec) VALUES($1,$2,$3)",
+    ['dance_pin', 'ready', 3]);
+  const worker = createReactAnalysisWorker(s.deps);
+  await worker.start();
+  await worker.waitForIdle();
+  assert.equal(s.calls(), 0, 'dance-only discovery makes no Gemini call');
+  assert.equal(s.pool.sqlite.prepare('SELECT COUNT(*) AS n FROM film_react_analysis').get().n, 0);
+  const restarted = createReactAnalysisWorker(s.deps);
+  await restarted.request('other_pin', await s.original('other_pin'));
+  await restarted.waitForIdle();
+  assert.equal(s.calls(), 1);
+  assert.equal(s.pool.sqlite.prepare("SELECT COUNT(*) AS n FROM film_react_analysis WHERE shortcode='dance_pin'").get().n, 0,
+    'a later React request does not incidentally discover a dance-only original');
+  await restarted.request('dance_pin', original);
+  await restarted.waitForIdle();
+  assert.equal(s.calls(), 2);
+  assert.equal((await restarted.getResult('dance_pin')).state, 'ready');
 });
 
 test('starting another worker does not steal an active analysis', async t => {

@@ -10,7 +10,8 @@ const { modelCanAccessPost } = require('./model-access');
 const modelTaste = require('./model-taste');
 const modelReactions = require('./model-reactions');
 const thumbnails = require('./thumbnails');
-const { isValidShortcode, ensureReactReference, getPinnedReferencePath, availableReferencePath, usableFile } = require('./react-reference');
+const { isValidShortcode, ensureReactReference, getPinnedReferencePath, markDanceReference,
+  availableReferencePath, usableFile } = require('./react-reference');
 const { createReactRenderWorker, validateRenderRequest } = require('./react-render');
 const { createReactFetchWorker } = require('./react-fetch');
 const { createReactAnalysisWorker } = require('./react-analysis');
@@ -201,9 +202,12 @@ function registerFilmApi(app, { pool,
     if (req.body.fetch !== undefined && typeof req.body.fetch !== 'boolean') {
       return res.status(400).json({ error: 'invalid_fetch' });
     }
+    const mode = req.body.mode === undefined ? 'react' : req.body.mode;
+    if (!['react', 'dance'].includes(mode)) return res.status(400).json({ error: 'invalid_mode' });
     const secret = process.env.FILM_MEDIA_SECRET;
     if (!secret) return res.status(503).json({ error: 'media_unavailable' });
     const shortcode = req.body.shortcode;
+    if (mode === 'dance') markDanceReference(shortcode);
     const reference = await ensureReactReference(pool, shortcode);
     let durationSec = reference?.durationSec;
     if (!reference) {
@@ -212,19 +216,21 @@ function registerFilmApi(app, { pool,
         if (existing.rows[0]?.state === 'fetching') return res.status(202).json({ state: 'fetching' });
         return res.status(404).json({ error: 'reel_not_available' });
       }
-      const result = await reactFetchWorker.request(shortcode);
+      const result = await reactFetchWorker.request(shortcode, { analyze: mode === 'react' });
       if (result.state === 'fetching') return res.status(202).json({ state: 'fetching' });
       if (result.state !== 'ready') return res.status(404).json({ error: 'reel_not_available' });
       durationSec = result.durationSec;
     }
     let analysis = null;
-    try {
-      const result = await reactAnalysisWorker.request(shortcode, reference || {
-        path: getPinnedReferencePath(shortcode), durationSec,
-      });
-      if (result.state === 'fetching') return res.status(202).json({ state: 'fetching' });
-      if (result.state === 'ready' && usableFile(result.path)) analysis = result.analysis;
-    } catch { console.error('[React analysis] reference_fallback'); }
+    if (mode === 'react') {
+      try {
+        const result = await reactAnalysisWorker.request(shortcode, reference || {
+          path: getPinnedReferencePath(shortcode), durationSec,
+        });
+        if (result.state === 'fetching') return res.status(202).json({ state: 'fetching' });
+        if (result.state === 'ready' && usableFile(result.path)) analysis = result.analysis;
+      } catch { console.error('[React analysis] reference_fallback'); }
+    }
     const base = new URL(process.env.PUBLIC_BASE_URL || `${req.protocol}://${req.get('host')}`);
     if (!['http:', 'https:'].includes(base.protocol)) throw new Error('Invalid PUBLIC_BASE_URL');
     const exp = Math.floor(Date.now() / 1000) + MEDIA_TTL_SECONDS;
@@ -235,7 +241,8 @@ function registerFilmApi(app, { pool,
     originalUrl.searchParams.set('variant', 'original');
     originalUrl.searchParams.set('exp', String(exp));
     originalUrl.searchParams.set('sig', reactMediaSignature(shortcode, exp, secret, 'original'));
-    return res.json({ videoUrl: url.href, originalVideoUrl: originalUrl.href, durationSec: durationSec ?? null, analysis });
+    return res.json({ videoUrl: mode === 'dance' ? originalUrl.href : url.href,
+      originalVideoUrl: originalUrl.href, durationSec: durationSec ?? null, analysis });
   }));
 
   router.post('/react-prefetch', asyncHandler(async (req, res) => {

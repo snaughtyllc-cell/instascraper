@@ -26,6 +26,21 @@ function getPinnedReferencePath(shortcode, env = process.env) {
   return file && usableFile(file) ? file : null;
 }
 
+function markDanceReference(shortcode, env = process.env) {
+  const file = referenceFile(shortcode, env);
+  if (!file) return;
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  // Keep dance-only pins out of automatic analysis discovery across restarts.
+  // Explicit React requests can still claim analysis for the same original.
+  try { fs.writeFileSync(`${file}.dance`, '', { flag: 'wx' }); }
+  catch (error) { if (error.code !== 'EEXIST') throw error; }
+}
+
+function isDanceReference(shortcode, env = process.env) {
+  const file = referenceFile(shortcode, env);
+  return !!file && fs.existsSync(`${file}.dance`);
+}
+
 function availableReferencePath(post) {
   if (!post) return null;
   // Existing signed feed media uses the numeric post ID, even for legacy rows
@@ -100,4 +115,5 @@ async function ensureReactReference(pool, shortcode, deps = {}) {
   return reference || fetchedReference(pool, shortcode, deps);
 }
 
-module.exports = { isValidShortcode, referenceFile, usableFile, getPinnedReferencePath, availableReferencePath, ensureReactReference };
+module.exports = { isValidShortcode, referenceFile, usableFile, getPinnedReferencePath, markDanceReference,
+  isDanceReference, availableReferencePath, ensureReactReference };

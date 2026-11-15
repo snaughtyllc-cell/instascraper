@@ -46,28 +46,32 @@ function buildFfmpegArgs(opts) {
     crop, syncMs, output, referenceAudio } = opts;
   if (!Number.isFinite(rawDuration) || rawDuration <= 0 ||
       !Number.isInteger(syncMs) || syncMs < -7000 || syncMs > 32000 ||
-      !['stitched', 'solo'].includes(output) ||
+      !['stitched', 'solo', 'dance'].includes(output) ||
+      (output === 'dance' && referenceAudio !== true) ||
       !crop || !Number.isFinite(crop.top) || !Number.isFinite(crop.height) ||
       crop.top < 0 || crop.height < 0.2 || crop.top + crop.height > 1 ||
       typeof rawPath !== 'string' || typeof outputPath !== 'string' ||
-      (output === 'stitched' && typeof referencePath !== 'string')) {
+      (output !== 'solo' && typeof referencePath !== 'string')) {
     throw new Error('invalid_render_options');
   }
   const threads = String(resolveFfmpegThreads(opts.threads));
-  const selection = splitSelection(opts.analysis, resolveFreezeMargin(opts.freezeMarginSec));
+  const selection = output === 'stitched'
+    ? splitSelection(opts.analysis, resolveFreezeMargin(opts.freezeMarginSec)) : null;
 
   const args = ['-hide_banner', '-loglevel', 'error', '-nostdin', '-y',
     '-protocol_whitelist', 'file,pipe', '-i', rawPath];
   const graph = [];
-  if (output === 'solo') {
-    graph.push('[0:v]setpts=PTS-STARTPTS,scale=1080:1920:force_original_aspect_ratio=increase,' +
-      'crop=1080:1920,setsar=1,fps=30[v]');
-  } else {
-    if (syncMs > 0) args.push('-itsoffset', String(syncMs / 1000));
+  if (output !== 'solo') {
+    if (output === 'stitched' && syncMs > 0) args.push('-itsoffset', String(syncMs / 1000));
     // Freeze on the original reference timeline before seeking. An input seek
     // could discard the split frame needed by a full segment at the seek point.
     if (syncMs < 0 && !selection) args.push('-ss', String(-syncMs / 1000));
     args.push('-protocol_whitelist', 'file,pipe', '-i', referencePath);
+  }
+  if (output === 'solo' || output === 'dance') {
+    graph.push('[0:v]setpts=PTS-STARTPTS,scale=1080:1920:force_original_aspect_ratio=increase,' +
+      'crop=1080:1920,setsar=1,fps=30[v]');
+  } else {
     graph.push('[0:v]setpts=PTS-STARTPTS,scale=1080:960:force_original_aspect_ratio=increase,' +
       'crop=1080:960,setsar=1,fps=30[bot]');
     // Normalize the reference before adding cloned frames: keeping the input
@@ -86,26 +90,30 @@ function buildFfmpegArgs(opts) {
     graph.push('[top][bot]vstack=inputs=2[v]');
   }
 
-  if (rawHasAudio) {
+  const useRawAudio = output !== 'dance' && rawHasAudio;
+  if (useRawAudio) {
     graph.push('[0:a]asetpts=PTS-STARTPTS,highpass=f=80,dynaudnorm=f=150:g=11:p=0.9:m=20,' +
       'loudnorm=I=-16:TP=-1.5:LRA=11:linear=true,aresample=48000,aformat=channel_layouts=stereo,asetpts=N/SR/TB,' +
       `apad,atrim=duration=${rawDuration}[mic]`);
   }
-  const useReferenceAudio = output === 'stitched' && referenceAudio && referenceHasAudio;
+  const useReferenceAudio = output !== 'solo' && referenceAudio && referenceHasAudio;
   if (useReferenceAudio) {
     const delay = syncMs > 0 ? `,adelay=${syncMs}:all=1` : '';
     const seek = selection && syncMs < 0 ? `,atrim=start=${-syncMs / 1000},asetpts=PTS-STARTPTS` : '';
-    graph.push(`[1:a]asetpts=PTS-STARTPTS${seek},loudnorm=I=-22:TP=-2,` +
+    const normalization = output === 'dance' ? 'I=-14:TP=-1.5:LRA=11:linear=true' : 'I=-22:TP=-2';
+    graph.push(`[1:a]asetpts=PTS-STARTPTS${seek},loudnorm=${normalization},` +
       `aresample=48000,aformat=channel_layouts=stereo${delay},asetpts=N/SR/TB,apad,` +
       `atrim=duration=${rawDuration}[refaudio]`);
   }
-  if (rawHasAudio && useReferenceAudio) {
+  if (useRawAudio && useReferenceAudio) {
     graph.push('[mic]asplit=2[micmix][sidechain]');
     graph.push('[refaudio][sidechain]sidechaincompress=threshold=0.03:ratio=6:attack=5:release=350[ducked]');
     graph.push('[micmix][ducked]amix=inputs=2:duration=first:normalize=0,' +
       'alimiter=limit=0.89:level=0:latency=1[a]');
-  } else if (rawHasAudio || useReferenceAudio) {
-    graph.push(`[${rawHasAudio ? 'mic' : 'refaudio'}]alimiter=limit=0.89:level=0:latency=1[a]`);
+  } else if (output === 'dance' && useReferenceAudio) {
+    graph.push('[refaudio]anull[a]');
+  } else if (useRawAudio || useReferenceAudio) {
+    graph.push(`[${useRawAudio ? 'mic' : 'refaudio'}]alimiter=limit=0.89:level=0:latency=1[a]`);
   } else {
     graph.push(`anullsrc=r=48000:cl=stereo,atrim=duration=${rawDuration}[a]`);
   }

@@ -85,6 +85,56 @@ test('queue is durable, case-insensitively idempotent and removes all temporary 
   assert.deepEqual(fs.readdirSync(f.dir), []);
 });
 
+test('dance render contract requires reference audio and accepts every valid crop', () => {
+  for (const crop of [{ top: 0, height: 0.5 }, { top: 0, height: 1 }, { top: 0.8, height: 0.2 }]) {
+    assert.equal(validateRenderRequest(request({ output: 'dance', crop }), env), null);
+  }
+  for (const referenceAudio of [false, undefined, null, 'true']) {
+    assert.equal(validateRenderRequest(request({ output: 'dance', referenceAudio }), env), 'invalid_reference_audio');
+  }
+  assert.equal(validateRenderRequest(request({ output: 'dance', crop: { top: 0.9, height: 0.2 } }), env), 'invalid_crop');
+});
+
+test('dance renders keep the original Instagram reference without analysis or raw audio', async t => {
+  const { db, pool } = await database(t), f = fixture(t);
+  let analysisCalls = 0;
+  const worker = createReactRenderWorker({ pool, ...f.dependencies,
+    env: { ...env, REACT_REF_DIR: f.dir },
+    ensureReference: async () => {
+      assert.ok(fs.existsSync(path.join(f.dir, 'dance_ref.mp4.dance')));
+      return { path: '/original.mp4' };
+    },
+    lookupAnalysis: async () => { analysisCalls++; return { state: 'fetching' }; },
+    probe: async file => ({ durationSec: 3, hasAudio: file === '/original.mp4' }) });
+  await worker.enqueue(request({ output: 'dance', reference: { kind: 'instagram', shortcode: 'dance_ref' },
+    analysis: { layout: [{ start: 0, end: 3, kind: 'full' }], creatorMuted: true } }));
+  await worker.waitForIdle();
+  assert.equal(analysisCalls, 0, 'dance must not request analysis');
+  assert.equal(f.renders.length, 1);
+  assert.equal(f.renders[0].output, 'dance');
+  assert.equal(f.renders[0].referencePath, '/original.mp4');
+  assert.equal(f.renders[0].analysis, null);
+  assert.equal(f.renders[0].rawHasAudio, false);
+  assert.equal(f.renders[0].referenceHasAudio, true);
+  assert.deepEqual(f.callbacks, [{ jobId: request().jobId, state: 'done', driveFileId: 'drive-file-id' }]);
+  assert.equal(db.prepare('SELECT state FROM film_react_jobs').get().state, 'done');
+  assert.equal(db.prepare('SELECT COUNT(*) AS n FROM film_react_analysis').get().n, 0);
+  assert.deepEqual(fs.readdirSync(f.dir), ['dance_ref.mp4.dance']);
+});
+
+test('dance rejects reference seeks at or beyond EOF before rendering or upload', async t => {
+  for (const syncMs of [-3000, -7000]) {
+    const { pool } = await database(t), f = fixture(t);
+    const worker = createReactRenderWorker({ pool, ...f.dependencies,
+      upload: async () => assert.fail('invalid reference seek must not upload') });
+    await worker.enqueue(request({ output: 'dance', syncMs }));
+    await worker.waitForIdle();
+    assert.equal(f.renders.length, 0);
+    assert.deepEqual(f.callbacks, [{ jobId: request().jobId, state: 'failed', error: 'reference_seek_out_of_range' }]);
+    assert.deepEqual(fs.readdirSync(f.dir), []);
+  }
+});
+
 test('Instagram renders resolve ready fetched references without adding posts', async t => {
   const { db, pool } = await database(t), f = fixture(t);
   db.exec('CREATE TABLE posts (id INTEGER PRIMARY KEY, shortcode TEXT, video_url TEXT)');

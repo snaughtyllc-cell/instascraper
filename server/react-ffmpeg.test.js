@@ -91,7 +91,7 @@ test('freeze margin defaults on invalid values and clamps finite values to zero 
 });
 
 test('ffmpeg thread caps default to two in the filter and output option sections', () => {
-  for (const output of ['stitched', 'solo']) {
+  for (const output of ['stitched', 'solo', 'dance']) {
     const opts = options({ output });
     const args = buildFfmpegArgs(opts);
     const graphIndex = args.indexOf('-filter_complex');
@@ -156,6 +156,43 @@ test('solo ffmpeg graph contains only her portrait video and microphone', () => 
   assert.doesNotMatch(filter(args), /afftdn|sidechaincompress/);
   assert.doesNotMatch(filter(args), /\[1:|vstack|amix/);
   assert.equal(args.filter(arg => arg === '-i').length, 1);
+});
+
+test('dance uses full-frame raw video and only normalized reference audio even with a raw microphone', () => {
+  for (const rawHasAudio of [false, true]) {
+    const args = buildFfmpegArgs(options({ output: 'dance', rawHasAudio, syncMs: 1234,
+      crop: { top: 0.7, height: 0.3 } }));
+    const graph = filter(args);
+    assert.match(graph, /\[0:v\]setpts=PTS-STARTPTS,scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,setsar=1,fps=30\[v\]/);
+    assert.match(graph, /\[1:a\]asetpts=PTS-STARTPTS,loudnorm=I=-14:TP=-1.5:LRA=11:linear=true,aresample=48000,aformat=channel_layouts=stereo,adelay=1234:all=1,asetpts=N\/SR\/TB,apad,atrim=duration=3\[refaudio\]/);
+    assert.match(graph, /\[refaudio\]anull\[a\]/);
+    assert.doesNotMatch(graph, /\[0:a\]|\[1:v\]|hflip|vstack|amix|sidechaincompress|crop=iw/);
+    assert.equal(args.filter(arg => arg === '-i').length, 2);
+    assert.equal(args[args.indexOf('-t') + 1], '3');
+    for (const [flag, value] of [['-c:a', 'aac'], ['-b:a', '192k'], ['-ar', '48000'], ['-ac', '2']]) {
+      assert.equal(args[args.indexOf(flag) + 1], value);
+    }
+  }
+});
+
+test('dance seeks negative sync on its reference input and ignores reference video analysis', () => {
+  const args = buildFfmpegArgs(options({ output: 'dance', rawHasAudio: false, syncMs: -2500,
+    analysis: { layout: [{ start: 0, end: 1, kind: 'split' }, { start: 1, end: 3, kind: 'full' }] } }));
+  assert.deepEqual(args.slice(args.indexOf('-ss'), args.indexOf('-ss') + 2), ['-ss', '2.5']);
+  assert.ok(args.indexOf('-ss') > args.indexOf('/tmp/raw.mp4'));
+  assert.ok(args.indexOf('-ss') < args.indexOf('/tmp/reference.mp4'));
+  assert.doesNotMatch(filter(args), /adelay|atrim=start|select=|\[0:a\]|\[1:v\]/);
+  assert.ok(!args.includes('-itsoffset'));
+});
+
+test('dance requires enabled reference audio and a reference path, and never falls back to raw microphone', () => {
+  for (const overrides of [{ referenceAudio: false }, { referenceAudio: undefined }, { referenceAudio: 1 },
+    { referencePath: undefined }]) {
+    assert.throws(() => buildFfmpegArgs(options({ output: 'dance', ...overrides })), /invalid_render_options/);
+  }
+  const graph = filter(buildFfmpegArgs(options({ output: 'dance', rawHasAudio: true, referenceHasAudio: false })));
+  assert.match(graph, /anullsrc=r=48000:cl=stereo,atrim=duration=3\[a\]/);
+  assert.doesNotMatch(graph, /\[0:a\]|\[1:a\]/);
 });
 
 test('audio graphs handle disabled reference audio, missing input audio and silence', () => {
@@ -505,6 +542,94 @@ test('real ffmpeg renders 3s raw and 4s reference to portrait H264/AAC with posi
         assert.equal(rendered.height, 1920);
         assert.equal(rendered.hasAudio, true);
         assert.ok(Math.abs(rendered.durationSec - 0.5) < 0.15);
+      }
+    } finally {
+      await fs.rm(directory, { recursive: true, force: true });
+    }
+  });
+
+test('real ffmpeg dance renders silent raw with synced original audio, pads to the take, and ignores any raw mic',
+  { skip: !ffmpegAvailable, timeout: 120000 }, async () => {
+    const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'dance-ffmpeg-test-'));
+    const rawPath = path.join(directory, 'raw-no-audio.mp4');
+    const micRawPath = path.join(directory, 'raw-with-mic.mp4');
+    const referencePath = path.join(directory, 'reference.mp4');
+    const outputPath = path.join(directory, 'output.mp4');
+    function run(args) {
+      const result = spawnSync('ffmpeg', ['-hide_banner', '-loglevel', 'error', '-nostdin', '-y', ...args],
+        { timeout: 30000, maxBuffer: 4 * 1024 * 1024 });
+      assert.equal(result.status, 0, result.stderr.toString());
+      return result.stdout;
+    }
+    function windowSamples(buffer, at) {
+      const start = Math.round(at * 48000), length = 4800;
+      assert.ok(buffer.length >= (start + length) * 4, 'decoded audio must cover the requested window');
+      return Array.from({ length }, (_, index) => buffer.readFloatLE((start + index) * 4));
+    }
+    function energy(samples) {
+      return Math.sqrt(samples.reduce((sum, sample) => sum + sample * sample, 0) / samples.length);
+    }
+    function amplitude(samples, frequency) {
+      let real = 0, imaginary = 0;
+      samples.forEach((sample, index) => {
+        real += sample * Math.cos(2 * Math.PI * frequency * index / 48000);
+        imaginary += sample * Math.sin(2 * Math.PI * frequency * index / 48000);
+      });
+      return Math.hypot(real, imaginary) * 2 / samples.length;
+    }
+    try {
+      run(['-f', 'lavfi', '-i', 'color=c=blue:s=128x192:r=30:d=2', '-vf',
+        'drawbox=x=0:y=0:w=iw/2:h=ih:c=red:t=fill', '-an', '-c:v', 'libx264',
+        '-preset', 'ultrafast', '-threads', '2', '-pix_fmt', 'yuv420p', rawPath]);
+      assert.equal((await probeVideo(rawPath)).hasAudio, false);
+      run(['-i', rawPath, '-f', 'lavfi', '-i', 'sine=frequency=2500:sample_rate=48000:duration=2',
+        '-map', '0:v', '-map', '1:a', '-c:v', 'copy', '-c:a', 'aac', micRawPath]);
+      assert.equal((await probeVideo(micRawPath)).hasAudio, true);
+      run(['-f', 'lavfi', '-i', 'color=c=green:s=128x192:r=30:d=1.3', '-f', 'lavfi', '-i',
+        'aevalsrc=0.08*sin(2*PI*440*t)*lt(t\\,0.5)+0.08*sin(2*PI*1100*t)*gte(t\\,0.5):s=48000:d=1.3',
+        '-c:v', 'libx264', '-preset', 'ultrafast', '-threads', '2', '-pix_fmt', 'yuv420p', '-c:a', 'aac', referencePath]);
+      for (const [input, rawHasAudio, syncMs] of [[rawPath, false, 500], [micRawPath, true, -500]]) {
+        await renderVideo(options({ output: 'dance', rawPath: input, rawHasAudio, referencePath,
+          outputPath, rawDuration: 2, syncMs }), { timeoutMs: 60000 });
+        const probed = spawnSync('ffprobe', ['-v', 'error', '-show_streams', '-show_format', '-of', 'json', outputPath],
+          { encoding: 'utf8', timeout: 10000 });
+        assert.equal(probed.status, 0, probed.stderr);
+        const info = JSON.parse(probed.stdout);
+        const video = info.streams.filter(stream => stream.codec_type === 'video');
+        const audio = info.streams.filter(stream => stream.codec_type === 'audio');
+        assert.equal(video.length, 1);
+        assert.equal(video[0].width, 1080);
+        assert.equal(video[0].height, 1920);
+        assert.equal(video[0].codec_name, 'h264');
+        assert.equal(video[0].r_frame_rate, '30/1');
+        assert.equal(audio.length, 1);
+        assert.equal(audio[0].codec_name, 'aac');
+        assert.equal(audio[0].sample_rate, '48000');
+        assert.equal(audio[0].channels, 2);
+        assert.ok(Math.abs(Number(info.format.duration) - 2) < 0.06, info.format.duration);
+        const pixels = run(['-i', outputPath, '-frames:v', '1', '-vf', 'scale=32:32,format=rgb24',
+          '-f', 'rawvideo', 'pipe:1']);
+        assert.equal(pixels.length, 32 * 32 * 3);
+        const left = pixels.subarray((16 * 32 + 8) * 3, (16 * 32 + 8) * 3 + 3);
+        const right = pixels.subarray((16 * 32 + 24) * 3, (16 * 32 + 24) * 3 + 3);
+        assert.ok(left[0] > right[0] * 3 && right[2] > left[2] * 3,
+          `raw must stay unmirrored, with red left and blue right: ${[...left]}, ${[...right]}`);
+        const decoded = run(['-i', outputPath, '-map', '0:a', '-ac', '1', '-ar', '48000', '-f', 'f32le', 'pipe:1']);
+        if (syncMs > 0) {
+          const before = energy(windowSamples(decoded, 0.25));
+          const after = energy(windowSamples(decoded, 0.6));
+          assert.ok(before < 0.001, `reference must be silent before the 500ms sync: ${before}`);
+          assert.ok(after > 0.03, `reference tone must begin after the 500ms sync: ${after}`);
+          assert.ok(amplitude(windowSamples(decoded, 0.6), 440) > 0.03);
+          assert.ok(amplitude(windowSamples(decoded, 1.2), 1100) > 0.03);
+          assert.ok(energy(windowSamples(decoded, 1.9)) < 0.001, 'audio must pad with silence after reference ends');
+        } else {
+          const beginning = windowSamples(decoded, 0.1);
+          assert.ok(amplitude(beginning, 1100) > 0.03, 'negative sync must skip the first 500ms reference tone');
+          assert.ok(amplitude(beginning, 440) < 0.001, 'negative sync must remove the skipped reference tone');
+          assert.ok(amplitude(beginning, 2500) < 0.001, 'the raw microphone must be absent');
+          assert.ok(energy(windowSamples(decoded, 1.1)) < 0.001, 'negative seek must pad to the take duration');
+        }
       }
     } finally {
       await fs.rm(directory, { recursive: true, force: true });

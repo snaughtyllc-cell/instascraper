@@ -54,7 +54,7 @@ Film (UI)  ──/api/filming/find/*──▶  HQ (knows the model)  ──/film
 | POST | `/models/:hqProjectId/reels/:reelId/filming` | `{ "hqItemId": "<uuid>" }` | `{ ok: true }`. HQ calls this after it creates the "Film this" item, so InstaScraper records `want_to_make` (strong positive) and links the reel to the HQ item. |
 | GET | `/media/:reelId` | `exp, sig` | the mp4 (Range-capable) |
 | GET | `/thumb/:reelId` | `exp, sig` | jpeg |
-| POST | `/react-reference` | `{ "shortcode": "AbCdE123", "fetch": true }` (`fetch` optional) | `200 { videoUrl, originalVideoUrl, durationSec, analysis }`, `202 { state: "fetching" }`, or 404 when unavailable |
+| POST | `/react-reference` | `{ "shortcode": "AbCdE123", "fetch": true, "mode": "react" }` (`fetch` and `mode` optional) | `200 { videoUrl, originalVideoUrl, durationSec, analysis }`, `202 { state: "fetching" }`, or 404 when unavailable |
 | POST | `/react-prefetch` | `{ "shortcodes": ["AbCdE123"] }` | `202 { queued }`, the number of newly queued fetches |
 | GET | `/react-media/:shortcode` | `exp, sig, variant?` | React-ready mp4 or original fallback by default; `variant=original` serves only the original mp4 (Range-capable), for posts and fetched references |
 
@@ -92,7 +92,8 @@ callback. The reference, prefetch and render routes use the existing `FILM_SERVI
   `sig = HMAC-SHA256(FILM_MEDIA_SECRET, "react-media.<shortcode>.original.<exp>")`, and always serves the original
   MP4 with the creator's video and audio intact. Without analysis, both URLs serve the same original media.
   The optional `fetch` field is a boolean and defaults to `true`; any non-boolean value returns
-  `400 { "error": "invalid_fetch" }`. With `fetch: false`, available posts/pins and ready fetched references
+  `400 { "error": "invalid_fetch" }`. The optional `mode` accepts only `"react"` (default) or `"dance"`;
+  any other value returns `400 { "error": "invalid_mode" }`. With `fetch: false` in React mode, available posts/pins and ready fetched references
   proceed to analysis, and references already being fetched return `202 { "state": "fetching" }`.
   Unavailable references return `404 { "error": "reel_not_available" }`. This does not start a fetch or touch the
   Apify daily cap or launch/cost ledgers, so non-React
@@ -133,8 +134,10 @@ callback. The reference, prefetch and render routes use the existing `FILM_SERVI
   a request without it. Original requests skip analysis and serve only the original pin; a missing original
   returns 404 even if a derivative exists. Missing files or references that are not ready return
   `404 { "error": "reel_not_available" }`.
-- Once a fetched reference or posts-based pin is available, a serial analysis job runs automatically.
-  Existing ready references without analysis are also discovered at startup and on reference requests.
+- Once a React fetched reference or posts-based pin is available, a serial analysis job runs automatically.
+  Existing ready references without analysis are also discovered at startup and on React reference requests,
+  except originals acquired only for Dance, which remain excluded from automatic discovery. Explicit React
+  requests for those same shortcodes still analyze normally.
   While queued or analyzing, `react-reference` returns the unchanged `202 { "state": "fetching" }` shape.
   Analysis failure, blocked Gemini budget, missing Gemini key, or exceeding `REACT_ANALYSIS_TIMEOUT_SEC`
   (default 120 seconds including queue time) returns the original MP4 with `analysis: null`; React remains usable.
@@ -192,7 +195,8 @@ callback. The reference, prefetch and render routes use the existing `FILM_SERVI
   `reference` may instead be `{ "kind": "url", "url": "https://hq.example/reference" }`. Responses are
   `202 { "accepted": true }`, including duplicate job IDs, or `400 { "error": "<validation code>" }`.
   Job IDs are UUIDs, crop fractions must be finite with `top >= 0`, `height >= 0.2`, and `top + height <= 1`;
-  `syncMs` is an integer from −7000 through 32000; `output` is `stitched` or `solo`; `referenceAudio` is a boolean.
+  `syncMs` is an integer from −7000 through 32000; `output` is `stitched`, `solo`, or `dance`; `referenceAudio` is a boolean
+  and must be `true` for `dance` (otherwise `400 { "error": "invalid_reference_audio" }`).
   Every URL must use HTTPS without credentials or fragments. Raw/source/callback URLs must share the
   `HQ_PUBLIC_URL` origin. Uploads require exactly `www.googleapis.com`, path `/upload/drive/v3/files`, and
   `uploadType=resumable`. Transfers refuse redirects, and ffmpeg/ffprobe cannot open network protocols.
@@ -215,6 +219,31 @@ The mix disables normalization and uses a 0.89 limiter. Missing audio yields ref
 Solo output fills 1080×1920 with her camera and uses only her processed mic audio. Normal ffmpeg autorotation handles
 iPhone rotation metadata. Raw downloads are streamed with a 10-minute timeout and configurable byte cap;
 URL references are capped at 500 MB. Temporary files are removed after success or failure.
+
+## Dance mode
+
+Film records video only while the original reel plays for synchronization. Requesting
+`POST /film/v1/react-reference` with `mode: "dance"` returns 200 as soon as the original MP4 is available,
+without running or waiting for Gemini, seam detection, or creator muting. Both `videoUrl` and
+`originalVideoUrl` are the same signed `/film/v1/react-media/:shortcode?variant=original&exp&sig` URL,
+`durationSec` is the original duration (or null when unavailable), and `analysis` is always null, even when
+React analysis for that shortcode already exists or is pending. Fetching still returns 202, `fetch: false`
+still checks availability without launching a fetch, and failure behavior is unchanged. A Dance request
+does not enqueue analysis; React requests for the same shortcode retain their normal analysis behavior.
+
+`POST /film/v1/react-render` with `output: "dance"` requires `referenceAudio: true`. The crop must satisfy
+the same validation rules but does not affect the output. Her unmirrored raw camera fills the frame using
+`scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,setsar=1,fps=30`; no reference video,
+seam crop, or freeze layout is composited. Instagram references use the original pin, never the creator-muted
+React derivative, and do not request analysis. Her microphone is never used, including when it is present;
+raw takes without any audio stream are supported.
+
+Original reference audio follows the stitched sync convention: positive `syncMs` delays it with `adelay`,
+and negative values seek into it. A seek at or beyond the reference duration fails with
+`reference_seek_out_of_range`. Audio uses `loudnorm=I=-14:TP=-1.5:LRA=11:linear=true` and is padded with
+silence and trimmed to her take duration. The output is 1080×1920 H.264 at 30 fps with one stereo 48 kHz
+AAC 192k stream, and ends with her take. Dance uses the same thread/priority caps, temporary-file cleanup,
+durable queue, Drive upload, and authenticated callback behavior as React.
 
 Drive uploads begin with a single PUT with Content-Length and `video/mp4`. A 308, network error, 429, or 5xx
 causes a status query (`Content-Range: bytes */<size>`) and resumption at the confirmed offset, with at most
