@@ -18,6 +18,29 @@ for (const [name, ai] of [
   });
 }
 
+for (const audioKind of ['music_or_trending_audio', 'other_voice']) {
+  test(`talking with ${audioKind} becomes lipsync at the same confidence threshold`, () => {
+    const ai = { type: 'talking', confidence: 0.8, audioKind };
+    const input = { ai, typeValues: [...typeValues, 'lipsync'], threshold: 0.8 };
+    assert.deepStrictEqual(decideSort(input), { sortStatus: 'auto', contentType: 'lipsync' });
+    assert.deepStrictEqual(decideSort({ ...input, threshold: 0.81 }), { sortStatus: 'needs_look', contentType: null });
+    assert.strictEqual(ai.confidence, 0.8);
+    assert.deepStrictEqual(decideSort({ ...input, typeValues }), { sortStatus: 'needs_look', contentType: null });
+  });
+}
+
+test('talking without verified own speech needs a look even when lipsync exists', () => {
+  for (const audioKind of ['none', null, undefined, 'unknown']) {
+    assert.deepStrictEqual(decideSort({ ai: { type: 'talking', confidence: 1, audioKind }, typeValues: [...typeValues, 'lipsync'], threshold: 0.8 }),
+      { sortStatus: 'needs_look', contentType: null });
+  }
+});
+
+test('talking with own speech stays talking', () => {
+  assert.deepStrictEqual(decideSort({ ai: { type: 'talking', confidence: 0.9, audioKind: 'own_speech' }, typeValues, threshold: 0.8 }),
+    { sortStatus: 'auto', contentType: 'talking' });
+});
+
 test('effectiveNicheExpr returns only sorted post types, never creator labels', () => {
   const sqlite = new Database(':memory:');
   sqlite.exec(`CREATE TABLE posts (id INTEGER PRIMARY KEY, account_handle TEXT, content_type TEXT, sort_status TEXT);

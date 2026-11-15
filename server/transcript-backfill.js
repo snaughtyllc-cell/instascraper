@@ -23,7 +23,7 @@ async function runTranscriptBackfill({ pool = require('./db'), describe, cfg = s
     result.skippedCap = Math.max(0, requested - available);
     const batch = Math.min(requested, available);
     if (!batch) return result;
-    const types = (await pool.query('SELECT value,label FROM content_types ORDER BY sort_order,label')).rows;
+    const types = (await pool.query('SELECT value,label,description FROM content_types ORDER BY sort_order,label')).rows;
     const lookTags = (await pool.query("SELECT value,label,category FROM look_tags WHERE category <> 'custom' ORDER BY category,sort_order,label")).rows;
     const posts = (await pool.query(`SELECT * FROM posts WHERE ${eligible} ORDER BY posted_at DESC,id DESC LIMIT $1`, [batch])).rows;
     let client;
@@ -44,7 +44,7 @@ async function runTranscriptBackfill({ pool = require('./db'), describe, cfg = s
         cost = ai.usage ? estimateCostUsd(ai.usage, cfg) : cost;
         await pool.query('UPDATE look_backfill_attempts SET cost_usd=$1 WHERE id=$2', [cost, attemptId]);
         const update = await pool.query(`UPDATE posts SET ai_transcript=$1 WHERE id=$2 AND ${eligible}`,
-          [cleanTranscript(ai.transcript) || '', post.id]);
+          [(ai.audioKind === 'own_speech' ? cleanTranscript(ai.transcript) : null) || '', post.id]);
         result.transcribed += update.rowCount;
       } catch (error) {
         // Empty text records a completed attempt, including no speech and errors.

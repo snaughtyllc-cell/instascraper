@@ -21,7 +21,7 @@ async function setup(t, count = 2) {
     await fs.writeFile(path.join(videoDir, `${id}.mp4`), 'fake video');
   }
   return { pool, videoDir, cfg: { ...sortConfig({ GEMINI_API_KEY: 'fake' }), enabled: true },
-    describe: async () => ({ type: 'dance', confidence: 0.2, transcript: 'Hola.\nSin traducir.', lookTags: ['brunette'], usage: { inTokens: 3400, outTokens: 1600 } }) };
+    describe: async () => ({ type: 'dance', confidence: 0.2, audioKind: 'own_speech', transcript: 'Hola.\nSin traducir.', lookTags: ['brunette'], usage: { inTokens: 3400, outTokens: 1600 } }) };
 }
 
 test('transcript backfill writes only ai_transcript and records shared usage', async t => {
@@ -90,6 +90,14 @@ test('missing cached file gets sentinel without a paid call or endless retries',
   assert.equal(deps.pool.sqlite.prepare('SELECT ai_transcript FROM posts').get().ai_transcript, '');
   assert.equal((await sortUsage(deps.pool, deps.cfg)).today, 0);
   assert.equal((await transcriptBackfillEstimate(deps.pool, deps.cfg)).count, 0);
+});
+
+test('transcript backfill discards dubbed speech and lyrics even if returned by describe', async t => {
+  const deps = await setup(t, 4);
+  const kinds = ['music_or_trending_audio', 'other_voice', 'none', undefined];
+  deps.describe = async () => ({ audioKind: kinds.shift(), transcript: 'Not their own speech' });
+  assert.equal((await runTranscriptBackfill(deps)).transcribed, 4);
+  assert.deepEqual(deps.pool.sqlite.prepare('SELECT ai_transcript FROM posts').all(), Array(4).fill({ ai_transcript: '' }));
 });
 
 test('rechecks eligibility before writes when a human changes type or transcript during the call', async t => {

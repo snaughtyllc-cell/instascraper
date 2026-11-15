@@ -19,7 +19,8 @@ export const archivePost = (id, archived) => api.post(`/content/${id}/archive`, 
 export const setPostContentType = (id, contentType) => api.post(`/content/${id}/content-type`, { contentType });
 export const bulkUpdateContent = (ids, action, value) => api.post('/content/bulk', { ids, action, value });
 export const getContentTypes = () => api.get('/content-types');
-export const addContentType = (label) => api.post('/content-types', { label });
+export const addContentType = (label, description) => api.post('/content-types', { label, description });
+export const updateContentType = (id, data) => api.patch(`/content-types/${id}`, data);
 export const deleteContentType = (id) => api.delete(`/content-types/${id}`);
 export const getCreators = () => api.get('/creators');
 export const getLookTags = () => api.get('/look-tags');
@@ -31,6 +32,8 @@ export const getLookBackfillEstimate = () => api.get('/sort/look-backfill/estima
 export const startLookBackfill = () => api.post('/sort/look-backfill');
 export const getTranscriptBackfillEstimate = () => api.get('/sort/transcript-backfill/estimate');
 export const startTranscriptBackfill = () => api.post('/sort/transcript-backfill');
+export const getTalkingRecheckEstimate = (modelId) => api.get('/sort/talking-recheck/estimate', { params: modelId ? { modelId } : undefined });
+export const startTalkingRecheck = (modelId) => api.post('/sort/talking-recheck', { confirm: true }, { params: modelId ? { modelId } : undefined });
 
 export const exportContent = (format = 'json', contentType = '') => {
   const params = new URLSearchParams({ format });

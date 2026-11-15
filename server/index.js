@@ -24,7 +24,7 @@ const { downloadThumbnail, DEFAULT_THUMB_DIR } = require('./thumbnails');
 const { videoFilePath, DEFAULT_VIDEO_DIR } = require('./videos');
 const { buildBulkUpdate } = require('./content-bulk');
 const { calcViewER, engagementLabel, enrichViewsVsMedian, medianViewsByAccount } = require('./engagement-metrics');
-const { validateTypeLabel } = require('./content-types');
+const { validateContentTypeInput } = require('./content-types');
 const { parseTagList, cleanModelLookTags, validateLookTagInput } = require('./look-tags');
 const { buildCredentialFields, validateModelCredentials, modelCredentialsChanged, MODEL_WRITE_FIELDS, buildModelWriteColumns, buildModelInsert, buildModelUpdate, isDuplicateEmailError } = require('./model-credentials');
 const { corsOptionsForRequest, browserSecurityHeaders } = require('./security');
@@ -410,22 +410,35 @@ app.post('/creators/:handle/type', async (req, res) => {
 });
 
 app.get('/content-types', asyncHandler(async (req, res) => {
-  const result = await pool.query('SELECT id, value, label, sort_order FROM content_types ORDER BY sort_order, label');
+  const result = await pool.query('SELECT id, value, label, description, sort_order FROM content_types ORDER BY sort_order, label');
   res.json(result.rows);
 }));
 
 app.post('/content-types', asyncHandler(async (req, res) => {
-  const v = validateTypeLabel(req.body && req.body.label);
+  const v = validateContentTypeInput(req.body);
   if (!v.ok) return res.status(400).json({ error: v.error });
-  const existing = await pool.query('SELECT id, value, label FROM content_types WHERE value = $1', [v.value]);
+  const existing = await pool.query('SELECT id, value, label, description FROM content_types WHERE value = $1', [v.value]);
   if (existing.rows.length) return res.status(200).json(existing.rows[0]); // idempotent add
   const max = await pool.query('SELECT COALESCE(MAX(sort_order), -1) + 1 AS next FROM content_types');
   const ins = await pool.query(
-    'INSERT INTO content_types (value, label, sort_order, created_at) VALUES ($1,$2,$3,$4) RETURNING id, value, label',
-    [v.value, v.label, Number(max.rows[0].next) || 0, new Date().toISOString()]
+    'INSERT INTO content_types (value, label, description, sort_order, created_at) VALUES ($1,$2,$3,$4,$5) RETURNING id, value, label, description',
+    [v.value, v.label, v.description, Number(max.rows[0].next) || 0, new Date().toISOString()]
   );
   res.status(201).json(ins.rows[0]);
   redecideNeedsLook({ pool }).catch(error => console.error('[Sort] redecide:', error.message));
+}));
+
+app.patch('/content-types/:id', asyncHandler(async (req, res) => {
+  const id = Number(req.params.id);
+  if (!Number.isSafeInteger(id) || id <= 0 || id > 2147483647) return res.status(400).json({ error: 'Invalid content type id' });
+  const v = validateContentTypeInput(req.body, { partial: true });
+  if (!v.ok) return res.status(400).json({ error: v.error });
+  const fields = Object.keys(v).filter(key => key !== 'ok');
+  const params = fields.map(key => v[key]);
+  params.push(id);
+  const updated = await pool.query(`UPDATE content_types SET ${fields.map((key, i) => `${key} = $${i + 1}`).join(', ')} WHERE id = $${params.length}`, params);
+  if (!updated.rowCount) return res.status(404).json({ error: 'Content type not found' });
+  res.json((await pool.query('SELECT id, value, label, description, sort_order FROM content_types WHERE id = $1', [id])).rows[0]);
 }));
 
 app.delete('/content-types/:id', asyncHandler(async (req, res) => {

@@ -3,8 +3,13 @@ function effectiveNicheExpr(p = 'posts', ct = 'ct') {
 }
 
 function decideSort({ ai, typeValues, threshold }) {
-  if (typeValues.includes(ai?.type) && Number.isFinite(ai.confidence) && ai.confidence >= threshold) {
-    return { sortStatus: 'auto', contentType: ai.type };
+  let type = ai?.type;
+  if (type === 'talking' && ai.audioKind !== 'own_speech') {
+    type = ['music_or_trending_audio', 'other_voice'].includes(ai.audioKind) && typeValues.includes('lipsync')
+      ? 'lipsync' : null;
+  }
+  if (typeValues.includes(type) && Number.isFinite(ai.confidence) && ai.confidence >= threshold) {
+    return { sortStatus: 'auto', contentType: type };
   }
   return { sortStatus: 'needs_look', contentType: null };
 }

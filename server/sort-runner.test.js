@@ -192,10 +192,29 @@ test('auto-sort stores bounded speech and replaces a previous transcript with nu
   const deps = await setup(t, 3);
   deps.pool.sqlite.exec("UPDATE posts SET ai_transcript='Previous speech'");
   const transcripts = [null, ' Hola.\r\nBien. ', 'word '.repeat(900)];
-  deps.describe = async () => ({ ...ai, transcript: transcripts.shift() });
+  deps.describe = async () => ({ ...ai, audioKind: 'own_speech', transcript: transcripts.shift() });
   assert.equal((await runAutoSort(deps)).classified, 3);
   const rows = deps.pool.sqlite.prepare('SELECT ai_transcript FROM posts ORDER BY id DESC').all();
   assert.equal(rows[0].ai_transcript, null);
   assert.equal(rows[1].ai_transcript, 'Hola.\nBien.');
   assert.equal(rows[2].ai_transcript, 'word '.repeat(800).trimEnd());
+});
+
+test('auto-sort gates talking on audio, stores evidence and clears non-speech transcripts', async t => {
+  const deps = await setup(t, 4);
+  deps.pool.sqlite.exec("INSERT INTO content_types(value,label,description) VALUES('lipsync','Lip sync','Mouths recorded audio'); UPDATE content_types SET description='Live own speech' WHERE value='talking'; UPDATE posts SET ai_transcript='Old transcript'");
+  const audioKinds = ['music_or_trending_audio', 'other_voice', 'none', 'own_speech'];
+  deps.describe = async input => {
+    assert.equal(input.types.find(type => type.value === 'talking').description, 'Live own speech');
+    return { ...ai, type: 'talking', audioKind: audioKinds.shift(), transcript: 'My own words.' };
+  };
+  const result = await runAutoSort(deps);
+  assert.equal(result.auto, 3);
+  assert.equal(result.needsLook, 1);
+  assert.deepEqual(deps.pool.sqlite.prepare('SELECT content_type,sort_status,ai_audio_kind,ai_transcript,ai_confidence FROM posts ORDER BY id DESC').all(), [
+    { content_type: 'lipsync', sort_status: 'auto', ai_audio_kind: 'music_or_trending_audio', ai_transcript: null, ai_confidence: 0.9 },
+    { content_type: 'lipsync', sort_status: 'auto', ai_audio_kind: 'other_voice', ai_transcript: null, ai_confidence: 0.9 },
+    { content_type: null, sort_status: 'needs_look', ai_audio_kind: 'none', ai_transcript: null, ai_confidence: 0.9 },
+    { content_type: 'talking', sort_status: 'auto', ai_audio_kind: 'own_speech', ai_transcript: 'My own words.', ai_confidence: 0.9 },
+  ]);
 });

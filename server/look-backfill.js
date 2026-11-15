@@ -22,7 +22,7 @@ async function runLookBackfill({ pool = require('./db'), describe, cfg = sortCon
     result.skippedCap = Math.max(0, requested - available);
     const batch = Math.min(requested, available);
     if (!batch) return result;
-    const types = (await pool.query('SELECT value,label FROM content_types ORDER BY sort_order,label')).rows;
+    const types = (await pool.query('SELECT value,label,description FROM content_types ORDER BY sort_order,label')).rows;
     const lookTags = (await pool.query("SELECT value,label,category FROM look_tags WHERE category <> 'custom' ORDER BY category,sort_order,label")).rows;
     const posts = (await pool.query(`SELECT * FROM posts WHERE ${eligible} ORDER BY posted_at DESC,id DESC LIMIT $1`, [batch])).rows;
     let client;

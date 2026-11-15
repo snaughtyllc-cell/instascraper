@@ -1,12 +1,12 @@
 // server/content-types.test.js
 const { test } = require('node:test');
 const assert = require('node:assert');
-const { DEFAULT_CONTENT_TYPES, slugifyTypeLabel, validateTypeLabel } = require('./content-types');
+const { DEFAULT_CONTENT_TYPES, slugifyTypeLabel, validateTypeLabel, validateContentTypeInput } = require('./content-types');
 
-test('DEFAULT_CONTENT_TYPES holds the current six in order', () => {
+test('DEFAULT_CONTENT_TYPES preserves the current six and includes lip sync', () => {
   assert.deepStrictEqual(
     DEFAULT_CONTENT_TYPES.map(t => t.value),
-    ['talking', 'dance', 'skit', 'snapchat', 'omegle', 'osc']
+    ['talking', 'dance', 'skit', 'snapchat', 'omegle', 'osc', 'lipsync']
   );
 });
 
@@ -27,4 +27,15 @@ test('validateTypeLabel rejects empty / whitespace / symbol-only', () => {
 
 test('validateTypeLabel rejects labels over 40 chars', () => {
   assert.strictEqual(validateTypeLabel('x'.repeat(41)).ok, false);
+});
+
+test('content-type input distinguishes omitted, null and empty descriptions', () => {
+  assert.deepStrictEqual(validateContentTypeInput({ label: 'New Type' }), { ok: true, value: 'new-type', label: 'New Type', description: null });
+  assert.deepStrictEqual(validateContentTypeInput({ label: 'Renamed' }, { partial: true }), { ok: true, label: 'Renamed' });
+  assert.deepStrictEqual(validateContentTypeInput({ description: null }, { partial: true }), { ok: true, description: null });
+  assert.deepStrictEqual(validateContentTypeInput({ description: '  ' }, { partial: true }), { ok: true, description: '' });
+  assert.strictEqual(validateContentTypeInput({}, { partial: true }).ok, false);
+  for (const description of [{ text: 'bad' }, [], 5, true]) {
+    assert.strictEqual(validateContentTypeInput({ label: 'New Type', description }).ok, false);
+  }
 });
