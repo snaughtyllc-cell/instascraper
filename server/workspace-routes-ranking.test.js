@@ -46,6 +46,27 @@ test('workspace reels include look_match and ignore deleted model vocabulary tag
   assert.deepEqual(response.body.map(row => [row.id, row.look_match]), [[1, 1], [2, 0]]);
 });
 
+test('workspace reels rank niche matches first and include other sorted types within creator scope', async t => {
+  const pool = await makeWorkspaceDb(t);
+  pool.sqlite.exec(`UPDATE models SET look_tags = '["brunette"]' WHERE id = 1;
+    INSERT INTO posts (id, account_handle, content_type, sort_status, posted_at, video_cache_status, ai_look_tags) VALUES
+      (1, 'owned', 'talking', 'auto', '2026-07-01', 'cached', '[]'),
+      (2, 'owned', 'dance', 'manual', '2026-07-03', 'cached', '["brunette"]'),
+      (3, 'other', 'dance', 'auto', '2026-07-02', 'cached', '[]'),
+      (4, 'owned', 'talking', 'unsorted', '2026-07-04', 'cached', '["brunette"]'),
+      (5, 'owned', 'talking', 'needs_look', '2026-07-05', 'cached', '["brunette"]'),
+      (6, 'owned', NULL, 'auto', '2026-07-06', 'cached', '["brunette"]');
+    INSERT INTO model_taste (model_id, feature, affinity) VALUES (1, 'creator:owned', -0.5), (1, 'type:dance', 1)`);
+  const app = appFor(pool);
+  const fallback = await appRequest(app, { path: '/workspaces/1/reels' });
+  assert.equal(fallback.status, 200);
+  assert.deepEqual(fallback.body.map(row => row.id), [1, 2, 3]);
+  pool.sqlite.exec("INSERT INTO model_creators (model_id, username) VALUES (1, 'owned')");
+  const scoped = await appRequest(app, { path: '/workspaces/1/reels' });
+  assert.equal(scoped.status, 200);
+  assert.deepEqual(scoped.body.map(row => row.id), [1, 2]);
+});
+
 test('taste endpoint returns top five liked and disliked features', async t => {
   const pool = await makeWorkspaceDb(t);
   for (let i = 1; i <= 7; i++) {

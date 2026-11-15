@@ -1,6 +1,6 @@
 const { buildMeFeedQuery, parseNiches } = require('./me-feed');
 const { addCreator, removeCreator, listWorkspaceCreators, approveForModel, normalizeUsername } = require('./workspaces');
-const { confirmAllProposals } = require('./proposals');
+const { computeProposals, confirmAllProposals } = require('./proposals');
 const { attachTopReels } = require('./scraper');
 const { parseTagList, cleanModelLookTags } = require('./look-tags');
 const { reelLookMatch, creatorLookProfiles, creatorLookMatch, candidateLookProfile } = require('./look-match');
@@ -65,6 +65,9 @@ function registerWorkspaceRoutes(app, { pool }) {
   }));
   app.post('/workspaces/:modelId/proposals/confirm-all', wrap(async (req, res) => {
     res.json(await confirmAllProposals(pool, req.workspaceModelId));
+  }));
+  app.post('/workspaces/:modelId/proposals/refresh', wrap(async (req, res) => {
+    res.json(await computeProposals(pool, { modelId: req.workspaceModelId }));
   }));
   app.post('/workspaces/:modelId/proposals/:username/confirm', wrap(async (req, res) => {
     const username = normalizeUsername(req.params.username);

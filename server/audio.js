@@ -38,25 +38,40 @@ function trendScore(row, cfg = audioConfig(), nowMs = Date.now()) {
   );
 }
 
-// PURE. Build the aggregation query. `niches` scopes to a model's lane (empty +
-// all:true = roster-wide, admin). `cutoffIso` is the age boundary (passed for
+function nicheMatchExpr(niches, params) {
+  if (!niches.length) return '0';
+  const ph = niches.map(value => {
+    params.push(value);
+    return `$${params.length}`;
+  }).join(', ');
+  return `CASE WHEN ${effectiveNicheExpr()} IN (${ph}) THEN 1 ELSE 0 END`;
+}
+
+// PURE. Build the aggregation query. Model niches rank audio; non-model niche
+// selections remain hard filters. `cutoffIso` is the age boundary (passed for
 // deterministic tests; else derived from maxAgeDays). Placeholders are numbered
 // sequentially and each used once (SQLite adapter rewrites $N → ? positionally).
 function buildTrendingAudioQuery(niches, { all = false, cutoffIso, minReels = 2, modelId = null } = {}) {
   const list = all ? [] : (Array.isArray(niches) ? niches : []).filter(Boolean);
-  if (!all && list.length === 0) return { sql: null, params: [] };
+  const modelScoped = !all && Number(modelId) > 0;
+  if (!all && !modelScoped && list.length === 0) return { sql: null, params: [] };
 
   // The SQLite adapter rewrites $N → ? by APPEARANCE order (not by number), so
   // placeholders must appear in the SQL in ascending order matching `params`.
-  // Appearance order here: cutoff ($1) → niches ($2..) → minReels (last).
-  const params = [cutoffIso];
+  // The model's niche rank appears in SELECT before the WHERE placeholders.
+  const params = [];
+  const nicheRank = modelScoped ? `MAX(${nicheMatchExpr(list, params)})` : '0';
+  params.push(cutoffIso);
+  const cutoffIdx = params.length;
   let nicheClause = '';
-  if (!all) {
-    const ph = list.map((_, i) => `$${i + 2}`).join(', ');
+  if (modelScoped) {
+    nicheClause = ` AND ${effectiveNicheExpr()} IS NOT NULL`;
+  } else if (!all) {
+    const ph = list.map((_, i) => `$${params.length + 1 + i}`).join(', ');
     nicheClause = ` AND ${effectiveNicheExpr()} IN (${ph})`;
     params.push(...list);
   }
-  if (!all && Number(modelId) > 0) {
+  if (modelScoped) {
     const scope = modelScopeClause('posts', params.length + 1);
     nicheClause += ` AND ${scope.clause}`;
     params.push(...scope.params(Number(modelId)));
@@ -73,11 +88,12 @@ function buildTrendingAudioQuery(niches, { all = false, cutoffIso, minReels = 2,
            COUNT(DISTINCT posts.account_handle) AS creator_count,
            COALESCE(SUM(posts.view_count), 0) AS total_views,
            MAX(posts.view_count) AS max_views,
-           MAX(posts.posted_at) AS latest_posted_at
+           MAX(posts.posted_at) AS latest_posted_at,
+           ${nicheRank} AS niche_match
     FROM posts
     LEFT JOIN creator_types ct ON posts.account_handle = ct.account_handle
     WHERE posts.audio_id IS NOT NULL AND posts.audio_id <> ''
-      AND posts.posted_at >= $1
+      AND posts.posted_at >= $${cutoffIdx}
       AND (posts.soft_deleted = 0 OR posts.soft_deleted IS NULL)
       AND (posts.archived = 0 OR posts.archived IS NULL)${nicheClause}
     GROUP BY posts.audio_id
@@ -88,19 +104,23 @@ function buildTrendingAudioQuery(niches, { all = false, cutoffIso, minReels = 2,
 // PURE. Build the "reels using this audio" query (expand view / example reels).
 function buildAudioReelsQuery(audioId, niches, { all = false, limit = 12, modelId = null } = {}) {
   const params = [audioId];
+  const modelScoped = !all && Number(modelId) > 0;
+  const list = (Array.isArray(niches) ? niches : []).filter(Boolean);
   let nicheClause = '';
-  if (!all) {
-    const list = (Array.isArray(niches) ? niches : []).filter(Boolean);
+  if (modelScoped) {
+    nicheClause = ` AND ${effectiveNicheExpr()} IS NOT NULL`;
+  } else if (!all) {
     if (list.length === 0) return { sql: null, params: [] };
     const ph = list.map((_, i) => `$${i + 2}`).join(', ');
     nicheClause = ` AND ${effectiveNicheExpr()} IN (${ph})`;
     params.push(...list);
   }
-  if (!all && Number(modelId) > 0) {
+  if (modelScoped) {
     const scope = modelScopeClause('posts', params.length + 1);
     nicheClause += ` AND ${scope.clause}`;
     params.push(...scope.params(Number(modelId)));
   }
+  const nicheOrder = modelScoped && list.length ? `${nicheMatchExpr(list, params)} DESC, ` : '';
   const limIdx = params.length + 1;
   params.push(limit);
   const sql = `
@@ -113,7 +133,7 @@ function buildAudioReelsQuery(audioId, niches, { all = false, limit = 12, modelI
       AND (posts.soft_deleted = 0 OR posts.soft_deleted IS NULL)
       AND (posts.archived = 0 OR posts.archived IS NULL)
       AND posts.video_cache_status = 'cached'${nicheClause}
-    ORDER BY posts.view_count DESC NULLS LAST
+    ORDER BY ${nicheOrder}posts.view_count DESC NULLS LAST
     LIMIT $${limIdx}`;
   return { sql, params };
 }
@@ -126,7 +146,7 @@ async function trendingAudio(db, { niches = [], all = false, cfg = audioConfig()
   const rows = (await db.query(built.sql, built.params)).rows || [];
   const ranked = rows
     .map(r => ({ ...r, trend_score: trendScore(r, cfg, nowMs) }))
-    .sort((a, b) => b.trend_score - a.trend_score)
+    .sort((a, b) => Number(b.niche_match) - Number(a.niche_match) || b.trend_score - a.trend_score)
     .slice(0, cfg.limit);
 
   if (ranked.length === 0) return [];
@@ -134,17 +154,21 @@ async function trendingAudio(db, { niches = [], all = false, cfg = audioConfig()
   const ids = ranked.map(r => r.audio_id);
   const ph = ids.map((_, i) => `$${i + 1}`).join(', ');
   const exParams = [...ids];
+  const modelScoped = !all && Number(modelId) > 0;
+  const list = (Array.isArray(niches) ? niches : []).filter(Boolean);
   let nicheClause = '';
-  if (!all) {
-    const list = (Array.isArray(niches) ? niches : []).filter(Boolean);
+  if (modelScoped) {
+    nicheClause = ` AND ${effectiveNicheExpr()} IS NOT NULL`;
+  } else if (!all) {
     const nph = list.map((_, i) => `$${ids.length + 1 + i}`).join(', ');
     if (list.length) { nicheClause = ` AND ${effectiveNicheExpr()} IN (${nph})`; exParams.push(...list); }
   }
-  if (!all && Number(modelId) > 0) {
+  if (modelScoped) {
     const scope = modelScopeClause('posts', exParams.length + 1);
     nicheClause += ` AND ${scope.clause}`;
     exParams.push(...scope.params(Number(modelId)));
   }
+  const nicheOrder = modelScoped && list.length ? `${nicheMatchExpr(list, exParams)} DESC, ` : '';
   const exSql = `
     SELECT posts.id, posts.shortcode, posts.audio_id, posts.view_count, posts.account_handle, posts.post_url
     FROM posts
@@ -153,7 +177,7 @@ async function trendingAudio(db, { niches = [], all = false, cfg = audioConfig()
       AND (posts.soft_deleted = 0 OR posts.soft_deleted IS NULL)
       AND (posts.archived = 0 OR posts.archived IS NULL)
       AND posts.video_cache_status = 'cached'${nicheClause}
-    ORDER BY posts.view_count DESC NULLS LAST`;
+    ORDER BY ${nicheOrder}posts.view_count DESC NULLS LAST`;
   const exRows = (await db.query(exSql, exParams)).rows || [];
   const byAudio = {};
   for (const r of exRows) {

@@ -1,7 +1,7 @@
 import React, { useCallback, useEffect, useState } from 'react';
 import {
   getWorkspace, getWorkspaceCreators, addWorkspaceCreator, removeWorkspaceCreator,
-  getWorkspaceReels, getWorkspaceProposals, confirmWorkspaceProposal,
+  getWorkspaceReels, getWorkspaceProposals, refreshWorkspaceProposals, confirmWorkspaceProposal,
   rejectWorkspaceProposal, confirmAllWorkspaceProposals, getWorkspaceSuggestions,
   approveWorkspaceSuggestion, dismissWorkspaceSuggestion, snoozeWorkspaceSuggestion,
   getContentTypes, getLookTags, getWorkspaceTaste, addCreatorLookTag, removeCreatorLookTag,
@@ -91,7 +91,7 @@ export default function ModelWorkspace({ modelId, onBack, onEdit }) {
             </div>)}
           </div>
         </section>
-        {workspace.fallback && <p className="p-4 rounded-xl border border-gold/30 bg-gold/10 text-gold">No creators yet — showing every reel in her niches.</p>}
+        {workspace.fallback && <p className="p-4 rounded-xl border border-gold/30 bg-gold/10 text-gold">No creators yet — showing every sorted reel, with her content types first.</p>}
         <div className="flex gap-2 border-b border-gray-800 pb-3" role="tablist" aria-label="Workspace sections">
           {['Creators', 'Reels', 'Suggested'].map(name => <button key={name} role="tab" aria-selected={tab === name} onClick={() => setTab(name)} className={`${button} ${tab === name ? 'text-gold border-gold' : 'text-gray-400'}`}>
             {name}{name === 'Creators' ? ` (${creators.length})` : name === 'Suggested' ? ` (${suggestions.length})` : ''}
@@ -119,8 +119,11 @@ export default function ModelWorkspace({ modelId, onBack, onEdit }) {
             </div>)}
           </div>
           <section className="rounded-xl border border-gray-800 bg-gray-900 p-4 space-y-3">
-            <div className="flex justify-between items-center gap-3"><h3 className="font-semibold">Proposed creators ({proposals.length})</h3>
-              {proposals.length > 0 && <button disabled={busy} onClick={() => act(() => confirmAllWorkspaceProposals(modelId))} className={`${button} text-gold`}>Confirm all</button>}
+            <div className="flex flex-wrap justify-between items-center gap-3"><h3 className="font-semibold">Proposed creators ({proposals.length})</h3>
+              <div className="flex flex-wrap gap-2">
+                <button disabled={busy} onClick={() => act(() => refreshWorkspaceProposals(modelId))} className={button}>Refresh proposals</button>
+                {proposals.length > 0 && <button disabled={busy} onClick={() => act(() => confirmAllWorkspaceProposals(modelId))} className={`${button} text-gold`}>Confirm all</button>}
+              </div>
             </div>
             {!proposals.length && <p className="text-sm text-gray-500">No proposed creators.</p>}
             {proposals.map(proposal => <div key={proposal.username} className="flex items-center gap-2">

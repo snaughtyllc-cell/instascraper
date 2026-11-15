@@ -41,6 +41,15 @@ const { registerWorkspaceRoutes } = require('./workspace-routes');
 const { approveForModel } = require('./workspaces');
 const { reelLookMatch } = require('./look-match');
 const { loadTaste, tasteForFeed, refreshTaste } = require('./model-taste');
+const { computeProposals } = require('./proposals');
+
+function refreshProposalsAfterResponse(res, modelId) {
+  res.once('finish', () => {
+    setImmediate(() => {
+      computeProposals(pool, { modelId }).catch(error => console.error('[Proposals]', error.message));
+    });
+  });
+}
 
 const app = express();
 app.disable('x-powered-by');
@@ -687,7 +696,7 @@ app.post('/scheduler/run/:job', async (req, res) => {
 });
 
 // ─── Trending Audio Routes ──────────────────────────────────────
-// Admin: roster-wide. Model (/me/audio): scoped to the model's niches.
+// Admin: roster-wide. Model (/me/audio): her creators, with niche matches first.
 app.get('/audio/trending', asyncHandler(async (req, res) => {
   const rows = await audio.trendingAudio(pool, { all: true });
   res.json({ audio: rows });
@@ -750,6 +759,7 @@ app.post('/notion/personas/:pageId/import', asyncHandler(async (req, res) => {
   if (credentialError) return res.status(400).json({ error: credentialError });
   try {
     const out = await notionSync.importPersona(notionDeps(await availableNiches()), req.params.pageId, { primary_niche, secondary_niches, character_context, email, password, seedKeywords, addRadarTerms });
+    refreshProposalsAfterResponse(res, out.id);
     res.json({ success: true, ...out });
   } catch (err) {
     if (isDuplicateEmailError(err)) return res.status(409).json({ error: 'Email already in use' });
@@ -766,6 +776,10 @@ app.post('/models/:id/resync-notion', asyncHandler(async (req, res) => {
   if (!model || !model.notion_page_id) return res.status(404).json({ error: 'Model not linked to a Notion persona' });
   if (req.body && req.body.confirm && !req.body.confirmed) return res.status(400).json({ error: 'confirmed proposal required to apply re-sync' });
   const out = await notionSync.resyncModel(notionDeps(await availableNiches()), model, { confirm: Boolean(req.body && req.body.confirm), confirmed: req.body && req.body.confirmed });
+  if (out.applied && !out.offboarded && (
+    (req.body.confirmed.primary_niche || model.primary_niche) !== model.primary_niche
+    || (req.body.confirmed.secondary_niches ?? model.secondary_niches) !== model.secondary_niches
+  )) refreshProposalsAfterResponse(res, model.id);
   res.json(out);
 }));
 
@@ -1069,6 +1083,7 @@ app.post('/models', async (req, res) => {
   const { sql, params } = buildModelInsert(merged, MODEL_ALL_WRITE_FIELDS);
   try {
     const result = await pool.query(sql, params);
+    refreshProposalsAfterResponse(res, result.rows[0].id);
     res.json({ success: true, id: result.rows[0]?.id });
   } catch (err) {
     if (isDuplicateEmailError(err)) return res.status(409).json({ error: 'Email already in use' });
@@ -1081,7 +1096,7 @@ app.put('/models/:id', async (req, res) => {
   const modelId = Number(req.params.id);
   if (!Number.isSafeInteger(modelId) || modelId <= 0) return res.status(400).json({ error: 'Invalid model id' });
   if (!name || !primary_niche) return res.status(400).json({ error: 'name and primary_niche required' });
-  const current = await pool.query("SELECT email, password_hash, login_enabled FROM models WHERE id = $1 AND status = 'active'", [modelId]);
+  const current = await pool.query("SELECT email, password_hash, login_enabled, primary_niche, secondary_niches, look_tags FROM models WHERE id = $1 AND status = 'active'", [modelId]);
   if (current.rowCount === 0) return res.status(404).json({ error: 'Model not found' });
   const credentialError = validateModelCredentials(req.body, current.rows[0]);
   if (credentialError) return res.status(400).json({ error: credentialError });
@@ -1100,6 +1115,9 @@ app.put('/models/:id', async (req, res) => {
   try {
     await pool.query(sql, params);
     if (modelCredentialsChanged(req.body, current.rows[0])) await revokeModelSessions(modelId);
+    if (['primary_niche', 'secondary_niches', 'look_tags'].some(field =>
+      merged[field] !== undefined && merged[field] !== current.rows[0][field]
+    )) refreshProposalsAfterResponse(res, modelId);
     res.json({ success: true });
   } catch (err) {
     if (isDuplicateEmailError(err)) return res.status(409).json({ error: 'Email already in use' });
@@ -1467,7 +1485,7 @@ app.get('/suggested/reels/:id/thumb', asyncHandler(async (req, res) => {
 // ─── Model (Me) Routes ──────────────────────────────────────────
 
 // [R2-#3] THE single top-level me-feed import — Task 6 reuses these, never re-requires.
-const { buildMeFeedQuery, nicheVisibilityClause, parseNiches, allowedNicheOptions } = require('./me-feed');
+const { buildMeFeedQuery, sortedVisibilityClause, parseNiches, allowedNicheOptions } = require('./me-feed');
 
 app.get('/me/feed', asyncHandler(async (req, res) => {
   const modelId = req.session.user.modelId; // requireModel guarantees this
@@ -1482,11 +1500,9 @@ app.get('/me/feed', asyncHandler(async (req, res) => {
   const taste = tasteForFeed(await loadTaste(pool, modelId), new Set(vocabulary.rows.map(row => row.value)));
 
   const pageSize = 24;
-  let build, activeNiche;
   if (sel && !myNiches.includes(sel)) return res.status(403).json({ error: 'Niche not available for this model' });
-  if (sel) build = buildMeFeedQuery([sel], { page, limit: pageSize + 1, pageSize, shuffle, modelId, lookTags, taste });
-  else build = buildMeFeedQuery(myNiches, { page, limit: pageSize + 1, pageSize, shuffle, modelId, lookTags, taste });
-  activeNiche = sel || null;
+  const build = buildMeFeedQuery(myNiches, { page, limit: pageSize + 1, pageSize, shuffle, modelId, lookTags, taste, niche: sel });
+  const activeNiche = sel || null;
 
   // The content-type vocabulary powers the switcher (models can't hit the admin /content-types route).
   const av = await pool.query('SELECT value, label FROM content_types ORDER BY sort_order, label');
@@ -1544,13 +1560,9 @@ app.delete('/me/saves/:postId', asyncHandler(async (req, res) => {
 
 app.get('/me/saves', asyncHandler(async (req, res) => {
   const modelId = req.session.user.modelId;
-  const m = await pool.query('SELECT primary_niche, secondary_niches FROM models WHERE id = $1', [modelId]);
+  const m = await pool.query('SELECT id FROM models WHERE id = $1', [modelId]);
   if (m.rowCount === 0) return res.status(404).json({ error: 'Model not found' });
-  const niches = parseNiches(m.rows[0]);
-  const scope = modelScopeClause('posts', niches.length + 4);
-  const nicheClause = niches.length
-    ? ` OR (${effectiveNicheExpr()} IN (${niches.map((_, i) => `$${i + 4}`).join(', ')}) AND ${scope.clause})`
-    : '';
+  const scope = modelScopeClause('posts', 4);
   const r = await pool.query(
     `SELECT posts.* FROM model_saved_posts s
        JOIN posts ON posts.id = s.post_id
@@ -1561,8 +1573,9 @@ app.get('/me/saves', asyncHandler(async (req, res) => {
        AND (posts.archived = 0 OR posts.archived IS NULL)
        AND (a.model_id IS NOT NULL
          OR EXISTS (SELECT 1 FROM model_saved_posts s2 WHERE s2.post_id = posts.id AND s2.model_id = $2)
-         OR EXISTS (SELECT 1 FROM model_post_feedback f2 WHERE f2.post_id = posts.id AND f2.model_id = $3)${nicheClause})
-     ORDER BY s.saved_at DESC`, [modelId, modelId, modelId, ...niches, ...(niches.length ? scope.params(modelId) : [])]);
+         OR EXISTS (SELECT 1 FROM model_post_feedback f2 WHERE f2.post_id = posts.id AND f2.model_id = $3)
+         OR (${sortedVisibilityClause()} AND ${scope.clause}))
+     ORDER BY s.saved_at DESC`, [modelId, modelId, modelId, ...scope.params(modelId)]);
   res.json({ posts: toModelPosts(r.rows) });
 }));
 

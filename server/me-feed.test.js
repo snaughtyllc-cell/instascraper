@@ -20,8 +20,12 @@ function makePostsDb() {
   return sqlite;
 }
 
-test('empty niches → sql null (nothing to show)', () => {
-  assert.deepStrictEqual(buildMeFeedQuery([], {}), { sql: null, params: [] });
+test('empty niches still show sorted reels', () => {
+  const sqlite = makePostsDb();
+  sqlite.exec(`INSERT INTO posts (id,content_type,sort_status,video_cache_status) VALUES
+    (1,'talking','auto','cached'),(2,'dance','manual','cached'),(3,'talking','unsorted','cached')`);
+  const { sql, params } = buildMeFeedQuery([], {});
+  assert.deepStrictEqual(sqlite.prepare(sql.replace(/\$\d+/g, '?')).all(...params).map(row => row.id), [1, 2]);
 });
 test('nicheVisibilityClause uses IN() placeholders (not ANY) + archived + soft_deleted', () => {
   const { clause, params } = nicheVisibilityClause(['talking', 'dance'], 5);
@@ -31,7 +35,7 @@ test('nicheVisibilityClause uses IN() placeholders (not ANY) + archived + soft_d
   assert.doesNotMatch(clause, /ANY/);
   assert.deepStrictEqual(params, ['talking', 'dance']);
 });
-test('buildMeFeedQuery actually EXECUTES against sqlite and scopes by niche + archived', () => {
+test('buildMeFeedQuery ranks niches first and includes other sorted types', () => {
   const sqlite = makePostsDb();
   // all inserted posts are cached → playable, so this test isolates niche/archived scoping
   sqlite.prepare(`INSERT INTO posts (id, content_type, posted_at, archived, video_cache_status) VALUES
@@ -39,8 +43,7 @@ test('buildMeFeedQuery actually EXECUTES against sqlite and scopes by niche + ar
     (3,'skit','2026-07-03',0,'cached'),(4,'talking','2026-07-04',1,'cached')`).run();
   const { sql, params } = buildMeFeedQuery(['talking', 'dance'], { page: 1, limit: 24 });
   const rows = sqlite.prepare(sql.replace(/\$\d+/g, '?')).all(...params);
-  const ids = rows.map(r => r.id).sort();
-  assert.deepStrictEqual(ids, [1, 2], 'only non-archived talking/dance posts; skit + archived excluded');
+  assert.deepStrictEqual(rows.map(r => r.id), [2, 1, 3], 'niche reels rank above newer skit; archived excluded');
 });
 test('parseNiches builds a flat list from primary + comma-separated secondary niches', () => {
   assert.deepStrictEqual(
@@ -72,11 +75,12 @@ test('visibilityOnlyClause returns archived + soft_deleted filter with no params
   assert.doesNotMatch(clause, /ANY/);
 });
 
-test('buildMeFeedQuery single-niche call still scoped (dance only)', () => {
+test('explicit niche selection remains a hard filter', () => {
   const sqlite = makePostsDb();
   sqlite.prepare(`INSERT INTO posts (id, content_type, posted_at, archived, video_cache_status) VALUES
     (1,'talking','2026-07-01',0,'cached'),(2,'dance','2026-07-02',0,'cached'),(3,'skit','2026-07-03',0,'cached')`).run();
-  const { sql, params } = buildMeFeedQuery(['dance'], {});
+  const { sql, params } = buildMeFeedQuery(['talking', 'dance'], { modelId: 7, niche: 'dance' });
+  assert.deepStrictEqual([...sql.matchAll(/\$(\d+)/g)].map(match => Number(match[1])), params.map((_, i) => i + 1));
   const rows = sqlite.prepare(sql.replace(/\$\d+/g, '?')).all(...params);
   const ids = rows.map(r => r.id).sort();
   assert.deepStrictEqual(ids, [2], 'only dance post returned');
@@ -86,7 +90,7 @@ test('buildMeFeedQuery shuffle mode orders by random for feed refresh', () => {
   const { sql, params } = buildMeFeedQuery(['talking'], { page: 1, limit: 24, shuffle: true });
   assert.match(sql, /ORDER BY RANDOM\(\)/);
   assert.doesNotMatch(sql, /ORDER BY posts\.posted_at DESC/);
-  assert.deepStrictEqual(params, ['talking', 24, 0]);
+  assert.deepStrictEqual(params, [24, 0]);
 });
 
 test('buildMeFeedQuery can fetch one extra row without skipping between 24-item pages', () => {
@@ -148,13 +152,15 @@ test('model feed excludes assigned, saved, and not-interested reels without hidi
   const { sql, params } = buildMeFeedQuery(['talking'], { modelId: 7, limit: 24 });
   const rows = sqlite.prepare(sql.replace(/\$\d+/g, '?')).all(...params);
   assert.deepStrictEqual(rows.map((row) => row.id), [4]);
-  assert.deepStrictEqual(params, ['talking', 7, 7, 7, 7, 7, 24, 0]);
+  assert.deepStrictEqual(params, [7, 7, 7, 7, 7, 'talking', 24, 0]);
 });
 
 for (const [name, status, contentType, creatorType, expected] of [
   ['unsorted reel with creator type is hidden', 'unsorted', null, 'talking', []],
   ['unsorted reel with content_type is hidden', 'unsorted', 'talking', null, []],
   ['needs_look reel hidden', 'needs_look', 'talking', 'talking', []],
+  ['auto reel without a type hidden', 'auto', null, 'talking', []],
+  ['manual reel without a type hidden', 'manual', null, 'talking', []],
   ['auto reel visible', 'auto', 'talking', null, [1]],
   ['manual reel visible', 'manual', 'talking', null, [1]],
 ]) {
@@ -168,8 +174,8 @@ for (const [name, status, contentType, creatorType, expected] of [
 }
 
 for (const [name, owned, expected] of [
-  ['fallback — no creators, niche reels from any creator visible', false, [2, 1]],
-  ["with creators — other creators' niche reels hidden", true, [1]],
+  ['fallback — no creators, all sorted reels visible with niche ones first', false, [2, 1, 3]],
+  ["with creators — other creators' reels hidden, other sorted types visible", true, [1, 3]],
 ]) {
   test(name, () => {
     const sqlite = makePostsDb();
@@ -182,11 +188,11 @@ for (const [name, owned, expected] of [
     assert.deepStrictEqual(sqlite.prepare(sql.replace(/\$\d+/g, '?')).all(...params).map(r => r.id), expected);
   });
 }
-test("own creator's reel outside her niches hidden", () => {
+test("own creator's sorted reel outside her niches remains visible", () => {
   const sqlite = makePostsDb();
   sqlite.exec("INSERT INTO model_creators VALUES (7,'mia.talks'); INSERT INTO posts (id,account_handle,content_type,video_cache_status) VALUES (1,'mia.talks','dance','cached')");
   const { sql, params } = buildMeFeedQuery(['talking'], { modelId: 7 });
-  assert.deepStrictEqual(sqlite.prepare(sql.replace(/\$\d+/g, '?')).all(...params), []);
+  assert.deepStrictEqual(sqlite.prepare(sql.replace(/\$\d+/g, '?')).all(...params).map(row => row.id), [1]);
 });
 
 function rankedReels(sqlite, options) {
@@ -206,9 +212,19 @@ test('look tags rank matching reels first without filtering unmatched reels', ()
   sqlite.close();
 });
 
+test('niche rank precedes look match, learned taste, and recency', () => {
+  const sqlite = makePostsDb();
+  sqlite.exec(`INSERT INTO posts (id,account_handle,content_type,posted_at,video_cache_status,ai_look_tags) VALUES
+    (1,'neutral','talking','2026-07-01','cached','[]'),
+    (2,'liked','dance','2026-07-03','cached','["alt","bedroom"]'),
+    (3,'neutral','dance','2026-07-04','cached','[]')`);
+  assert.deepStrictEqual(rankedReels(sqlite, { modelId: 7, lookTags: ['alt', 'bedroom'], taste: { creators: [['liked', 0.8]] } }), [1, 2, 3]);
+  sqlite.close();
+});
+
 test('no model tags → order unchanged', () => {
   assert.deepStrictEqual(buildMeFeedQuery(['talking'], { lookTags: [] }), buildMeFeedQuery(['talking']));
-  assert.match(buildMeFeedQuery(['talking'], { lookTags: [] }).sql, /ORDER BY posts\.posted_at DESC/);
+  assert.match(buildMeFeedQuery(['talking'], { lookTags: [] }).sql, /THEN 1 ELSE 0 END DESC, posts\.posted_at DESC/);
 });
 
 test('shuffle ignores look tags', () => {
