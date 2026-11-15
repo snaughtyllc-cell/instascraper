@@ -12,6 +12,7 @@ const modelReactions = require('./model-reactions');
 const thumbnails = require('./thumbnails');
 const { isValidShortcode, ensureReactReference, getPinnedReferencePath, availableReferencePath } = require('./react-reference');
 const { createReactRenderWorker, validateRenderRequest } = require('./react-render');
+const { createReactFetchWorker } = require('./react-fetch');
 
 const MEDIA_TTL_SECONDS = 6 * 60 * 60;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -43,6 +44,24 @@ function pagination(query, defaultLimit) {
 
 function signature(id, exp, secret) {
   return crypto.createHmac('sha256', secret).update(`${id}.${exp}`).digest('hex');
+}
+
+function reactMediaSignature(shortcode, exp, secret) {
+  return crypto.createHmac('sha256', secret).update(`react-media.${shortcode}.${exp}`).digest('hex');
+}
+
+function signedReactMedia(req, res, next) {
+  const secret = process.env.FILM_MEDIA_SECRET;
+  if (!secret) return res.status(503).json({ error: 'media_unavailable' });
+  const { shortcode } = req.params;
+  const { exp, sig } = req.query;
+  if (!isValidShortcode(shortcode) || typeof exp !== 'string' || !/^[1-9]\d*$/.test(exp)
+    || !Number.isSafeInteger(Number(exp)) || Number(exp) <= Math.floor(Date.now() / 1000)
+    || typeof sig !== 'string' || !/^[0-9a-f]{64}$/i.test(sig)
+    || !crypto.timingSafeEqual(Buffer.from(sig, 'hex'), Buffer.from(reactMediaSignature(shortcode, exp, secret), 'hex'))) {
+    return res.status(403).json({ error: 'invalid_signature' });
+  }
+  next();
 }
 
 function signedMedia(req, res, next) {
@@ -116,8 +135,16 @@ async function reelPresenter(pool, req, res) {
   };
 }
 
-function registerFilmApi(app, { pool, reactWorker = createReactRenderWorker({ pool }) }) {
+function registerFilmApi(app, { pool, reactWorker = createReactRenderWorker({ pool }),
+  reactFetchWorker = createReactFetchWorker({ pool }) }) {
   const router = express.Router();
+
+  router.get('/react-media/:shortcode', signedReactMedia, asyncHandler(async (req, res) => {
+    const result = await pool.query('SELECT state FROM film_react_refs WHERE shortcode = $1', [req.params.shortcode]);
+    const file = result.rows[0]?.state === 'ready' && getPinnedReferencePath(req.params.shortcode);
+    if (!file) return res.status(404).json({ error: 'reel_not_available' });
+    return sendCachedFile(res, file, { acceptRanges: true });
+  }));
 
   router.get('/media/:reelId', signedMedia, asyncHandler(async (req, res) => {
     const result = await pool.query(`SELECT posts.id, posts.shortcode, posts.video_cache_status,
@@ -154,17 +181,47 @@ function registerFilmApi(app, { pool, reactWorker = createReactRenderWorker({ po
 
   router.post('/react-reference', asyncHandler(async (req, res) => {
     if (!isValidShortcode(req.body?.shortcode)) return res.status(400).json({ error: 'invalid_shortcode' });
+    if (req.body.fetch !== undefined && typeof req.body.fetch !== 'boolean') {
+      return res.status(400).json({ error: 'invalid_fetch' });
+    }
     const secret = process.env.FILM_MEDIA_SECRET;
     if (!secret) return res.status(503).json({ error: 'media_unavailable' });
-    const reference = await ensureReactReference(pool, req.body.shortcode);
-    if (!reference) return res.status(404).json({ error: 'reel_not_available' });
+    const shortcode = req.body.shortcode;
+    const reference = await ensureReactReference(pool, shortcode);
+    let fetched = reference?.fetched;
+    let durationSec = reference?.durationSec;
+    if (!reference) {
+      if (req.body.fetch === false) return res.status(404).json({ error: 'reel_not_available' });
+      const result = await reactFetchWorker.request(shortcode);
+      if (result.state === 'fetching') return res.status(202).json({ state: 'fetching' });
+      if (result.state !== 'ready') return res.status(404).json({ error: 'reel_not_available' });
+      fetched = true;
+      durationSec = result.durationSec;
+    }
     const base = new URL(process.env.PUBLIC_BASE_URL || `${req.protocol}://${req.get('host')}`);
     if (!['http:', 'https:'].includes(base.protocol)) throw new Error('Invalid PUBLIC_BASE_URL');
     const exp = Math.floor(Date.now() / 1000) + MEDIA_TTL_SECONDS;
-    const url = new URL(`/film/v1/media/${reference.post.id}`, base);
+    const url = new URL(fetched ? `/film/v1/react-media/${shortcode}` : `/film/v1/media/${reference.post.id}`, base);
     url.searchParams.set('exp', String(exp));
-    url.searchParams.set('sig', signature(reference.post.id, exp, secret));
-    return res.json({ videoUrl: url.href, durationSec: reference.durationSec });
+    url.searchParams.set('sig', fetched ? reactMediaSignature(shortcode, exp, secret) : signature(reference.post.id, exp, secret));
+    return res.json({ videoUrl: url.href, durationSec: durationSec ?? null });
+  }));
+
+  router.post('/react-prefetch', asyncHandler(async (req, res) => {
+    const shortcodes = req.body?.shortcodes;
+    if (!Array.isArray(shortcodes) || shortcodes.length < 1 || shortcodes.length > 50
+      || shortcodes.some(shortcode => !isValidShortcode(shortcode))) {
+      return res.status(400).json({ error: 'invalid_shortcodes' });
+    }
+    let queued = 0;
+    for (const shortcode of new Set(shortcodes)) {
+      if (getPinnedReferencePath(shortcode)) continue;
+      const existing = await pool.query('SELECT id FROM posts WHERE shortcode = $1 LIMIT 1', [shortcode]);
+      if (existing.rows.length) continue;
+      const result = await reactFetchWorker.request(shortcode);
+      if (result.launched) queued++;
+    }
+    return res.status(202).json({ queued });
   }));
 
   router.post('/react-render', asyncHandler(async (req, res) => {

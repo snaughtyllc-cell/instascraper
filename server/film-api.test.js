@@ -68,7 +68,7 @@ beforeEach(async () => {
   process.env.HQ_PUBLIC_URL = 'https://hq.example.test';
   fs.rmSync(process.env.REACT_REF_DIR, { recursive: true, force: true });
   refreshed = [];
-  for (const table of ['film_reel_items', 'model_taste', 'model_saved_posts', 'model_post_feedback', 'model_assigned_posts', 'model_creators', 'posts', 'models']) {
+  for (const table of ['film_react_refs', 'film_reel_items', 'model_taste', 'model_saved_posts', 'model_post_feedback', 'model_assigned_posts', 'model_creators', 'posts', 'models']) {
     await pool.query(`DELETE FROM ${table}`);
   }
   await pool.query(`INSERT INTO models (id,name,primary_niche,secondary_niches,look_tags,hq_project_id,email,password_hash,login_enabled)
@@ -383,8 +383,8 @@ test('thumb serves cached JPEG only, returns 404 when absent and cannot escape c
   assert.equal((await appRequest(app, { path: url })).status, 404);
 });
 
-test('both React routes authenticate before validating or parsing their bodies', async () => {
-  for (const route of ['react-reference', 'react-render']) {
+test('React routes authenticate before validating or parsing their bodies', async () => {
+  for (const route of ['react-reference', 'react-prefetch', 'react-render']) {
     for (const authorization of ['', 'Bearer wrong', 'Basic fake-film-service-key']) {
       const response = await request('POST', `/film/v1/${route}`, '{', { Authorization: authorization });
       assert.equal(response.status, 401);
@@ -396,13 +396,14 @@ test('both React routes authenticate before validating or parsing their bodies',
   }
 });
 
-test('react-reference validates shortcodes and returns 404 for absent or unavailable reels', async () => {
+test('react-reference validates shortcodes and returns 404 for recently failed fetches', async () => {
   for (const shortcode of [undefined, null, {}, 'abcd', 'x'.repeat(65), '../outside']) {
     const response = await request('POST', '/film/v1/react-reference', { shortcode });
     assert.equal(response.status, 400);
     assert.deepEqual(response.body, { error: 'invalid_shortcode' });
   }
   for (const shortcode of ['missing-reel', 'film-110']) {
+    await pool.query("INSERT INTO film_react_refs (shortcode, state, updated_at) VALUES ($1, 'failed', $2)", [shortcode, new Date().toISOString()]);
     const response = await request('POST', '/film/v1/react-reference', { shortcode });
     assert.equal(response.status, 404);
     assert.deepEqual(response.body, { error: 'reel_not_available' });
