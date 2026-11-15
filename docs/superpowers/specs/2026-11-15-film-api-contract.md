@@ -95,9 +95,11 @@ callback. The reference, prefetch and render routes use the existing `FILM_SERVI
   status changes; ordinary unpinned feed media retains its existing visibility restrictions.
 - When the shortcode is unknown or its existing post has no available video, the service checks the separate
   `film_react_refs` store. A ready reference returns 200 with a signed `/film/v1/react-media/:shortcode` URL.
-  With `fetch` omitted or `true`, an absent reference or a failure at least 6 hours old starts an on-demand
-  Apify Instagram reel fetch and returns `202 { "state": "fetching" }`; subsequent requests while it is queued
-  or fetching also return 202.
+  With `fetch` omitted or `true`, an absent reference or a retryable failure starts an on-demand Apify
+  Instagram reel fetch and returns `202 { "state": "fetching" }`; subsequent requests while it is queued
+  or fetching also return 202. Failures with `apify_failed`, `apify_busy`, `apify_network`, `fetch_timeout`
+  or `worker_restarted` retry after 10 minutes, including existing `apify_failed` rows. Permanent failures
+  such as `no_video`, `apify_error_stub`, `download_too_large` and `invalid_video_type` retry after 6 hours.
   HQ can poll `react-reference` until it receives 200 or 404. A recent failure returns
   `404 { "error": "reel_not_available" }`. The rolling 24-hour launch cap or a blocked Apify budget returns
   the same 404 without launching a fetch. Fetches use the existing Apify token and record purpose `react_ref`;
@@ -106,16 +108,25 @@ callback. The reference, prefetch and render routes use the existing `FILM_SERVI
   deduplicated after validation. Invalid input returns `400 { "error": "invalid_shortcodes" }` before any fetch
   is queued. Existing posts, pinned files, ready references and active fetches are skipped. Recent failures,
   the daily cap and blocked budgets also queue nothing. The response is `202 { "queued": n }`, counting only
-  new fetches; old failures may retry after 6 hours.
+  new fetches. New work enters an in-process queue and runs serially by default; failed references use
+  the same 10-minute transient or 6-hour permanent retry windows as `react-reference`.
 - `GET /film/v1/react-media/:shortcode?exp&sig` needs only its signed URL and serves a ready, nonempty reference
   file with HTTP Range support. Invalid or expired signatures return 403; missing files or references that
   are not ready return `404 { "error": "reel_not_available" }`.
-- Fetches are deduplicated by shortcode and run at concurrency 2 by default, with an overall 180-second timeout.
+- Fetches are deduplicated by shortcode and run at concurrency 1 by default, with an overall 180-second timeout.
+  Apify authenticates with the existing token query parameter. Each fetch first uses
+  `apify~instagram-reel-scraper` with `{ directUrls: ["https://www.instagram.com/reel/<shortcode>/"], resultsLimit: 1 }`.
+  A successful run without a usable `videoUrl` falls back once to the generic Instagram actor with the same
+  `directUrls`, `resultsType: "posts"` and `resultsLimit: 1`. Runs request `REACT_FETCH_MEMORY_MB` MB of memory
+  (default 512). HTTP 402, 429, 5xx and Apify limit, memory, concurrency or rate errors keep the reference
+  fetching while retrying with bounded backoff within the overall timeout; exhausted retries fail with `apify_busy`.
   Each download is capped by `VIDEO_MAX_MB`, must have a `video/*` content type, and publishes its MP4 atomically.
   Failures store static error codes. On startup, fetches stuck for more than 10 minutes become failed with
   `worker_restarted`. The render worker also resolves ready fetched references for Instagram references.
   A separate `film_react_ref_attempts` ledger retains launch timestamps across retries and reserves queued
-  work against the daily cap. Queued and active claims send heartbeats; abandoned claims that age past
+  work against the daily cap. Only accepted Apify runs count as launches, including the generic fallback;
+  rejected or failed starts do not consume the cap or prevent an old `apify_failed` row from retrying.
+  Queued and active claims send heartbeats; abandoned claims that age past
   10 minutes after startup are also recovered on request. Apify runs receive a remote timeout and are
   aborted on local cancellation; uncertain remote outcomes remain reserved in the Apify budget ledger.
 - `POST /film/v1/react-render` accepts:
@@ -185,7 +196,8 @@ Runtime configuration:
 | `HQ_PUBLIC_URL` | Required HTTPS origin for raw/reference downloads and callbacks |
 | `REACT_REF_DIR` | `<DEFAULT_VIDEO_DIR>/../react-refs`; persistent pinned references |
 | `REACT_FETCH_DAILY_MAX` | `100` fetch launches per rolling 24 hours |
-| `REACT_FETCH_CONCURRENCY` | `2` simultaneous on-demand reference fetches |
+| `REACT_FETCH_CONCURRENCY` | `1` simultaneous on-demand reference fetch by default; prefetch queues in process |
+| `REACT_FETCH_MEMORY_MB` | `512` MB per Apify run |
 | `REACT_FETCH_TIMEOUT_SEC` | `180` wall-clock seconds per on-demand reference fetch |
 | `REACT_RENDER_CONCURRENCY` | `1` |
 | `REACT_RENDER_TIMEOUT_SEC` | `900` wall-clock seconds per ffmpeg render |

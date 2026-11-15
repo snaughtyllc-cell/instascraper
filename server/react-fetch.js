@@ -9,8 +9,10 @@ const { isValidShortcode, referenceFile, usableFile } = require('./react-referen
 
 const DAY = 24 * 60 * 60 * 1000;
 const RETRY_AFTER = 6 * 60 * 60 * 1000;
+const TRANSIENT_RETRY_AFTER = 10 * 60 * 1000;
+const TRANSIENT_FAILURE_CODES = new Set(['apify_failed', 'apify_busy', 'apify_network', 'fetch_timeout', 'worker_restarted']);
 const TERMINAL = new Set(['SUCCEEDED', 'FAILED', 'ABORTED', 'TIMED-OUT']);
-const FAILURE_CODES = new Set(['fetch_timeout', 'apify_failed', 'apify_error_stub', 'no_video',
+const FAILURE_CODES = new Set(['fetch_timeout', 'apify_failed', 'apify_busy', 'apify_network', 'apify_error_stub', 'no_video',
   'download_failed', 'download_too_large', 'invalid_video_type', 'invalid_video_url', 'invalid_video']);
 const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
 const failure = code => Object.assign(new Error(code), { code });
@@ -52,29 +54,71 @@ async function downloadReference(post, { videoDir, signal = new AbortController(
   }
 }
 
-function createApifyClient(env, fetchImpl, sleep, timeoutMs) {
-  async function request(route, signal, options = {}) {
+function createApifyClient(env = process.env, fetchImpl = fetch, sleep = delay, timeoutMs = 180000) {
+  const retryDelays = [15000, 30000, 60000];
+  const deadlines = new WeakMap();
+  const configuredMemory = Number(env.REACT_FETCH_MEMORY_MB);
+  const memory = Number.isSafeInteger(configuredMemory) && configuredMemory > 0 ? configuredMemory : 512;
+
+  async function backoff(ms, signal) {
+    let onAbort, timer;
+    try {
+      const pause = sleep === delay ? new Promise(resolve => { timer = setTimeout(resolve, ms); })
+        : Promise.resolve().then(() => sleep(ms, signal));
+      await Promise.race([pause, new Promise((_, reject) => {
+        onAbort = () => reject(failure('fetch_timeout'));
+        signal.addEventListener('abort', onAbort, { once: true });
+        if (signal.aborted) onAbort();
+      })]);
+    } finally {
+      clearTimeout(timer);
+      signal.removeEventListener('abort', onAbort);
+    }
+  }
+
+  async function request(route, resource, signal, options = {}, params = {}) {
     if (!env.APIFY_API_KEY) throw failure('apify_failed');
-    for (let attempt = 0; attempt < 3; attempt++) {
+    if (!deadlines.has(signal)) deadlines.set(signal, Date.now() + timeoutMs);
+    const url = new URL(`https://api.apify.com/v2/${resource}`);
+    url.search = new URLSearchParams({ token: env.APIFY_API_KEY, ...params }).toString();
+    for (let attempt = 0; ; attempt++) {
       if (signal.aborted) throw failure('fetch_timeout');
-      const response = await fetchImpl(`https://api.apify.com/v2/${route}`, { ...options, signal, redirect: 'manual',
-        headers: { Authorization: `Bearer ${env.APIFY_API_KEY}`, 'Content-Type': 'application/json' } });
-      if (response.ok) return response.json();
-      response.body?.destroy?.();
-      if ((response.status === 429 || response.status >= 500 && response.status <= 599) && attempt < 2) {
-        await sleep(250 * 2 ** attempt);
-        continue;
+      let response;
+      try {
+        response = await fetchImpl(url.toString(), { ...options, signal, redirect: 'manual',
+          headers: { 'Content-Type': 'application/json' } });
+      } catch {
+        throw failure(signal.aborted ? 'fetch_timeout' : 'apify_network');
       }
-      throw failure('apify_failed');
+      if (response.ok) {
+        try { return await response.json(); }
+        catch { throw failure(signal.aborted ? 'fetch_timeout' : 'apify_network'); }
+      }
+      let body;
+      try { body = await response.json(); }
+      catch { /* Error bodies are untrusted and may not be JSON. */ }
+      finally { response.body?.destroy?.(); }
+      const errorType = typeof body?.error?.type === 'string' ? body.error.type : '';
+      const safeType = /^[a-z0-9-]{1,64}$/.test(errorType) && !errorType.includes(env.APIFY_API_KEY)
+        ? errorType : 'unknown';
+      console.error(`[React fetch] apify_http route=${route} status=${response.status} type=${safeType}`);
+      if (signal.aborted) throw failure('fetch_timeout');
+      const transient = response.status !== 403 && (response.status === 402 || response.status === 429
+        || response.status >= 500 && response.status <= 599 || /limit|memory|concurrent|rate/i.test(errorType));
+      if (!transient) throw failure('apify_failed');
+      const wait = retryDelays[attempt];
+      if (wait === undefined || Date.now() + wait >= deadlines.get(signal)) throw failure('apify_busy');
+      await backoff(wait, signal);
     }
   }
   return {
-    startRun: async (actor, input, signal) => (await request(`acts/${actor}/runs?timeout=${Math.max(1, Math.ceil(timeoutMs / 1000))}`, signal,
-      { method: 'POST', body: JSON.stringify(input) })).data,
-    getRun: async (id, signal) => (await request(`actor-runs/${encodeURIComponent(id)}`, signal)).data,
-    getItems: (id, signal) => request(`actor-runs/${encodeURIComponent(id)}/dataset/items`, signal),
-    abortRun: async (id, signal) => (await request(`actor-runs/${encodeURIComponent(id)}/abort?gracefully=false`, signal,
-      { method: 'POST' })).data,
+    startRun: async (actor, input, signal) => (await request('startRun', `acts/${actor}/runs`, signal,
+      { method: 'POST', body: JSON.stringify(input) },
+      { timeout: String(Math.max(1, Math.ceil(timeoutMs / 1000))), memory: String(memory) })).data,
+    getRun: async (id, signal) => (await request('getRun', `actor-runs/${encodeURIComponent(id)}`, signal)).data,
+    getItems: (id, signal) => request('getItems', `actor-runs/${encodeURIComponent(id)}/dataset/items`, signal),
+    abortRun: async (id, signal) => (await request('abortRun', `actor-runs/${encodeURIComponent(id)}/abort`, signal,
+      { method: 'POST' }, { gracefully: 'false' })).data,
   };
 }
 
@@ -84,7 +128,7 @@ function createReactFetchWorker({ pool, env = process.env, now = Date.now, apify
   recordRunCompletion = scraper.recordRunCompletion } = {}) {
   const configuredConcurrency = Number(env.REACT_FETCH_CONCURRENCY);
   const concurrency = Number.isSafeInteger(configuredConcurrency) && configuredConcurrency > 0
-    ? Math.min(configuredConcurrency, 2) : 2;
+    ? Math.min(configuredConcurrency, 2) : 1;
   const configuredTimeout = positive(env.REACT_FETCH_TIMEOUT_SEC, 180) * 1000;
   const timeoutMs = configuredTimeout <= 2147483647 ? configuredTimeout : 180000;
   const configuredCap = Number(env.REACT_FETCH_DAILY_MAX ?? 100);
@@ -159,14 +203,18 @@ function createReactFetchWorker({ pool, env = process.env, now = Date.now, apify
     return entry.completionPromise;
   }
 
-  async function fetchReference(entry, signal, deadline) {
-    const run = await client.startRun(scraper.GENERIC_ACTOR_ID, {
-      directUrls: [`https://www.instagram.com/reel/${entry.shortcode}/`], resultsType: 'posts', resultsLimit: 1,
-    }, signal);
+  async function fetchActorItems(entry, actorId, input, signal, attemptId) {
+    const run = await client.startRun(actorId, input, signal);
     if (!run || typeof run.id !== 'string' || !/^[A-Za-z0-9_-]{1,128}$/.test(run.id)) throw failure('apify_failed');
     entry.runId = run.id;
     entry.runObject = run;
-    await recordRunLaunch(pool, { runId: run.id, actorId: scraper.GENERIC_ACTOR_ID,
+    // Only accepted runs consume the launch cap. Reinsert a reservation if a
+    // non-cancellable launch returns after the local timeout released it.
+    const stamp = new Date(now()).toISOString();
+    await pool.query(`INSERT INTO film_react_ref_attempts (attempt_id,shortcode,created_at,started_at)
+      VALUES ($1,$2,$3,$4) ON CONFLICT (attempt_id) DO UPDATE SET started_at=excluded.started_at`,
+    [attemptId, entry.shortcode, stamp, stamp]);
+    await recordRunLaunch(pool, { runId: run.id, actorId,
       purpose: 'react_ref', query: `reel:${entry.shortcode}`, nowMs: now() });
     entry.launchRecorded = true;
     if (signal.aborted) {
@@ -184,11 +232,42 @@ function createReactFetchWorker({ pool, env = process.env, now = Date.now, apify
       if (!current) throw failure('apify_failed');
       entry.runObject = current;
     }
-    const items = await client.getItems(run.id, signal);
-    if (!Array.isArray(items) || !items.length) throw failure('no_video');
-    const item = items.find(candidate => candidate && !scraper.isErrorStub(candidate)
-      && typeof candidate.videoUrl === 'string' && candidate.videoUrl);
-    if (!item) throw failure(items.every(scraper.isErrorStub) ? 'apify_error_stub' : 'no_video');
+    return client.getItems(run.id, signal);
+  }
+
+  async function fetchReference(entry, signal, deadline) {
+    const directUrls = [`https://www.instagram.com/reel/${entry.shortcode}/`];
+    entry.runAttemptIds = [entry.id];
+    let items = await fetchActorItems(entry, scraper.REEL_ACTOR_ID, { directUrls, resultsLimit: 1 }, signal, entry.id);
+    const usableItem = candidates => Array.isArray(candidates) && candidates.find(candidate => candidate
+      && !scraper.isErrorStub(candidate) && typeof candidate.videoUrl === 'string' && allowedVideoUrl(candidate.videoUrl));
+    let item = usableItem(items);
+    if (!item) {
+      // A successful reel run without a playable URL gets one generic fallback.
+      // Complete its cost ledger before replacing the current remote run.
+      await finalizeRun(entry);
+      if (signal.aborted) throw failure('fetch_timeout');
+      const attemptId = crypto.randomUUID();
+      await transaction(async db => {
+        const budget = await budgetStatus(db, now());
+        const count = await db.query('SELECT COUNT(*) AS total FROM film_react_ref_attempts WHERE started_at >= $1 OR started_at IS NULL',
+          [new Date(now() - DAY).toISOString()]);
+        if (budget.over || budget.blocked || Number(count.rows[0]?.total) >= dailyMax) throw failure('apify_busy');
+        if (signal.aborted) throw failure('fetch_timeout');
+        await db.query('INSERT INTO film_react_ref_attempts (attempt_id,shortcode,created_at) VALUES ($1,$2,$3)',
+          [attemptId, entry.shortcode, new Date(now()).toISOString()]);
+      });
+      entry.runAttemptIds.push(attemptId);
+      if (signal.aborted) {
+        await pool.query('DELETE FROM film_react_ref_attempts WHERE attempt_id=$1 AND started_at IS NULL', [attemptId]);
+        throw failure('fetch_timeout');
+      }
+      entry.runId = entry.runObject = entry.launchRecorded = entry.abortPromise = entry.completionPromise = undefined;
+      items = await fetchActorItems(entry, scraper.GENERIC_ACTOR_ID,
+        { directUrls, resultsType: 'posts', resultsLimit: 1 }, signal, attemptId);
+      item = usableItem(items);
+    }
+    if (!item) throw failure(Array.isArray(items) && items.length && items.every(scraper.isErrorStub) ? 'apify_error_stub' : 'no_video');
     if (signal.aborted) throw failure('fetch_timeout');
     const finalPath = referenceFile(entry.shortcode, env);
     fs.mkdirSync(path.dirname(finalPath), { recursive: true });
@@ -216,9 +295,9 @@ function createReactFetchWorker({ pool, env = process.env, now = Date.now, apify
           [new Date(now()).toISOString(), entry.shortcode, entry.attempt]);
         await db.query('DELETE FROM film_react_ref_attempts WHERE attempt_id=$1', [entry.id]);
         console.log('[Metric] react_fetch blocked=budget');
+        console.error('[React fetch] failed code=budget_blocked');
         return false;
       }
-      await db.query('UPDATE film_react_ref_attempts SET started_at=$1 WHERE attempt_id=$2', [new Date(now()).toISOString(), entry.id]);
       return true;
     });
     if (!claimed) return;
@@ -240,6 +319,7 @@ function createReactFetchWorker({ pool, env = process.env, now = Date.now, apify
       });
     } catch (caught) {
       error = FAILURE_CODES.has(caught?.code || caught?.message) ? (caught.code || caught.message) : 'fetch_failed';
+      console.error(`[React fetch] failed code=${error}`);
       const failed = await pool.query("UPDATE film_react_refs SET state='failed', error=$1, updated_at=$2 WHERE shortcode=$3 AND state='fetching' AND attempts=$4",
         [error, new Date(now()).toISOString(), entry.shortcode, entry.attempt]);
       if (failed.rowCount && entry.publishedPath) fs.rmSync(entry.publishedPath, { force: true });
@@ -249,6 +329,9 @@ function createReactFetchWorker({ pool, env = process.env, now = Date.now, apify
       controller.abort();
       if (entry.dir) fs.rmSync(entry.dir, { recursive: true, force: true });
       await finalizeRun(entry);
+      for (const id of entry.runAttemptIds || [entry.id]) {
+        await pool.query('DELETE FROM film_react_ref_attempts WHERE attempt_id=$1 AND started_at IS NULL', [id]);
+      }
       console.log(`[Metric] react_fetch outcome=${error || 'ready'}`);
     }
   }
@@ -259,6 +342,7 @@ function createReactFetchWorker({ pool, env = process.env, now = Date.now, apify
       active++;
       run(entry).catch(async () => {
         console.error('[React fetch] worker_error');
+        console.error('[React fetch] failed code=fetch_failed');
         try {
           await transaction(async db => {
             const failed = await db.query("UPDATE film_react_refs SET state='failed', error='fetch_failed', updated_at=$1 WHERE shortcode=$2 AND state='fetching' AND attempts=$3",
@@ -289,14 +373,24 @@ function createReactFetchWorker({ pool, env = process.env, now = Date.now, apify
       // Recover every orphan, including unrelated queued rows whose reservations
       // would otherwise continue consuming the daily allowance after a restart.
       await recoverStale(db);
+      // Older workers stamped attempts before Apify accepted a run. Release
+      // those rejected launches across the whole failed cohort; real launches
+      // remain charged through their corresponding cost-ledger entries.
+      await db.query(`DELETE FROM film_react_ref_attempts WHERE EXISTS (
+        SELECT 1 FROM film_react_refs refs
+        WHERE refs.shortcode=film_react_ref_attempts.shortcode AND refs.state='failed' AND refs.error='apify_failed'
+        AND NOT EXISTS (SELECT 1 FROM apify_runs runs
+          WHERE runs.purpose='react_ref' AND runs.query='reel:' || refs.shortcode
+          AND substr(runs.started_at,1,19) >= substr(film_react_ref_attempts.created_at,1,19)
+          AND substr(runs.started_at,1,19) <= substr(refs.updated_at,1,19)))`);
       const selected = await db.query('SELECT * FROM film_react_refs WHERE shortcode=$1', [shortcode]);
       const row = selected.rows[0];
       if (row?.state === 'ready' && usableFile(referenceFile(shortcode, env))) {
         return { state: 'ready', durationSec: row.duration_sec, launched: false };
       }
       if (row?.state === 'fetching') return { state: 'fetching', launched: false };
-      if (row?.state === 'failed' && row.error !== 'worker_restarted'
-        && Date.parse(row.updated_at) > now() - RETRY_AFTER) return unavailable();
+      if (row?.state === 'failed' && Date.parse(row.updated_at) > now()
+        - (TRANSIENT_FAILURE_CODES.has(row.error) ? TRANSIENT_RETRY_AFTER : RETRY_AFTER)) return unavailable();
       const budget = await budgetStatus(db, now());
       if (budget.over || budget.blocked) { console.log('[Metric] react_fetch blocked=budget'); return unavailable(); }
       const count = await db.query('SELECT COUNT(*) AS total FROM film_react_ref_attempts WHERE started_at >= $1 OR started_at IS NULL',
@@ -334,4 +428,4 @@ function createReactFetchWorker({ pool, env = process.env, now = Date.now, apify
   return { start, request, waitForIdle };
 }
 
-module.exports = { createReactFetchWorker, downloadReference, allowedVideoUrl };
+module.exports = { createReactFetchWorker, createApifyClient, downloadReference, allowedVideoUrl };
