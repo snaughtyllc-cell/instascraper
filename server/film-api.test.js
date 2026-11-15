@@ -15,6 +15,7 @@ Object.assign(process.env, {
   AUTH_PASSWORD: 'fake-film-admin-password', SESSION_SECRET: 'fake-film-test-session-secret',
   INSTASCRAPER_API_KEY: '', GEMINI_API_KEY: '', APIFY_API_KEY: '', ANTHROPIC_API_KEY: '', NOTION_API_KEY: '', SENTRY_DSN: '',
   FILM_SERVICE_KEY: 'fake-film-service-key', FILM_MEDIA_SECRET: 'fake-film-media-secret', PUBLIC_BASE_URL: '',
+  HQ_PUBLIC_URL: 'https://hq.example.test', REACT_REF_DIR: path.join(dir, 'react-refs'),
 });
 
 // Keep real sendFile/Range behavior while isolating test media from the cache.
@@ -64,6 +65,8 @@ beforeEach(async () => {
   process.env.FILM_SERVICE_KEY = 'fake-film-service-key';
   process.env.FILM_MEDIA_SECRET = 'fake-film-media-secret';
   process.env.PUBLIC_BASE_URL = '';
+  process.env.HQ_PUBLIC_URL = 'https://hq.example.test';
+  fs.rmSync(process.env.REACT_REF_DIR, { recursive: true, force: true });
   refreshed = [];
   for (const table of ['film_reel_items', 'model_taste', 'model_saved_posts', 'model_post_feedback', 'model_assigned_posts', 'model_creators', 'posts', 'models']) {
     await pool.query(`DELETE FROM ${table}`);
@@ -378,4 +381,125 @@ test('thumb serves cached JPEG only, returns 404 when absent and cannot escape c
   fs.writeFileSync(path.join(dir, 'outside.jpg'), 'outside cache');
   await pool.query('UPDATE posts SET shortcode = $1 WHERE id = $2', ['../outside', 101]);
   assert.equal((await appRequest(app, { path: url })).status, 404);
+});
+
+test('both React routes authenticate before validating or parsing their bodies', async () => {
+  for (const route of ['react-reference', 'react-render']) {
+    for (const authorization of ['', 'Bearer wrong', 'Basic fake-film-service-key']) {
+      const response = await request('POST', `/film/v1/${route}`, '{', { Authorization: authorization });
+      assert.equal(response.status, 401);
+      assert.deepEqual(response.body, { error: 'unauthorized' });
+    }
+    const malformed = await request('POST', `/film/v1/${route}`, '{');
+    assert.equal(malformed.status, 400);
+    assert.deepEqual(malformed.body, { error: 'invalid_json' });
+  }
+});
+
+test('react-reference validates shortcodes and returns 404 for absent or unavailable reels', async () => {
+  for (const shortcode of [undefined, null, {}, 'abcd', 'x'.repeat(65), '../outside']) {
+    const response = await request('POST', '/film/v1/react-reference', { shortcode });
+    assert.equal(response.status, 400);
+    assert.deepEqual(response.body, { error: 'invalid_shortcode' });
+  }
+  for (const shortcode of ['missing-reel', 'film-110']) {
+    const response = await request('POST', '/film/v1/react-reference', { shortcode });
+    assert.equal(response.status, 404);
+    assert.deepEqual(response.body, { error: 'reel_not_available' });
+  }
+});
+
+test('react-reference signs and pins cached media and survives pruning cache and status', async () => {
+  const cache = path.join(dir, 'videos', '101.mp4');
+  fs.writeFileSync(cache, 'reference bytes');
+  process.env.PUBLIC_BASE_URL = 'https://media.example.test/';
+  const response = await request('POST', '/film/v1/react-reference', { shortcode: 'film-101' });
+  assert.equal(response.status, 200);
+  assert.deepEqual(Object.keys(response.body).sort(), ['durationSec', 'videoUrl']);
+  assert.equal(response.body.durationSec, null, 'unprobeable file has no invented duration');
+  const url = new URL(response.body.videoUrl);
+  assert.equal(url.origin, 'https://media.example.test');
+  assert.equal(url.pathname + url.search, signedPath('media', 101, Number(url.searchParams.get('exp'))));
+  assert.equal(fs.readFileSync(path.join(process.env.REACT_REF_DIR, 'film-101.mp4'), 'utf8'), 'reference bytes');
+  fs.writeFileSync(`${cache}.replacement`, 'new cache bytes');
+  fs.renameSync(`${cache}.replacement`, cache);
+  assert.equal((await appRequest(app, { path: url.pathname + url.search })).text, 'new cache bytes', 'media prefers normal cache');
+  fs.unlinkSync(cache);
+  await pool.query('UPDATE posts SET video_cache_status = NULL WHERE id = $1', [101]);
+  const media = await appRequest(app, { path: url.pathname + url.search, headers: { Range: 'bytes=0-8' } });
+  assert.equal(media.status, 206);
+  assert.equal(media.text, 'reference');
+  assert.equal(media.headers['content-range'], 'bytes 0-8/15');
+});
+
+test('react-reference can explicitly authorize an existing reel outside Find visibility', async () => {
+  fs.writeFileSync(path.join(dir, 'videos', '106.mp4'), 'unsorted reference');
+  assert.equal((await appRequest(app, { path: signedPath('media', 106) })).status, 404);
+  const reference = await request('POST', '/film/v1/react-reference', { shortcode: 'film-106' });
+  assert.equal(reference.status, 200, 'shortcode lookup is not limited to the Find feed');
+  const url = new URL(reference.body.videoUrl);
+  assert.equal((await appRequest(app, { path: url.pathname + url.search })).text, 'unsorted reference');
+  assert.ok(!(await request('GET', `${filmPath}/feed`)).body.reels.some(row => row.id === 106), 'feed scope remains unchanged');
+});
+
+test('react-reference downloads an uncached reel before pinning', async () => {
+  const videos = require('./videos');
+  const originalDownload = videos.downloadVideo;
+  const cache = path.join(dir, 'videos', '109.mp4');
+  fs.rmSync(cache, { force: true });
+  let downloaded = 0;
+  videos.downloadVideo = async post => {
+    assert.equal(post.id, 109);
+    downloaded++;
+    fs.writeFileSync(cache, 'downloaded reference');
+    return { status: 'cached', path: cache };
+  };
+  try {
+    const response = await request('POST', '/film/v1/react-reference', { shortcode: 'film-109' });
+    assert.equal(response.status, 200);
+    assert.equal(downloaded, 1);
+    assert.equal(fs.readFileSync(path.join(process.env.REACT_REF_DIR, 'film-109.mp4'), 'utf8'), 'downloaded reference');
+  } finally { videos.downloadVideo = originalDownload; }
+});
+
+test('react-render validates before enqueue and returns accepted for duplicate job IDs', async () => {
+  const express = require('express');
+  const { registerFilmApi } = require('./film-api');
+  const api = express();
+  const jobs = new Map();
+  const worker = { enqueue: async body => { if (!jobs.has(body.jobId)) jobs.set(body.jobId, body); } };
+  assert.equal(registerFilmApi(api, { pool, reactWorker: worker }), worker);
+  const renderRequest = body => appRequest(api, {
+    method: 'POST', path: '/film/v1/react-render', body,
+    headers: { Authorization: 'Bearer fake-film-service-key' },
+  });
+  const body = {
+    jobId: itemId, reference: { kind: 'instagram', shortcode: 'film-101' },
+    rawUrl: 'https://hq.example.test/raw.mp4',
+    uploadUrl: 'https://www.googleapis.com/upload/drive/v3/files?uploadType=resumable&upload_id=fake',
+    callbackUrl: 'https://hq.example.test/api/filming/react/callback',
+    crop: { top: 0, height: 0.5 }, syncMs: 500, output: 'stitched', referenceAudio: true,
+  };
+  for (const invalid of [
+    { ...body, jobId: 'bad' }, { ...body, rawUrl: 'https://outside.example/raw.mp4' },
+    { ...body, uploadUrl: 'https://outside.example/upload' },
+    { ...body, callbackUrl: 'http://hq.example.test/callback' },
+    { ...body, reference: { kind: 'url', url: 'https://outside.example/ref.mp4' } },
+  ]) {
+    const response = await renderRequest(invalid);
+    assert.equal(response.status, 400);
+    assert.equal(typeof response.body.error, 'string');
+    assert.equal(jobs.size, 0);
+  }
+  for (let i = 0; i < 2; i++) {
+    const response = await renderRequest(body);
+    assert.equal(response.status, 202);
+    assert.deepEqual(response.body, { accepted: true });
+  }
+  assert.equal(jobs.size, 1);
+  assert.deepEqual(jobs.get(itemId), body);
+  worker.enqueue = async () => { throw new Error('https://secret-capability.example'); };
+  const failure = await renderRequest(body);
+  assert.equal(failure.status, 503);
+  assert.deepEqual(failure.body, { error: 'render_unavailable' });
 });
