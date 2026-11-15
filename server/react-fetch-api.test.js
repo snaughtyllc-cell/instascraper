@@ -4,6 +4,7 @@ const crypto = require('node:crypto');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
+const { spawnSync } = require('node:child_process');
 const express = require('express');
 const Database = require('better-sqlite3');
 const { ensureFilmTables } = require('./film-migration');
@@ -74,12 +75,19 @@ function signedPath(shortcode, exp = Math.floor(Date.now() / 1000) + 3600, names
   return `/film/v1/react-media/${shortcode}?exp=${exp}&sig=${sig}`;
 }
 
+function originalSignedPath(shortcode, exp = Math.floor(Date.now() / 1000) + 3600) {
+  const sig = crypto.createHmac('sha256', process.env.FILM_MEDIA_SECRET)
+    .update(`react-media.${shortcode}.original.${exp}`).digest('hex');
+  return `/film/v1/react-media/${shortcode}?variant=original&exp=${exp}&sig=${sig}`;
+}
+
 test('React analysis keeps the fetching shape then serves analysis and the React-ready MP4', async t => {
   let result = { state: 'fetching', analysis: null };
+  let resultLookups = 0;
   const calls = [];
   const f = await fixture(t, undefined, {
     request: async (shortcode, reference) => { calls.push({ shortcode, reference }); return result; },
-    getResult: async () => result,
+    getResult: async () => { resultLookups++; return result; },
   });
   f.reference('analyzed_123', 'ready');
   const pending = await f.request('POST', '/film/v1/react-reference', { shortcode: 'analyzed_123', fetch: false });
@@ -98,11 +106,25 @@ test('React analysis keeps the fetching shape then serves analysis and the React
   assert.equal(ready.body.durationSec, 7.25);
   const url = new URL(ready.body.videoUrl);
   assert.equal(url.pathname + url.search, signedPath('analyzed_123', Number(url.searchParams.get('exp'))));
+  const originalUrl = new URL(ready.body.originalVideoUrl);
+  const originalPath = originalUrl.pathname + originalUrl.search;
+  assert.equal(originalUrl.origin, 'https://media.example.test');
+  assert.equal(originalPath, originalSignedPath('analyzed_123', Number(originalUrl.searchParams.get('exp'))));
   const media = await appRequest(f.app, { path: url.pathname + url.search, headers: { Range: 'bytes=0-4' } });
   assert.equal(media.status, 206);
   assert.equal(media.text, 'muted');
+  assert.equal(resultLookups, 1);
+  const original = await appRequest(f.app, { path: originalPath, headers: { Range: 'bytes=2-5' } });
+  assert.equal(original.status, 206);
+  assert.equal(original.text, '2345');
+  assert.equal(original.headers['content-range'], 'bytes 2-5/10');
+  assert.equal(resultLookups, 1, 'original media never consults the analysis worker');
   assert.deepEqual(f.calls, []);
   fs.unlinkSync(path.join(f.dir, 'analyzed_123.mp4'));
+  const missingOriginal = await appRequest(f.app, { path: originalPath });
+  assert.equal(missingOriginal.status, 404, 'an original URL must never fall back to the derivative');
+  assert.deepEqual(missingOriginal.body, { error: 'reel_not_available' });
+  assert.equal(resultLookups, 1);
   assert.equal((await appRequest(f.app, { path: url.pathname + url.search })).text, 'muted creator',
     'a ready derivative remains playable without the original pin');
   fs.writeFileSync(path.join(f.dir, 'analyzed_123.mp4'), 'original');
@@ -124,9 +146,15 @@ test('failed or timed-out analysis serves original with null analysis for posts 
     assert.equal(response.body.analysis, null);
     const url = new URL(response.body.videoUrl);
     assert.equal(url.pathname, `/film/v1/react-media/${shortcode}`);
+    const originalUrl = new URL(response.body.originalVideoUrl);
+    assert.equal(originalUrl.pathname + originalUrl.search,
+      originalSignedPath(shortcode, Number(originalUrl.searchParams.get('exp'))));
     const media = await appRequest(f.app, { path: url.pathname + url.search });
     assert.equal(media.status, 200);
     assert.equal(media.text, shortcode === 'pinned_analysis' ? 'pinned original' : '0123456789');
+    const original = await appRequest(f.app, { path: originalUrl.pathname + originalUrl.search });
+    assert.equal(original.status, 200);
+    assert.equal(original.text, media.text, 'without analysis both URLs serve the original pin');
   }
 });
 
@@ -330,20 +358,116 @@ test('a post with no video uses its ready fetched reference URL and stored durat
 test('signed fetched media supports full, Range and unsatisfiable requests without bearer', async t => {
   const f = await fixture(t);
   f.reference('ready_123', 'ready');
-  const url = signedPath('ready_123');
-  const full = await appRequest(f.app, { path: url });
-  assert.equal(full.status, 200);
-  assert.equal(full.text, '0123456789');
-  assert.equal(full.headers['content-type'], 'video/mp4');
-  assert.equal(full.headers['cache-control'], 'private, no-store');
-  const partial = await appRequest(f.app, { path: url, headers: { Range: 'bytes=2-5' } });
-  assert.equal(partial.status, 206);
-  assert.equal(partial.text, '2345');
-  assert.equal(partial.headers['content-range'], 'bytes 2-5/10');
-  const beyond = await appRequest(f.app, { path: url, headers: { Range: 'bytes=20-30' } });
-  assert.equal(beyond.status, 416);
-  assert.deepEqual(beyond.body, { error: 'range_not_satisfiable' });
+  for (const url of [signedPath('ready_123'), originalSignedPath('ready_123')]) {
+    const full = await appRequest(f.app, { path: url });
+    assert.equal(full.status, 200);
+    assert.equal(full.text, '0123456789');
+    assert.equal(full.headers['content-type'], 'video/mp4');
+    assert.equal(full.headers['cache-control'], 'private, no-store');
+    const partial = await appRequest(f.app, { path: url, headers: { Range: 'bytes=2-5' } });
+    assert.equal(partial.status, 206);
+    assert.equal(partial.text, '2345');
+    assert.equal(partial.headers['content-range'], 'bytes 2-5/10');
+    const beyond = await appRequest(f.app, { path: url, headers: { Range: 'bytes=20-30' } });
+    assert.equal(beyond.status, 416);
+    assert.deepEqual(beyond.body, { error: 'range_not_satisfiable' });
+  }
 });
+
+test('original media signatures bind the variant and reject malformed variant queries', async t => {
+  let analysisLookups = 0;
+  const f = await fixture(t, undefined, {
+    request: async () => ({ state: 'failed', analysis: null }),
+    getResult: async () => { analysisLookups++; throw new Error('original media must not read analysis'); },
+  });
+  f.reference('bound_123', 'ready');
+  const exp = Math.floor(Date.now() / 1000) + 3600;
+  const ready = signedPath('bound_123', exp);
+  const original = originalSignedPath('bound_123', exp);
+  for (const url of [
+    `${ready}&variant=original`, original.replace('variant=original&', ''),
+    `${original}&variant=original`, `${original}&variant=`,
+    original.replace('variant=original', 'variant='),
+    original.replace('variant=original', 'variant=ready'),
+    original.replace('variant=original', 'variant=Original'),
+    original.replace('variant=original', 'variant=original%20'),
+    original.replace('variant=original', 'variant[]=original'),
+    original.replace('variant=original', 'variant[value]=original'),
+    original.replace('variant=original', 'variant=original&variant[]=original'),
+    original.replace(`exp=${exp}`, `exp=${Math.floor(Date.now() / 1000)}`),
+    original.replace('/bound_123?', '/other_123?'),
+  ]) {
+    const response = await appRequest(f.app, { path: url });
+    assert.equal(response.status, 403, url);
+    assert.deepEqual(response.body, { error: 'invalid_signature' });
+  }
+  const response = await appRequest(f.app, { path: original });
+  assert.equal(response.status, 200);
+  assert.equal(response.text, '0123456789');
+  assert.equal(analysisLookups, 0, 'signature rejection and original serving precede analysis lookup');
+});
+
+test('original media serves an existing post pin even when ready analysis is present', async t => {
+  let analysisLookups = 0;
+  const f = await fixture(t, undefined, {
+    request: async () => ({ state: 'ready', analysis: { creatorMuted: true }, path: path.join(f.dir, 'post_original.react.mp4') }),
+    getResult: async () => { analysisLookups++; return { state: 'ready', analysis: { creatorMuted: true },
+      path: path.join(f.dir, 'post_original.react.mp4') }; },
+  });
+  f.db.prepare('INSERT INTO posts (id,shortcode) VALUES (?,?)').run(43, 'post_original');
+  fs.writeFileSync(path.join(f.dir, 'post_original.mp4'), 'post original with creator');
+  fs.writeFileSync(path.join(f.dir, 'post_original.react.mp4'), 'post ready without creator');
+  const response = await f.request('POST', '/film/v1/react-reference', { shortcode: 'post_original' });
+  assert.equal(response.status, 200);
+  for (const [field, expected] of [['originalVideoUrl', 'post original with creator'], ['videoUrl', 'post ready without creator']]) {
+    const url = new URL(response.body[field]);
+    const media = await appRequest(f.app, { path: url.pathname + url.search });
+    assert.equal(media.status, 200);
+    assert.equal(media.text, expected);
+  }
+  assert.equal(analysisLookups, 1, 'only the React-ready URL reads analysis');
+});
+
+const ffmpegAvailable = spawnSync('ffmpeg', ['-version'], { stdio: 'ignore' }).status === 0;
+test('original signed MP4 keeps creator audio byte-for-byte while the ready variant stays muted',
+  { skip: !ffmpegAvailable, timeout: 30000 }, async t => {
+    const f = await fixture(t, undefined, {
+      request: async () => ({ state: 'ready', analysis: { creatorMuted: true }, path: readyFile }),
+      getResult: async () => ({ state: 'ready', analysis: { creatorMuted: true }, path: readyFile }),
+    });
+    f.reference('audio_123', 'ready', false);
+    const originalFile = path.join(f.dir, 'audio_123.mp4');
+    const readyFile = path.join(f.dir, 'audio_123.react.mp4');
+    const run = args => {
+      const result = spawnSync('ffmpeg', ['-hide_banner', '-loglevel', 'error', '-nostdin', '-y', ...args],
+        { maxBuffer: 4 * 1024 * 1024 });
+      assert.equal(result.status, 0, result.stderr?.toString() || result.error?.message);
+      return result.stdout;
+    };
+    run(['-f', 'lavfi', '-i', 'color=c=blue:s=64x96:r=10:d=1.2', '-f', 'lavfi', '-i',
+      'sine=frequency=440:sample_rate=48000:duration=1.2', '-c:v', 'libx264', '-threads', '1',
+      '-pix_fmt', 'yuv420p', '-c:a', 'aac', '-b:a', '96k', '-movflags', '+faststart', originalFile]);
+    run(['-i', originalFile, '-c:v', 'copy', '-af', 'volume=0', '-c:a', 'aac', '-movflags', '+faststart', readyFile]);
+    const response = await f.request('POST', '/film/v1/react-reference', { shortcode: 'audio_123' });
+    assert.equal(response.status, 200);
+    const audioLevels = {};
+    for (const [field, file] of [['originalVideoUrl', originalFile], ['videoUrl', readyFile]]) {
+      const url = new URL(response.body[field]);
+      const media = await appRequest(f.app, { path: url.pathname + url.search });
+      assert.equal(media.status, 200);
+      assert.equal(media.headers['content-type'], 'video/mp4');
+      assert.deepEqual(media.buffer, fs.readFileSync(file), `${field} serves exactly the published MP4`);
+      const receivedFile = path.join(f.dir, `${field}.received.mp4`);
+      fs.writeFileSync(receivedFile, media.buffer);
+      const pcm = run(['-i', receivedFile, '-vn', '-ac', '1', '-ar', '48000', '-f', 'f32le', 'pipe:1']);
+      assert.ok(pcm.length >= 48000 * 4, 'the served MP4 contains a decodable audio track');
+      let squared = 0;
+      for (let offset = 0; offset < pcm.length; offset += 4) squared += pcm.readFloatLE(offset) ** 2;
+      audioLevels[field] = Math.sqrt(squared / (pcm.length / 4));
+    }
+    assert.ok(audioLevels.originalVideoUrl > 0.05, `creator audio is audible: RMS=${audioLevels.originalVideoUrl}`);
+    assert.ok(audioLevels.videoUrl < 0.00001, `ready creator audio stays muted: RMS=${audioLevels.videoUrl}`);
+  });
 
 test('fetched media rejects invalid, expired, duplicated and ordinary media signatures', async t => {
   const f = await fixture(t);
@@ -376,9 +500,11 @@ test('fetched media serves only ready, nonempty regular files', async t => {
   fs.writeFileSync(outside, 'not a reference');
   fs.symlinkSync(outside, path.join(f.dir, 'symlink_123.mp4'));
   for (const shortcode of ['failed_123', 'fetching_123', 'missing_123', 'empty_123', 'symlink_123', 'absent_123']) {
-    const response = await appRequest(f.app, { path: signedPath(shortcode) });
-    assert.equal(response.status, 404, shortcode);
-    assert.deepEqual(response.body, { error: 'reel_not_available' });
+    for (const url of [signedPath(shortcode), originalSignedPath(shortcode)]) {
+      const response = await appRequest(f.app, { path: url });
+      assert.equal(response.status, 404, shortcode);
+      assert.deepEqual(response.body, { error: 'reel_not_available' });
+    }
   }
 });
 

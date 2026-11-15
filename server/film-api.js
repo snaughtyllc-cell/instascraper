@@ -47,19 +47,21 @@ function signature(id, exp, secret) {
   return crypto.createHmac('sha256', secret).update(`${id}.${exp}`).digest('hex');
 }
 
-function reactMediaSignature(shortcode, exp, secret) {
-  return crypto.createHmac('sha256', secret).update(`react-media.${shortcode}.${exp}`).digest('hex');
+function reactMediaSignature(shortcode, exp, secret, variant) {
+  const scope = variant === 'original' ? `react-media.${shortcode}.original` : `react-media.${shortcode}`;
+  return crypto.createHmac('sha256', secret).update(`${scope}.${exp}`).digest('hex');
 }
 
 function signedReactMedia(req, res, next) {
   const secret = process.env.FILM_MEDIA_SECRET;
   if (!secret) return res.status(503).json({ error: 'media_unavailable' });
   const { shortcode } = req.params;
-  const { exp, sig } = req.query;
-  if (!isValidShortcode(shortcode) || typeof exp !== 'string' || !/^[1-9]\d*$/.test(exp)
+  const { exp, sig, variant } = req.query;
+  if (!isValidShortcode(shortcode) || (variant !== undefined && variant !== 'original')
+    || typeof exp !== 'string' || !/^[1-9]\d*$/.test(exp)
     || !Number.isSafeInteger(Number(exp)) || Number(exp) <= Math.floor(Date.now() / 1000)
     || typeof sig !== 'string' || !/^[0-9a-f]{64}$/i.test(sig)
-    || !crypto.timingSafeEqual(Buffer.from(sig, 'hex'), Buffer.from(reactMediaSignature(shortcode, exp, secret), 'hex'))) {
+    || !crypto.timingSafeEqual(Buffer.from(sig, 'hex'), Buffer.from(reactMediaSignature(shortcode, exp, secret, variant), 'hex'))) {
     return res.status(403).json({ error: 'invalid_signature' });
   }
   next();
@@ -151,10 +153,12 @@ function registerFilmApi(app, { pool,
       : (await pool.query('SELECT id FROM posts WHERE shortcode = $1 LIMIT 1', [shortcode])).rows[0];
     if (result.rows[0]?.state !== 'ready' && !post) return res.status(404).json({ error: 'reel_not_available' });
     let file = getPinnedReferencePath(shortcode);
-    try {
-      const ready = await reactAnalysisWorker.getResult(shortcode);
-      if (ready.state === 'ready' && ready.analysis && usableFile(ready.path)) file = ready.path;
-    } catch { console.error('[React analysis] media_fallback'); }
+    if (req.query.variant !== 'original') {
+      try {
+        const ready = await reactAnalysisWorker.getResult(shortcode);
+        if (ready.state === 'ready' && ready.analysis && usableFile(ready.path)) file = ready.path;
+      } catch { console.error('[React analysis] media_fallback'); }
+    }
     if (!file) return res.status(404).json({ error: 'reel_not_available' });
     return sendCachedFile(res, file, { acceptRanges: true });
   }));
@@ -227,7 +231,11 @@ function registerFilmApi(app, { pool,
     const url = new URL(`/film/v1/react-media/${shortcode}`, base);
     url.searchParams.set('exp', String(exp));
     url.searchParams.set('sig', reactMediaSignature(shortcode, exp, secret));
-    return res.json({ videoUrl: url.href, durationSec: durationSec ?? null, analysis });
+    const originalUrl = new URL(`/film/v1/react-media/${shortcode}`, base);
+    originalUrl.searchParams.set('variant', 'original');
+    originalUrl.searchParams.set('exp', String(exp));
+    originalUrl.searchParams.set('sig', reactMediaSignature(shortcode, exp, secret, 'original'));
+    return res.json({ videoUrl: url.href, originalVideoUrl: originalUrl.href, durationSec: durationSec ?? null, analysis });
   }));
 
   router.post('/react-prefetch', asyncHandler(async (req, res) => {

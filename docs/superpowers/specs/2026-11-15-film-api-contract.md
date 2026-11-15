@@ -18,7 +18,7 @@ Film (UI)  ──/api/filming/find/*──▶  HQ (knows the model)  ──/film
 ## Auth
 
 - **Server-to-server:** header `Authorization: Bearer <FILM_SERVICE_KEY>`. This is a new InstaScraper env var, shared with HQ as `INSTASCRAPER_FILM_KEY`. It's separate from `INSTASCRAPER_API_KEY` and grants only `/film/v1/*`. A missing or wrong key returns 401. The comparison is constant-time.
-- **Media:** the browser loads videos and thumbnails straight from InstaScraper through **signed URLs**, so large files don't pass through HQ. The URL is `/film/v1/media/:reelId?exp=<unixSeconds>&sig=<hex>`, where `sig = HMAC-SHA256(FILM_MEDIA_SECRET, "<reelId>.<exp>")`, with a 6-hour expiry. Thumbnails use the same pattern at `/film/v1/thumb/:reelId`. All React references use `/film/v1/react-media/:shortcode?exp=<unixSeconds>&sig=<hex>` and the separate signature payload `"react-media.<shortcode>.<exp>"`, also valid for 6 hours. No bearer is needed; a bad or expired signature returns 403. Video supports HTTP Range (206).
+- **Media:** the browser loads videos and thumbnails straight from InstaScraper through **signed URLs**, so large files don't pass through HQ. The URL is `/film/v1/media/:reelId?exp=<unixSeconds>&sig=<hex>`, where `sig = HMAC-SHA256(FILM_MEDIA_SECRET, "<reelId>.<exp>")`, with a 6-hour expiry. Thumbnails use the same pattern at `/film/v1/thumb/:reelId`. React-ready references use `/film/v1/react-media/:shortcode?exp=<unixSeconds>&sig=<hex>` and the separate signature payload `"react-media.<shortcode>.<exp>"`. Originals use `/film/v1/react-media/:shortcode?variant=original&exp=<unixSeconds>&sig=<hex>` with payload `"react-media.<shortcode>.original.<exp>"`. Both React variants expire after 6 hours, and their signatures cannot authorize each other. No bearer is needed; a bad or expired signature returns 403. Video supports HTTP Range (206).
 
 ## Reel object
 
@@ -54,9 +54,9 @@ Film (UI)  ──/api/filming/find/*──▶  HQ (knows the model)  ──/film
 | POST | `/models/:hqProjectId/reels/:reelId/filming` | `{ "hqItemId": "<uuid>" }` | `{ ok: true }`. HQ calls this after it creates the "Film this" item, so InstaScraper records `want_to_make` (strong positive) and links the reel to the HQ item. |
 | GET | `/media/:reelId` | `exp, sig` | the mp4 (Range-capable) |
 | GET | `/thumb/:reelId` | `exp, sig` | jpeg |
-| POST | `/react-reference` | `{ "shortcode": "AbCdE123", "fetch": true }` (`fetch` optional) | `200 { videoUrl, durationSec, analysis }`, `202 { state: "fetching" }`, or 404 when unavailable |
+| POST | `/react-reference` | `{ "shortcode": "AbCdE123", "fetch": true }` (`fetch` optional) | `200 { videoUrl, originalVideoUrl, durationSec, analysis }`, `202 { state: "fetching" }`, or 404 when unavailable |
 | POST | `/react-prefetch` | `{ "shortcodes": ["AbCdE123"] }` | `202 { queued }`, the number of newly queued fetches |
-| GET | `/react-media/:shortcode` | `exp, sig` | React-ready mp4 or original fallback (Range-capable), for posts and fetched references |
+| GET | `/react-media/:shortcode` | `exp, sig, variant?` | React-ready mp4 or original fallback by default; `variant=original` serves only the original mp4 (Range-capable), for posts and fetched references |
 
 - Save, skip and filming on a reel she can't access (not sorted, not in her scope) return 404 `{ "error": "reel_not_available" }`.
 - Errors are always JSON `{ error }`. 5xx means HQ should show "Couldn't load picks, try again".
@@ -77,14 +77,20 @@ Then HQ calls `POST …/filming`. Film's existing upload flow takes over, and th
 
 ## React mode
 
-Film records the model's unmirrored camera while the reference plays above it. HQ requests a server-side
+Film records the model's unmirrored camera while `originalVideoUrl` plays the whole original reel, including
+the creator, so she can mimic the performance. Film may also play its original audio while filming.
+`videoUrl` supplies the React-ready variant separately. HQ requests a server-side
 1080×1920 render, supplies a Drive resumable upload session, and receives the result through an authenticated
 callback. The reference, prefetch and render routes use the existing `FILM_SERVICE_KEY` bearer authentication.
 
 - `POST /film/v1/react-reference` with `{ "shortcode": "<5–64 letters, digits, _ or ->" }` returns
-  `200 { "videoUrl": "<absolute signed react-media URL>", "durationSec": number|null, "analysis": Analysis|null }`
-  for an existing playable reel. Every React reference, including a posts-based pin, uses
-  `/film/v1/react-media/<shortcode>?exp&sig` with the `react-media.<shortcode>.<exp>` signature payload.
+  `200 { "videoUrl": "<absolute signed react-media URL>", "originalVideoUrl": "<absolute signed original URL>", "durationSec": number|null, "analysis": Analysis|null }`
+  for an existing playable reel. Every 200 response includes both URLs, including posts-based pins and
+  references without analysis. `videoUrl` uses `/film/v1/react-media/<shortcode>?exp&sig` with the
+  `react-media.<shortcode>.<exp>` signature payload and serves the analyzed pin when ready, otherwise the original pin.
+  `originalVideoUrl` uses `/film/v1/react-media/<shortcode>?variant=original&exp&sig`, with
+  `sig = HMAC-SHA256(FILM_MEDIA_SECRET, "react-media.<shortcode>.original.<exp>")`, and always serves the original
+  MP4 with the creator's video and audio intact. Without analysis, both URLs serve the same original media.
   The optional `fetch` field is a boolean and defaults to `true`; any non-boolean value returns
   `400 { "error": "invalid_fetch" }`. With `fetch: false`, available posts/pins and ready fetched references
   proceed to analysis, and references already being fetched return `202 { "state": "fetching" }`.
@@ -93,11 +99,12 @@ callback. The reference, prefetch and render routes use the existing `FILM_SERVI
   shots can check availability without spending Apify credits.
   Malformed shortcodes return 400. The worker downloads a missing
   cached MP4 and pins it by hardlink (copy across filesystems) as `<REACT_REF_DIR>/<shortcode>.mp4`.
-  Pins survive video-cache pruning. React media serves the analyzed pin when ready, otherwise the original pin.
+  Pins survive video-cache pruning. Choosing the original for filming does not change the final render's
+  React-ready audio, seam crop, or full-screen freeze behavior.
   Explicitly pinned references remain available through valid signed URLs even after feed visibility or cache
   status changes; ordinary unpinned feed media retains its existing visibility restrictions.
 - When the shortcode is unknown or its existing post has no available video, the service checks the separate
-  `film_react_refs` store. A ready reference returns 200 with a signed `/film/v1/react-media/:shortcode` URL.
+  `film_react_refs` store. A ready reference returns 200 with both signed `/film/v1/react-media/:shortcode` URLs.
   With `fetch` omitted or `true`, an absent reference or a retryable failure starts an on-demand Apify
   Instagram reel fetch and returns `202 { "state": "fetching" }`; subsequent requests while it is queued
   or fetching also return 202. Failures with `apify_no_key`, `apify_failed`, `apify_busy`, `apify_network`,
@@ -119,8 +126,13 @@ callback. The reference, prefetch and render routes use the existing `FILM_SERVI
   new fetches. New work enters an in-process queue and runs serially by default; failed references use
   the same 10-minute transient or 6-hour permanent retry windows as `react-reference`.
 - `GET /film/v1/react-media/:shortcode?exp&sig` needs only its signed URL and serves a ready, nonempty reference
-  file with HTTP Range support. Invalid or expired signatures return 403; missing files or references that
-  are not ready return `404 { "error": "reel_not_available" }`.
+  file with HTTP Range support. The optional `variant` query parameter accepts only the scalar value `original`;
+  omitted means React-ready media with original fallback. Unsupported, empty, repeated, or structured variants
+  return `403 { "error": "invalid_signature" }`, as do invalid or expired signatures. The signature binds the
+  variant: a default signature cannot authorize `variant=original`, and an original signature cannot authorize
+  a request without it. Original requests skip analysis and serve only the original pin; a missing original
+  returns 404 even if a derivative exists. Missing files or references that are not ready return
+  `404 { "error": "reel_not_available" }`.
 - Once a fetched reference or posts-based pin is available, a serial analysis job runs automatically.
   Existing ready references without analysis are also discovered at startup and on reference requests.
   While queued or analyzing, `react-reference` returns the unchanged `202 { "state": "fetching" }` shape.
