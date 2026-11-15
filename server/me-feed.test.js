@@ -2,14 +2,14 @@
 const { test } = require('node:test');
 const assert = require('node:assert');
 const Database = require('better-sqlite3');
-const { buildMeFeedQuery, nicheVisibilityClause, parseNiches, allowedNicheOptions, visibilityOnlyClause, PLAYABLE_CLAUSE } = require('./me-feed');
+const { buildMeFeedQuery, nicheVisibilityClause, parseNiches, allowedNicheOptions, visibilityOnlyClause, PLAYABLE_CLAUSE, EASY_FILM_CLAUSE } = require('./me-feed');
 
 // posts table with the columns the feed query now reads (incl. video playability).
 function makePostsDb() {
   const sqlite = new Database(':memory:');
   sqlite.exec(`CREATE TABLE posts (
     id INTEGER PRIMARY KEY, content_type TEXT, account_handle TEXT, posted_at TEXT,
-    sort_status TEXT DEFAULT 'auto', ai_look_tags TEXT, perf_score REAL,
+    sort_status TEXT DEFAULT 'auto', ai_look_tags TEXT, ai_layout TEXT, perf_score REAL,
     soft_deleted INTEGER DEFAULT 0, archived INTEGER DEFAULT 0,
     video_url TEXT, video_url_refreshed_at TEXT, video_cache_status TEXT)`);
   sqlite.exec(`CREATE TABLE creator_types (account_handle TEXT, content_type TEXT)`);
@@ -137,6 +137,166 @@ test('the feed is cached-only: uncached reels are hidden even with a fresh raw U
   const { sql, params } = buildMeFeedQuery(['talking'], {});
   const rows = sqlite.prepare(sql.replace(/\$\d+/g, '?')).all(...params);
   assert.deepStrictEqual(rows.map(r => r.id), [1], 'only the cached reel is surfaced');
+});
+
+function withEasyFilmRequirement(value, run) {
+  const previous = process.env.FEED_REQUIRE_EASY_FILM;
+  if (value === undefined) delete process.env.FEED_REQUIRE_EASY_FILM;
+  else process.env.FEED_REQUIRE_EASY_FILM = value;
+  try { run(); } finally {
+    if (previous === undefined) delete process.env.FEED_REQUIRE_EASY_FILM;
+    else process.env.FEED_REQUIRE_EASY_FILM = previous;
+  }
+}
+
+function withEasyFilmExemptTypes(value, run) {
+  const previous = process.env.FEED_EASY_FILM_EXEMPT_TYPES;
+  if (value === undefined) delete process.env.FEED_EASY_FILM_EXEMPT_TYPES;
+  else process.env.FEED_EASY_FILM_EXEMPT_TYPES = value;
+  try { run(); } finally {
+    if (previous === undefined) delete process.env.FEED_EASY_FILM_EXEMPT_TYPES;
+    else process.env.FEED_EASY_FILM_EXEMPT_TYPES = previous;
+  }
+}
+
+function makeLayoutPostsDb() {
+  const sqlite = makePostsDb();
+  const insert = sqlite.prepare(`INSERT INTO posts
+    (id,content_type,posted_at,video_cache_status,ai_layout) VALUES (?,?,?,'cached',?)`);
+  let id = 0;
+  for (const type of ['talking', 'dance', 'skit']) {
+    for (const layout of ['self_filmed', null, 'split_screen', 'gameplay_overlay', 'needs_footage']) {
+      insert.run(++id, type, '2026-11-15', layout);
+    }
+  }
+  return sqlite;
+}
+
+test('easy-to-film filter keeps self-filmed and unchecked reels across content types and feed modes', () => {
+  assert.equal(EASY_FILM_CLAUSE, "(posts.ai_layout IS NULL OR posts.ai_layout = 'self_filmed' OR posts.content_type IN ('omegle'))");
+  const sqlite = makeLayoutPostsDb();
+  withEasyFilmRequirement(undefined, () => withEasyFilmExemptTypes(undefined, () => {
+    for (const options of [{}, { all: true }, { shuffle: true }, { niche: 'talking', modelId: 7 }]) {
+      const ids = rankedReels(sqlite, options).sort((a, b) => a - b);
+      assert.deepStrictEqual(ids, options.niche ? [1, 2] : [1, 2, 6, 7, 11, 12]);
+    }
+  }));
+  sqlite.close();
+});
+
+for (const value of ['0', 'false', 'off', ' FALSE ', 'OFF']) {
+  test(`FEED_REQUIRE_EASY_FILM=${JSON.stringify(value)} disables layout filtering`, () => {
+    const sqlite = makeLayoutPostsDb();
+    withEasyFilmRequirement(value, () => withEasyFilmExemptTypes(undefined, () => {
+      const { sql } = buildMeFeedQuery(['talking']);
+      assert.ok(!sql.includes(EASY_FILM_CLAUSE));
+      assert.deepStrictEqual(rankedReels(sqlite, {}).sort((a, b) => a - b), Array.from({ length: 15 }, (_, i) => i + 1));
+    }));
+    sqlite.close();
+  });
+}
+
+for (const value of ['', '1', 'true', 'unexpected']) {
+  test(`FEED_REQUIRE_EASY_FILM=${JSON.stringify(value)} keeps layout filtering enabled`, () => {
+    withEasyFilmRequirement(value, () => withEasyFilmExemptTypes(undefined,
+      () => assert.ok(buildMeFeedQuery(['talking']).sql.includes(EASY_FILM_CLAUSE))));
+  });
+}
+
+function makeReactLayoutPostsDb() {
+  const sqlite = makePostsDb();
+  sqlite.exec(`INSERT INTO posts (id,account_handle,content_type,posted_at,video_cache_status,ai_layout) VALUES
+    (1,'mine','omegle','2026-11-15','cached','split_screen'),
+    (2,'mine','talking','2026-11-15','cached','split_screen'),
+    (3,'mine','photo-dump','2026-11-15','cached','gameplay_overlay'),
+    (4,'mine','skit','2026-11-15','cached','needs_footage')`);
+  return sqlite;
+}
+
+test('React-mode omegle reels are exempt by default while split-screen talking stays hidden', () => {
+  const sqlite = makeReactLayoutPostsDb();
+  withEasyFilmRequirement(undefined, () => withEasyFilmExemptTypes(undefined, () => {
+    for (const options of [{}, { all: true }, { shuffle: true }]) {
+      assert.deepStrictEqual(rankedReels(sqlite, options), [1]);
+    }
+    assert.ok(buildMeFeedQuery(['talking']).sql.includes(EASY_FILM_CLAUSE));
+  }));
+  sqlite.close();
+});
+
+test('custom exempt types replace omegle, trim and deduplicate values, and are read per query', () => {
+  const sqlite = makeReactLayoutPostsDb();
+  withEasyFilmRequirement(undefined, () => {
+    withEasyFilmExemptTypes(undefined, () => assert.deepStrictEqual(rankedReels(sqlite, {}), [1]));
+    withEasyFilmExemptTypes(' skit, photo-dump,skit, ,', () => {
+      const { sql } = buildMeFeedQuery(['talking']);
+      assert.ok(sql.includes("posts.content_type IN ('skit', 'photo-dump')"));
+      assert.deepStrictEqual(rankedReels(sqlite, {}).sort((a, b) => a - b), [3, 4]);
+    });
+    withEasyFilmExemptTypes(undefined, () => assert.deepStrictEqual(rankedReels(sqlite, {}), [1]));
+  });
+  sqlite.close();
+});
+
+for (const value of ['', ' , , ']) {
+  test(`FEED_EASY_FILM_EXEMPT_TYPES=${JSON.stringify(value)} removes all exemptions`, () => {
+    const sqlite = makeReactLayoutPostsDb();
+    withEasyFilmRequirement(undefined, () => withEasyFilmExemptTypes(value, () => {
+      assert.deepStrictEqual(rankedReels(sqlite, {}), []);
+      assert.doesNotMatch(buildMeFeedQuery(['talking']).sql, /posts\.content_type IN \(/);
+    }));
+    sqlite.close();
+  });
+}
+
+test('invalid exemption tokens are rejected individually without entering SQL', () => {
+  const sqlite = makeReactLayoutPostsDb();
+  const invalid = ["omegle') OR 1=1 --", 'OMEGLE', 'photo_dump', 'skit;DROP TABLE posts', 'talking/*', 'ömegle', 'omegle\u0001', 'photo dump'];
+  withEasyFilmRequirement(undefined, () => {
+    withEasyFilmExemptTypes(invalid.join(','), () => {
+      assert.deepStrictEqual(rankedReels(sqlite, {}), []);
+      assert.doesNotMatch(buildMeFeedQuery(['talking']).sql, /posts\.content_type IN \(/);
+    });
+    withEasyFilmExemptTypes([...invalid, 'photo-dump', 'talking'].join(','), () => {
+      const { sql } = buildMeFeedQuery(['talking']);
+      assert.ok(sql.includes("posts.content_type IN ('photo-dump', 'talking')"));
+      for (const value of invalid) assert.ok(!sql.includes(value), 'invalid token stays outside SQL');
+      assert.deepStrictEqual(rankedReels(sqlite, {}).sort((a, b) => a - b), [2, 3]);
+    });
+  });
+  sqlite.close();
+});
+
+test('React exemptions preserve model scope, visibility and ascending niche/look/taste placeholders', () => {
+  const sqlite = makeReactLayoutPostsDb();
+  sqlite.exec(`INSERT INTO model_creators VALUES (7,'mine');
+    INSERT INTO posts (id,account_handle,content_type,posted_at,video_cache_status,ai_layout,archived,soft_deleted,sort_status) VALUES
+    (5,'other','omegle','2026-11-15','cached','split_screen',0,0,'auto'),
+    (6,'mine','omegle','2026-11-15','pending','split_screen',0,0,'auto'),
+    (7,'mine','omegle','2026-11-15','cached','split_screen',1,0,'auto'),
+    (8,'mine','omegle','2026-11-15','cached','split_screen',0,1,'auto'),
+    (9,'mine','omegle','2026-11-15','cached','split_screen',0,0,'unsorted'),
+    (10,'mine','omegle','2026-11-15','cached','split_screen',0,0,'auto'),
+    (11,'mine','omegle','2026-11-15','cached','split_screen',0,0,'auto'),
+    (12,'mine','omegle','2026-11-15','cached','split_screen',0,0,'auto');
+    INSERT INTO model_saved_posts VALUES (7,10);
+    INSERT INTO model_post_feedback VALUES (7,11,'not_my_style');
+    INSERT INTO model_assigned_posts VALUES (7,12,'assigned')`);
+  withEasyFilmRequirement(undefined, () => withEasyFilmExemptTypes(undefined, () => {
+    const options = { modelId: 7, niche: 'omegle', lookTags: ['alt'],
+      taste: { types: [['omegle', 0.5]], tags: [['alt', -0.25]], creators: [['mine', 0.5]] } };
+    const withExemption = buildMeFeedQuery(['talking'], options);
+    assert.deepStrictEqual(rankedReels(sqlite, options), [1]);
+    withEasyFilmExemptTypes('', () => {
+      assert.deepStrictEqual(rankedReels(sqlite, options), []);
+      assert.deepStrictEqual(buildMeFeedQuery(['talking'], options).params, withExemption.params,
+        'validated exemptions add no bind slots');
+    });
+    withEasyFilmRequirement('0', () => {
+      assert.deepStrictEqual(rankedReels(sqlite, { ...options, niche: 'talking' }), [2]);
+    });
+  }));
+  sqlite.close();
 });
 
 test('model feed excludes assigned, saved, and not-interested reels without hiding other models records', () => {

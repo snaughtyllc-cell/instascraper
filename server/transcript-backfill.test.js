@@ -24,15 +24,28 @@ async function setup(t, count = 2) {
     describe: async () => ({ type: 'dance', confidence: 0.2, audioKind: 'own_speech', transcript: 'Hola.\nSin traducir.', lookTags: ['brunette'], usage: { inTokens: 3400, outTokens: 1600 } }) };
 }
 
-test('transcript backfill writes only ai_transcript and records shared usage', async t => {
+test('transcript backfill writes speech and layout from the video and records shared usage', async t => {
   const deps = await setup(t, 1);
+  const describe = deps.describe;
+  deps.describe = async input => ({ ...await describe(input), layout: 'gameplay_overlay' });
   const before = deps.pool.sqlite.prepare('SELECT * FROM posts').get();
   assert.deepEqual(await runTranscriptBackfill(deps), { transcribed: 1, errored: 0, skippedCap: 0 });
-  assert.deepEqual(deps.pool.sqlite.prepare('SELECT * FROM posts').get(), { ...before, ai_transcript: 'Hola.\nSin traducir.' });
+  assert.deepEqual(deps.pool.sqlite.prepare('SELECT * FROM posts').get(), { ...before, ai_transcript: 'Hola.\nSin traducir.', ai_layout: 'gameplay_overlay' });
   const usage = await sortUsage(deps.pool, deps.cfg);
   assert.equal(usage.reels30d, 1);
   assert.equal(usage.today, 1);
   assert.ok(Math.abs(usage.usd30d - 0.00502) < 1e-10);
+});
+
+test('transcript backfill replaces stale layout only for a valid describe value', async t => {
+  const deps = await setup(t, 2);
+  deps.pool.sqlite.exec("UPDATE posts SET ai_layout='self_filmed'");
+  let calls = 0;
+  deps.describe = async () => ({ audioKind: 'own_speech', transcript: 'Hello.', layout: ++calls === 1 ? 'split_screen' : undefined });
+  assert.equal((await runTranscriptBackfill(deps)).transcribed, 2);
+  assert.deepEqual(deps.pool.sqlite.prepare('SELECT ai_layout FROM posts ORDER BY id DESC').all(), [
+    { ai_layout: 'split_screen' }, { ai_layout: 'self_filmed' },
+  ]);
 });
 
 test('estimate targets only live cached auto/manual talking reels with NULL transcript', async t => {

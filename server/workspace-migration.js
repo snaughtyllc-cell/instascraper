@@ -4,6 +4,7 @@ const SUGGESTED_REEL_AI_COLUMNS = [
   { name: 'ai_error', type: 'TEXT' },
   { name: 'ai_classified_at', type: 'TEXT' },
   { name: 'ai_cost_usd', type: 'REAL' },
+  { name: 'ai_layout', type: 'TEXT' },
 ];
 
 async function ensureWorkspaceTables(db, { isPg }) {

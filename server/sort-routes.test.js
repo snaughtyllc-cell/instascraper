@@ -448,3 +448,65 @@ test('talking recheck starts one background job and does not loop on still-talki
   await new Promise(resolve => setImmediate(resolve));
   assert.equal(options.length, 2, 'a later explicit confirmation may start another job');
 });
+
+test('layout estimate route counts only live sorted cached reels with unknown layout', async t => {
+  const pool = await makeSortDb();
+  t.after(() => pool.sqlite.close());
+  pool.sqlite.exec(`INSERT INTO posts(id,sort_status,video_cache_status,ai_layout,archived,soft_deleted)
+    VALUES(1,'manual','cached',NULL,0,0),(2,'auto','cached',NULL,0,0),
+      (3,'needs_look','cached',NULL,0,0),(4,'unsorted','cached',NULL,0,0),
+      (5,'auto',NULL,NULL,0,0),(6,'auto','cached','split_screen',0,0),
+      (7,'auto','cached',NULL,1,0),(8,'auto','cached',NULL,0,1)`);
+  const response = await inProcessRequest(pool, 'GET', '/sort/layout-recheck/estimate');
+  assert.equal(response.status, 200);
+  assert.equal(response.body.count, 2);
+  assert.ok(Math.abs(response.body.estUsd - 2 * 0.00502) < 1e-10);
+});
+
+test('layout recheck starts one multi-batch job and reports overlapping starts', async t => {
+  const pool = await makeSortDb();
+  t.after(() => pool.sqlite.close());
+  let release;
+  const active = new Promise(resolve => { release = resolve; });
+  const options = [];
+  const request = makeRequest(pool, { runLayoutRecheck: async input => {
+    options.push(input);
+    await active;
+    return { rechecked: 5, errored: 0, skippedCap: 0 };
+  } });
+  assert.deepEqual((await request('POST', '/sort/layout-recheck')).body, { started: true });
+  assert.deepEqual((await request('POST', '/sort/layout-recheck')).body, { started: false });
+  assert.equal(options.length, 1);
+  assert.equal(options[0].pool, pool);
+  assert.equal(options[0].cfg, cfg);
+  release();
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(options.length, 1, 'the module owns batching and retries must remain finite');
+  assert.deepEqual((await request('POST', '/sort/layout-recheck')).body, { started: true });
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(options.length, 2);
+});
+
+test('layout recheck route releases its concurrency guard after a failed job', async t => {
+  const pool = await makeSortDb();
+  t.after(() => pool.sqlite.close());
+  let calls = 0;
+  const request = makeRequest(pool, { runLayoutRecheck: async () => { calls++; throw new Error('Fake layout job failure'); } });
+  assert.deepEqual((await request('POST', '/sort/layout-recheck')).body, { started: true });
+  await new Promise(resolve => setImmediate(resolve));
+  assert.deepEqual((await request('POST', '/sort/layout-recheck')).body, { started: true });
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(calls, 2);
+});
+
+test('text redecide preserves existing layout even when the result contains a new one', async t => {
+  const pool = await makeSortDb();
+  t.after(() => pool.sqlite.close());
+  pool.sqlite.exec(`INSERT INTO posts(id,sort_status,ai_description,ai_audio_kind,ai_layout)
+    VALUES(1,'needs_look','Speaking','own_speech','split_screen'),
+      (2,'needs_look','Speaking','own_speech',NULL)`);
+  await redecideNeedsLook({ pool, cfg, redecide: async () => ({ ...result('talking'), layout: 'self_filmed' }) });
+  assert.deepEqual(pool.sqlite.prepare('SELECT ai_layout FROM posts ORDER BY id').all(), [
+    { ai_layout: 'split_screen' }, { ai_layout: null },
+  ]);
+});

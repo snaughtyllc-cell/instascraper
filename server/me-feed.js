@@ -45,6 +45,17 @@ function sortedVisibilityClause() {
 // of showing reels that only *might* play. No placeholder — a bare status check.
 const PLAYABLE_CLAUSE = `posts.video_cache_status = 'cached'`;
 
+function buildEasyFilmClause(configuredTypes = process.env.FEED_EASY_FILM_EXEMPT_TYPES ?? 'omegle') {
+  const exemptTypes = [...new Set(configuredTypes.split(',').map(value => value.trim())
+    .filter(value => /^[a-z0-9-]+$/.test(value)))];
+  // Only validated ASCII content-type values enter SQL; no extra bind slots.
+  const exemptClause = exemptTypes.length
+    ? ` OR posts.content_type IN (${exemptTypes.map(value => `'${value}'`).join(', ')})` : '';
+  return `(posts.ai_layout IS NULL OR posts.ai_layout = 'self_filmed'${exemptClause})`;
+}
+
+const EASY_FILM_CLAUSE = buildEasyFilmClause('omegle');
+
 function buildMeFeedQuery(niches, { page = 1, limit = 24, pageSize = limit, all = false, shuffle = false, modelId = null, lookTags = [], taste = {}, niche = null } = {}) {
   let clause, params;
   if (all) {
@@ -115,13 +126,15 @@ function buildMeFeedQuery(niches, { page = 1, limit = 24, pageSize = limit, all 
     ? `(${rankTerms.join(' + ')}) DESC, posts.posted_at DESC` : 'posts.posted_at DESC');
   const offset = (Math.max(1, Number(page)) - 1) * pageSize;
   const limIdx = params.length + 1, offIdx = params.length + 2;
+  const easyFilmClause = ['0', 'false', 'off'].includes(String(process.env.FEED_REQUIRE_EASY_FILM || '').trim().toLowerCase())
+    ? '' : ` AND ${buildEasyFilmClause()}`;
   const sql = `
     SELECT posts.*, ${effectiveNicheExpr()} AS niche
     FROM posts
     LEFT JOIN creator_types ct ON posts.account_handle = ct.account_handle
-    WHERE ${clause} AND ${PLAYABLE_CLAUSE}${modelClause}
+    WHERE ${clause} AND ${PLAYABLE_CLAUSE}${easyFilmClause}${modelClause}
     ORDER BY ${order}
     LIMIT $${limIdx} OFFSET $${offIdx}`;
   return { sql, params: [...params, limit, offset] };
 }
-module.exports = { buildMeFeedQuery, nicheVisibilityClause, parseNiches, allowedNicheOptions, visibilityOnlyClause, sortedVisibilityClause, PLAYABLE_CLAUSE };
+module.exports = { buildMeFeedQuery, nicheVisibilityClause, parseNiches, allowedNicheOptions, visibilityOnlyClause, sortedVisibilityClause, PLAYABLE_CLAUSE, EASY_FILM_CLAUSE };

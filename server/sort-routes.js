@@ -97,7 +97,7 @@ function redecideNeedsLook({ pool, redecide, cfg = sortConfig() }) {
   return state.promise;
 }
 
-function registerSortRoutes(app, { pool, runAutoSort, runLookBackfill, runTranscriptBackfill, runTalkingRecheck, redecide, cfg = sortConfig() }) {
+function registerSortRoutes(app, { pool, runAutoSort, runLookBackfill, runTranscriptBackfill, runTalkingRecheck, runLayoutRecheck, redecide, cfg = sortConfig() }) {
   const route = (handler) => (req, res, next) => Promise.resolve(handler(req, res)).catch(next);
   const backgroundRedecide = () => {
     redecideNeedsLook({ pool, redecide, cfg }).catch((error) => console.error('[Sort] redecide:', error.message));
@@ -178,6 +178,20 @@ function registerSortRoutes(app, { pool, runAutoSort, runLookBackfill, runTransc
       }
     }).catch(error => console.error('[Look] backfill:', error.message))
       .finally(() => { lookBackfillRunning = false; });
+  }));
+
+  app.get('/sort/layout-recheck/estimate', route(async (req, res) => {
+    res.json(await require('./layout-recheck').layoutRecheckEstimate(pool, cfg));
+  }));
+
+  let layoutRecheckRunning = false;
+  app.post('/sort/layout-recheck', route(async (req, res) => {
+    if (layoutRecheckRunning) return res.json({ started: false });
+    layoutRecheckRunning = true;
+    res.json({ started: true });
+    Promise.resolve().then(() => (runLayoutRecheck || require('./layout-recheck').runLayoutRecheck)({ pool, cfg }))
+      .catch(error => console.error('[Layout recheck]:', error.message))
+      .finally(() => { layoutRecheckRunning = false; });
   }));
 
   app.get('/sort/transcript-backfill/estimate', route(async (req, res) => {

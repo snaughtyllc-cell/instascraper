@@ -33,7 +33,7 @@ test('talking recheck applies full lip-sync decision, descriptions and look tags
   deps.describe = async input => {
     assert.equal(input.types.find(type => type.value === 'talking').description, 'Speaking their own live words.');
     assert.ok(input.lookTags.every(tag => tag.category !== 'custom'));
-    return { ...ownSpeech(), audioKind: 'music_or_trending_audio', transcript: 'Song lyrics must be removed.' };
+    return { ...ownSpeech(), audioKind: 'music_or_trending_audio', transcript: 'Song lyrics must be removed.', layout: 'gameplay_overlay' };
   };
   assert.deepEqual(await runTalkingRecheck(deps), { rechecked: 1, auto: 1, needsLook: 0, errored: 0, skippedCap: 0 });
   const row = deps.pool.sqlite.prepare('SELECT * FROM posts').get();
@@ -45,6 +45,7 @@ test('talking recheck applies full lip-sync decision, descriptions and look tags
   assert.equal(row.ai_transcript, null);
   assert.equal(row.ai_audio_kind, 'music_or_trending_audio');
   assert.equal(row.ai_look_tags, '["bedroom"]');
+  assert.equal(row.ai_layout, 'gameplay_overlay');
   assert.equal(row.ai_model, deps.cfg.model);
   assert.ok(row.ai_classified_at);
   assert.equal(deps.pool.sqlite.prepare('SELECT cost_usd FROM look_backfill_attempts').get().cost_usd, 0);

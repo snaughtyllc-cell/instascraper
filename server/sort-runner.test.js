@@ -188,6 +188,17 @@ test('auto-sort stores ai_look_tags as JSON array', async t => {
   assert.equal(deps.pool.sqlite.prepare('SELECT ai_look_tags FROM posts').get().ai_look_tags, '["brunette"]');
 });
 
+test('auto-sort stores sanitized layout from video descriptions', async t => {
+  const deps = await setup(t, 5);
+  const layouts = ['self_filmed', 'split_screen', 'gameplay_overlay', 'needs_footage', 'invalid'];
+  deps.describe = async () => ({ ...ai, layout: layouts.shift() });
+  assert.equal((await runAutoSort(deps)).classified, 5);
+  assert.deepEqual(deps.pool.sqlite.prepare('SELECT ai_layout FROM posts ORDER BY id DESC').all(), [
+    { ai_layout: 'self_filmed' }, { ai_layout: 'split_screen' }, { ai_layout: 'gameplay_overlay' },
+    { ai_layout: 'needs_footage' }, { ai_layout: null },
+  ]);
+});
+
 test('auto-sort stores bounded speech and replaces a previous transcript with null for no speech', async t => {
   const deps = await setup(t, 3);
   deps.pool.sqlite.exec("UPDATE posts SET ai_transcript='Previous speech'");

@@ -1,6 +1,6 @@
 const fs = require('node:fs/promises');
 const { decideSort, sortConfig } = require('./sort-status');
-const { describeReel, estimateCostUsd, makeGeminiClient, cleanAiLookTags, cleanTranscript, cleanAudioKind } = require('./gemini-sort');
+const { describeReel, estimateCostUsd, makeGeminiClient, cleanAiLookTags, cleanTranscript, cleanAudioKind, cleanLayout } = require('./gemini-sort');
 const { attemptsToday, withSortLock } = require('./sort-runner');
 
 const eligible = `sort_status='auto' AND content_type='talking' AND video_cache_status='cached'
@@ -73,11 +73,11 @@ async function runTalkingRecheck({ pool = require('./db'), describe, cfg = sortC
           const update = await db.query(`UPDATE posts SET content_type=$1, sort_status=$2,
             ai_type=$3, ai_confidence=$4, ai_description=$5, ai_suggested_type=$6, ai_model=$7,
             ai_classified_at=$8, ai_cost_usd=COALESCE(ai_cost_usd,0)+$9, ai_look_tags=$10,
-            ai_transcript=$11, ai_audio_kind=$12, ai_error=NULL
-            WHERE id=$13 AND ${eligible}`,
+            ai_transcript=$11, ai_audio_kind=$12, ai_layout=$13, ai_error=NULL
+            WHERE id=$14 AND ${eligible}`,
           [decision.contentType, decision.sortStatus, ai.type, ai.confidence, ai.description, ai.suggestedType || null,
             cfg.model, new Date().toISOString(), cost, JSON.stringify(cleanAiLookTags(ai.lookTags, lookTags)),
-            audioKind === 'own_speech' ? cleanTranscript(ai.transcript) : null, audioKind, post.id]);
+            audioKind === 'own_speech' ? cleanTranscript(ai.transcript) : null, audioKind, cleanLayout(ai.layout), post.id]);
           // Successful cost lives on the post; the attempt ledger still counts
           // this call toward the cap without counting its spend a second time.
           await db.query('UPDATE look_backfill_attempts SET cost_usd=$1 WHERE id=$2', [update.rowCount ? 0 : cost, attemptId]);

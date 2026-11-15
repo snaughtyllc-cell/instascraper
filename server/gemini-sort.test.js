@@ -3,7 +3,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs/promises');
 const os = require('node:os');
 const path = require('node:path');
-const { describeReel, redecideFromDescription, estimateCostUsd, cleanTranscript } = require('./gemini-sort');
+const { describeReel, redecideFromDescription, estimateCostUsd, cleanTranscript, cleanLayout } = require('./gemini-sort');
 const { describeReactSpeech, cleanReactUtterances } = require('./gemini-sort');
 
 const types = [
@@ -33,7 +33,9 @@ test('request uses low media resolution, json schema and the model', async t => 
   assert.equal(req.model, 'gemini-3.5-flash-lite');
   assert.equal(req.config.mediaResolution, 'MEDIA_RESOLUTION_LOW');
   assert.equal(req.config.responseMimeType, 'application/json');
-  assert.deepEqual(Object.keys(req.config.responseJsonSchema.properties), ['type', 'confidence', 'description', 'suggested_type', 'look_tags', 'audio_kind', 'transcript']);
+  assert.deepEqual(Object.keys(req.config.responseJsonSchema.properties), ['type', 'confidence', 'description', 'suggested_type', 'look_tags', 'audio_kind', 'transcript', 'layout']);
+  assert.deepEqual(req.config.responseJsonSchema.properties.layout, { type: 'string', enum: ['self_filmed', 'split_screen', 'gameplay_overlay', 'needs_footage'] });
+  assert.ok(req.config.responseJsonSchema.required.includes('layout'));
   assert.deepEqual(req.config.responseJsonSchema.properties.audio_kind, { type: 'string', enum: ['own_speech', 'music_or_trending_audio', 'other_voice', 'none'] });
   assert.ok(req.config.responseJsonSchema.required.includes('audio_kind'));
   assert.deepEqual(req.config.responseJsonSchema.properties.transcript, { anyOf: [{ type: 'string', maxLength: 4000 }, { type: 'null' }] });
@@ -67,6 +69,36 @@ test('malformed JSON throws', async () => {
 });
 test('estimateCostUsd uses input and output prices', () => {
   assert.ok(Math.abs(estimateCostUsd({ inTokens: 3400, outTokens: 80 }, { priceInPerM: 0.30, priceOutPerM: 2.50 }) - 0.00122) < 1e-10);
+});
+test('cleanLayout accepts only the four supported layouts', () => {
+  for (const layout of ['self_filmed', 'split_screen', 'gameplay_overlay', 'needs_footage']) {
+    assert.equal(cleanLayout(layout), layout);
+  }
+  for (const value of [null, undefined, '', 'unknown', 'SELF_FILMED', ' self_filmed ', 0, {}, []]) {
+    assert.equal(cleanLayout(value), null);
+  }
+});
+test('describe parses layout from the video and explains each layout in its prompt', async t => {
+  const filePath = await video(t);
+  for (const layout of ['self_filmed', 'split_screen', 'gameplay_overlay', 'needs_footage', 'invalid', undefined]) {
+    const client = fake({ text: JSON.stringify({ layout }) });
+    const out = await describeReel({ filePath, types }, { client });
+    assert.equal(out.layout, cleanLayout(layout));
+    const text = client.calls[0].contents[0].parts[1].text;
+    for (const rule of ['self_filmed', 'gaming desk or monitors behind her', 'split_screen', 'two or more separate video feeds', 'gameplay_overlay', 'person inset, overlaid or voicing over', 'needs_footage', 'green screen over a video or image', 'B-roll montage', "someone else's clip inserted"]) {
+      assert.ok(text.includes(rule), rule);
+    }
+    assert.match(text, /eight JSON fields/);
+  }
+});
+test('text-only redecide ignores layout even when requested or returned by the provider', async () => {
+  const client = fake({ text: JSON.stringify({ layout: 'self_filmed' }) });
+  const result = await redecideFromDescription({ description: 'A person speaking.', types, layout: 'split_screen' }, { client, transcribe: true });
+  const request = client.calls[0];
+  assert.equal('layout' in request.config.responseJsonSchema.properties, false);
+  assert.equal(request.config.responseJsonSchema.required.includes('layout'), false);
+  assert.doesNotMatch(request.contents[0].parts[0].text, /layout|self_filmed|split_screen/);
+  assert.equal('layout' in result, false);
 });
 test('large video waits for ACTIVE and deletes upload after generation failure', async t => {
   const events = [];
