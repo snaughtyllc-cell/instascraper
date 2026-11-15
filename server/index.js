@@ -24,6 +24,7 @@ const { downloadThumbnail, DEFAULT_THUMB_DIR } = require('./thumbnails');
 const { videoFilePath, DEFAULT_VIDEO_DIR } = require('./videos');
 const { buildBulkUpdate } = require('./content-bulk');
 const { calcViewER, engagementLabel, enrichViewsVsMedian, medianViewsByAccount } = require('./engagement-metrics');
+const { refreshPerfScores } = require('./perf-score');
 const { validateContentTypeInput } = require('./content-types');
 const { parseTagList, cleanModelLookTags, validateLookTagInput } = require('./look-tags');
 const { buildCredentialFields, validateModelCredentials, modelCredentialsChanged, MODEL_WRITE_FIELDS, buildModelWriteColumns, buildModelInsert, buildModelUpdate, isDuplicateEmailError } = require('./model-credentials');
@@ -1710,6 +1711,7 @@ async function boot() {
     await reactRenderWorker.start();
     health.markReady();
     console.log('Database ready');
+    refreshPerfScores(pool).catch(err => console.error('[PerfScore] boot refresh failed:', err.message));
   } catch (err) {
     console.error('[Boot] fatal DB init error; exiting:', err.code || err.message);
     process.exit(1); // fail the deploy rather than promote a broken release

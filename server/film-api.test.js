@@ -192,6 +192,33 @@ test('feed matches /me/feed ranking, paginates in order, and emits exactly the R
   assert.equal(new URL((await request('GET', `${filmPath}/feed`)).body.reels[0].videoUrl).origin, 'https://public.example');
 });
 
+test('performance shares look and taste ranking across Film and /me/feed without changing the Reel contract', async (t) => {
+  const previousWeight = process.env.FEED_PERF_WEIGHT;
+  process.env.FEED_PERF_WEIGHT = '1';
+  t.after(() => {
+    if (previousWeight === undefined) delete process.env.FEED_PERF_WEIGHT;
+    else process.env.FEED_PERF_WEIGHT = previousWeight;
+  });
+  for (const [id, score] of [[101, 1], [102, 2], [103, -1], [105, 2], [110, -2]]) {
+    await pool.query('UPDATE posts SET perf_score = $1 WHERE id = $2', [score, id]);
+  }
+  await pool.query('UPDATE posts SET posted_at = $1 WHERE id = $2', ['2026-11-15T18:22:00Z', 103]);
+  await pool.query('UPDATE posts SET ai_look_tags = $1, posted_at = $2 WHERE id = $3', ['["brunette","bedroom","alt"]', '2026-11-16T18:22:00Z', 105]);
+  const login = await appRequest(app, { method: 'POST', path: '/login', body: { email: 'film-model@example.test', password: 'fake-model-password' } });
+  assert.equal(login.status, 200);
+  const cookie = login.headers['set-cookie'][0].split(';')[0];
+  const me = await appRequest(app, { path: '/me/feed', headers: { Cookie: cookie } });
+  const response = await request('GET', `${filmPath}/feed`);
+  assert.equal(me.status, 200);
+  assert.equal(response.status, 200);
+  assert.deepEqual(response.body.reels.map(row => row.id), [101, 102, 103, 110, 105],
+    'summed rank beats recency while preferred niches outrank the strongest nonpreferred reel');
+  assert.deepEqual(response.body.reels.map(row => row.id), me.body.posts.map(row => row.id));
+  assert.deepEqual(Object.keys(response.body).sort(), ['hasMore', 'page', 'reels']);
+  const reelKeys = ['id', 'type', 'typeLabel', 'lookTags', 'caption', 'transcript', 'creatorHandle', 'postedAt', 'viewCount', 'likeCount', 'nicheMatch', 'videoUrl', 'thumbUrl', 'instagramUrl', 'saved'].sort();
+  for (const reel of response.body.reels) assert.deepEqual(Object.keys(reel).sort(), reelKeys);
+});
+
 test('feed and saves return transcripts verbatim and expose missing or empty sentinels as null', async () => {
   const transcript = 'No traduzcas mis palabras.\nEsta es la próxima línea.';
   await pool.query('UPDATE posts SET ai_transcript = $1 WHERE id = $2', [transcript, 101]);
@@ -267,6 +294,61 @@ test('skip hides only that reel and refreshes negative taste', async () => {
   assert.equal((await pool.query('SELECT feedback FROM model_post_feedback WHERE model_id = $1 AND post_id = $2', [1, 101])).rows[0].feedback, 'not_my_style');
   assert.ok(!(await request('GET', `${filmPath}/feed`)).body.reels.some(row => row.id === 101));
   assert.ok((await pool.query('SELECT affinity FROM model_taste WHERE model_id = $1 AND feature = $2', [1, 'tag:brunette'])).rows[0].affinity < 0);
+});
+
+test('workspace reel reject and undo require admin auth', async () => {
+  const login = await appRequest(app, { method: 'POST', path: '/login', body: { email: 'film-model@example.test', password: 'fake-model-password' } });
+  assert.equal(login.status, 200);
+  const cookie = login.headers['set-cookie'][0].split(';')[0];
+  for (const method of ['POST', 'DELETE']) {
+    for (const headers of [{}, { Authorization: 'Bearer fake-film-service-key' }, { Cookie: cookie }]) {
+      const response = await appRequest(app, { method, path: '/workspaces/1/reels/101/reject', headers });
+      assert.equal(response.status, 403);
+      assert.deepEqual(response.body, { error: 'Admin only' });
+    }
+  }
+  assert.deepEqual((await pool.query('SELECT * FROM model_post_feedback')).rows, []);
+  assert.deepEqual(refreshed, []);
+});
+
+test('admin workspace rejection and undo update all model feeds and learned taste only for that model', async () => {
+  const admin = await appRequest(app, { method: 'POST', path: '/login', body: { password: 'fake-film-admin-password' } });
+  const model = await appRequest(app, { method: 'POST', path: '/login', body: { email: 'film-model@example.test', password: 'fake-model-password' } });
+  assert.equal(admin.status, 200);
+  assert.equal(model.status, 200);
+  const headers = { Cookie: admin.headers['set-cookie'][0].split(';')[0] };
+  const modelHeaders = { Cookie: model.headers['set-cookie'][0].split(';')[0] };
+  await pool.query("INSERT INTO model_creators (model_id,username) VALUES (2,'mine')");
+  const containsReel = async expected => {
+    const workspace = await appRequest(app, { path: '/workspaces/1/reels', headers });
+    const me = await appRequest(app, { path: '/me/feed', headers: modelHeaders });
+    const film = await request('GET', `${filmPath}/feed`);
+    for (const response of [workspace, me, film]) assert.equal(response.status, 200);
+    for (const rows of [workspace.body, me.body.posts, film.body.reels]) {
+      assert.equal(rows.some(row => row.id === 101), expected);
+    }
+    const other = await appRequest(app, { path: '/workspaces/2/reels', headers });
+    assert.equal(other.status, 200);
+    assert.ok(other.body.some(row => row.id === 101), 'another model can still see the same reel');
+    assert.deepEqual((await pool.query('SELECT * FROM model_taste WHERE model_id = $1', [2])).rows, []);
+  };
+  await containsReel(true);
+  const rejected = await appRequest(app, { method: 'POST', path: '/workspaces/1/reels/101/reject', headers });
+  assert.equal(rejected.status, 200);
+  assert.deepEqual(refreshed, [1]);
+  await containsReel(false);
+  const negatives = await pool.query('SELECT feature, affinity, negatives FROM model_taste WHERE model_id = $1 ORDER BY feature', [1]);
+  assert.deepEqual(negatives.rows.map(row => row.feature), ['creator:mine', 'tag:bedroom', 'tag:brunette', 'type:talking']);
+  for (const row of negatives.rows) {
+    assert.ok(row.affinity < 0);
+    assert.equal(row.negatives, 1);
+  }
+  const undone = await appRequest(app, { method: 'DELETE', path: '/workspaces/1/reels/101/reject', headers });
+  assert.equal(undone.status, 200);
+  assert.deepEqual(refreshed, [1, 1]);
+  await containsReel(true);
+  assert.deepEqual((await pool.query('SELECT * FROM model_post_feedback WHERE model_id = $1', [1])).rows, []);
+  assert.deepEqual((await pool.query('SELECT * FROM model_taste WHERE model_id = $1', [1])).rows, []);
 });
 
 test('filming stores want_to_make and the HQ link atomically, upserts retries and refreshes taste', async () => {

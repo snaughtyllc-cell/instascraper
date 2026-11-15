@@ -1,10 +1,11 @@
-import React, { useCallback, useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import {
   getWorkspace, getWorkspaceCreators, addWorkspaceCreator, removeWorkspaceCreator,
   getWorkspaceReels, getWorkspaceProposals, refreshWorkspaceProposals, confirmWorkspaceProposal,
   rejectWorkspaceProposal, confirmAllWorkspaceProposals, getWorkspaceSuggestions,
   approveWorkspaceSuggestion, dismissWorkspaceSuggestion, snoozeWorkspaceSuggestion,
   getContentTypes, getLookTags, getWorkspaceTaste, addCreatorLookTag, removeCreatorLookTag,
+  rejectWorkspaceReel, undoWorkspaceReelRejection,
 } from '../api';
 import API_URL from '../api-base';
 import { SuggestedReelStrip } from './SuggestedAccountsTab';
@@ -13,7 +14,11 @@ import Transcript from '../components/Transcript';
 
 const button = 'px-3 py-2 rounded-lg text-xs font-medium bg-gray-800 border border-gray-700 hover:border-gray-500 disabled:opacity-50';
 
-export default function ModelWorkspace({ modelId, onBack, onEdit }) {
+export default function ModelWorkspace(props) {
+  return <Workspace key={props.modelId} {...props} />;
+}
+
+function Workspace({ modelId, onBack, onEdit }) {
   const [workspace, setWorkspace] = useState(null);
   const [creators, setCreators] = useState([]);
   const [proposals, setProposals] = useState([]);
@@ -28,41 +33,114 @@ export default function ModelWorkspace({ modelId, onBack, onEdit }) {
   const [taste, setTaste] = useState({ liked: [], disliked: [] });
   const [error, setError] = useState('');
   const [busy, setBusy] = useState(false);
+  const [pendingReel, setPendingReel] = useState(null);
+  const [reelErrors, setReelErrors] = useState({});
+  const [removedReels, setRemovedReels] = useState([]);
+  const mounted = useRef(true);
+  const loadVersion = useRef(0);
+  const busyRef = useRef(false);
+  const pagingDirty = useRef(false);
   const load = useCallback(async () => {
+    const version = ++loadVersion.current;
     const [summary, owned, proposed, routed, feed, learned, vocabulary] = await Promise.all([
       getWorkspace(modelId), getWorkspaceCreators(modelId), getWorkspaceProposals(modelId),
       getWorkspaceSuggestions(modelId), getWorkspaceReels(modelId), getWorkspaceTaste(modelId), getLookTags(),
     ]);
+    if (!mounted.current || version !== loadVersion.current) return;
     setWorkspace(summary.data);
     setCreators(owned.data);
     setProposals(proposed.data);
     setSuggestions(routed.data);
     setReels(feed.data);
+    const visibleIds = new Set(feed.data.map(reel => reel.id));
+    setRemovedReels(previous => previous.filter(item => !visibleIds.has(item.reel.id)));
     setTaste(learned.data);
     setLookTags(vocabulary.data);
     setPage(1);
     setHasMore(feed.data.length === 24);
+    pagingDirty.current = false;
   }, [modelId]);
   useEffect(() => {
-    load().catch(err => setError(err.response?.data?.error || err.message));
-    getContentTypes().then(({ data }) => setLabels(Object.fromEntries(data.map(t => [t.value, t.label])))).catch(() => {});
+    mounted.current = true;
+    load().catch(err => { if (mounted.current) setError(err.response?.data?.error || err.message); });
+    getContentTypes().then(({ data }) => { if (mounted.current) setLabels(Object.fromEntries(data.map(t => [t.value, t.label]))); }).catch(() => {});
+    return () => { mounted.current = false; loadVersion.current += 1; };
   }, [load]);
   const act = async action => {
+    if (busyRef.current) return;
+    busyRef.current = true;
     setBusy(true);
     setError('');
-    try { await action(); await load(); }
-    catch (err) { setError(err.response?.data?.error || err.message); }
-    finally { setBusy(false); }
+    try { await action(); if (mounted.current) await load(); }
+    catch (err) { if (mounted.current) setError(err.response?.data?.error || err.message); }
+    finally { busyRef.current = false; if (mounted.current) setBusy(false); }
+  };
+  const reloadReels = async () => {
+    const pages = await Promise.all(Array.from({ length: page }, (_, index) => getWorkspaceReels(modelId, index + 1)));
+    if (!mounted.current) return;
+    const refreshed = new Map(pages.flatMap(result => result.data).map(reel => [reel.id, reel]));
+    setReels([...refreshed.values()]);
+    setRemovedReels(previous => previous.filter(item => !refreshed.has(item.reel.id)));
+    setHasMore(pages[pages.length - 1].data.length === 24);
+    pagingDirty.current = false;
+  };
+  const reviewReel = async (reel, undo = false) => {
+    if (busyRef.current) return;
+    busyRef.current = true;
+    setBusy(true);
+    setError('');
+    setPendingReel({ id: reel.id, undo });
+    setReelErrors(previous => ({ ...previous, [reel.id]: '' }));
+    setRemovedReels(previous => previous.map(item => item.reel.id === reel.id ? { ...item, error: '' } : item));
+    let changed = false;
+    try {
+      await (undo ? undoWorkspaceReelRejection(modelId, reel.id) : rejectWorkspaceReel(modelId, reel.id));
+      if (!mounted.current) return;
+      changed = true;
+      pagingDirty.current = true;
+      if (!undo) {
+        setReels(previous => previous.filter(item => item.id !== reel.id));
+        setRemovedReels(previous => [...previous.filter(item => item.reel.id !== reel.id), { reel, error: '' }]);
+      }
+      await reloadReels();
+      if (!mounted.current) return;
+      if (undo) setRemovedReels(previous => previous.filter(item => item.reel.id !== reel.id));
+      try {
+        const { data } = await getWorkspaceTaste(modelId);
+        if (mounted.current) setTaste(data);
+      } catch (err) {
+        if (mounted.current) setError(`Feed updated, but her taste could not reload: ${err.response?.data?.error || err.message}`);
+      }
+    } catch (err) {
+      if (!mounted.current) return;
+      const message = err.response?.data?.error || err.message;
+      if (undo) setRemovedReels(previous => previous.map(item => item.reel.id === reel.id ? { ...item, error: changed ? `Undo saved, but the feed could not reload. Try Undo again. ${message}` : `Could not restore this reel. Try Undo again. ${message}` } : item));
+      else if (changed) setError(`Reel removed, but the feed could not reload: ${message}`);
+      else setReelErrors(previous => ({ ...previous, [reel.id]: `Could not remove this reel. Try again. ${message}` }));
+    } finally {
+      busyRef.current = false;
+      if (mounted.current) { setBusy(false); setPendingReel(null); }
+    }
   };
   const more = async () => {
+    if (busyRef.current) return;
+    busyRef.current = true;
     setBusy(true);
+    setError('');
     try {
-      const { data } = await getWorkspaceReels(modelId, page + 1);
-      setReels(previous => [...previous, ...data]);
+      // A rejection changes offsets and learned ranking; re-read the prefix before advancing.
+      const revalidate = pagingDirty.current;
+      const pages = await Promise.all((revalidate ? Array.from({ length: page + 1 }, (_, index) => index + 1) : [page + 1]).map(number => getWorkspaceReels(modelId, number)));
+      if (!mounted.current) return;
+      const incoming = pages.flatMap(result => result.data);
+      setReels(previous => [...new Map([...(revalidate ? [] : previous), ...incoming].map(reel => [reel.id, reel])).values()]);
+      const visibleIds = new Set(incoming.map(reel => reel.id));
+      setRemovedReels(previous => previous.filter(item => !visibleIds.has(item.reel.id)));
       setPage(page + 1);
-      setHasMore(data.length === 24);
-    } catch (err) { setError(err.response?.data?.error || err.message); }
-    finally { setBusy(false); }
+      setHasMore(pages[pages.length - 1].data.length === 24);
+      pagingDirty.current = false;
+    } catch (err) { if (mounted.current) setError(err.response?.data?.error || err.message); }
+    finally { busyRef.current = false; if (mounted.current) setBusy(false); }
   };
   return (
     <div className="space-y-5">
@@ -135,11 +213,18 @@ export default function ModelWorkspace({ modelId, onBack, onEdit }) {
           </section>
         </div>}
         {tab === 'Reels' && <>
+          {removedReels.map(item => <div key={item.reel.id} className="rounded-lg border border-gray-700 bg-gray-900 p-3 text-sm">
+            <p role="status" className="text-gray-300">Removed from {workspace.model.name}’s feed · <button disabled={busy} onClick={() => reviewReel(item.reel, true)} className="text-gold underline underline-offset-4 disabled:opacity-50">{pendingReel?.id === item.reel.id && pendingReel.undo ? 'Undoing…' : 'Undo'}</button></p>
+            {item.error && <p role="alert" className="mt-2 text-xs text-red-300">{item.error}</p>}
+          </div>)}
           {!reels.length && <p className="text-gray-500">No playable reels in this workspace yet.</p>}
           <div className="grid grid-cols-2 md:grid-cols-3 xl:grid-cols-4 gap-4">
             {reels.map(reel => <article key={reel.id} className="bg-gray-900 rounded-xl overflow-hidden border border-gray-800">
               <video src={`${API_URL}/video/${reel.id}`} poster={`${API_URL}/thumb/${reel.id}`} controls playsInline preload="none" className="w-full aspect-[9/16] object-cover bg-black" />
-              <div className="p-3 text-sm"><p>@{reel.account_handle}</p><p className="text-xs text-gray-400">{labels[reel.niche] || reel.niche}{reel.ai_confidence != null && ` · ${Math.round(reel.ai_confidence * 100)}%`}</p><LookTagChips tags={reel.ai_look_tags} vocabulary={lookTags} /><Transcript transcript={reel.ai_transcript} /></div>
+              <div className="p-3 text-sm"><p>@{reel.account_handle}</p><p className="text-xs text-gray-400">{labels[reel.niche] || reel.niche}{reel.ai_confidence != null && ` · ${Math.round(reel.ai_confidence * 100)}%`}</p><LookTagChips tags={reel.ai_look_tags} vocabulary={lookTags} /><Transcript transcript={reel.ai_transcript} />
+                <button disabled={busy} onClick={() => reviewReel(reel)} className={`${button} mt-3 text-gray-300`}>{pendingReel?.id === reel.id && !pendingReel.undo ? 'Removing…' : 'Not a good pick'}</button>
+                {reelErrors[reel.id] && <p role="alert" className="mt-2 text-xs text-red-300">{reelErrors[reel.id]}</p>}
+              </div>
             </article>)}
           </div>
           {hasMore && <button disabled={busy} onClick={more} className={button}>Load more reels</button>}

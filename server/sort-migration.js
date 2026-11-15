@@ -13,7 +13,11 @@ const AI_COLUMNS = [
   { name: 'ai_cost_usd', type: 'REAL' },
 ];
 
-const SORT_COLUMNS = [{ name: 'sort_status', type: "TEXT DEFAULT 'unsorted'" }, ...AI_COLUMNS];
+const SORT_COLUMNS = [
+  { name: 'sort_status', type: "TEXT DEFAULT 'unsorted'" },
+  ...AI_COLUMNS,
+  { name: 'perf_score', type: 'REAL' },
+];
 
 async function ensureSortStatus(db, { isPg }) {
   const result = await db.query(isPg

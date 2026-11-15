@@ -1,4 +1,6 @@
-const { buildMeFeedQuery, parseNiches } = require('./me-feed');
+const { buildMeFeedQuery, parseNiches, sortedVisibilityClause, PLAYABLE_CLAUSE } = require('./me-feed');
+const { modelScopeClause } = require('./model-scope');
+const { applyModelReaction, undoModelRejection } = require('./model-reactions');
 const { addCreator, removeCreator, listWorkspaceCreators, approveForModel, normalizeUsername } = require('./workspaces');
 const { computeProposals, confirmAllProposals } = require('./proposals');
 const { attachTopReels } = require('./scraper');
@@ -50,6 +52,27 @@ function registerWorkspaceRoutes(app, { pool }) {
     const built = buildMeFeedQuery(parseNiches(req.workspaceModel), { modelId: req.workspaceModelId, lookTags: tags, taste, page: Math.max(1, parseInt(req.query.page, 10) || 1) });
     const result = built.sql ? await pool.query(built.sql, built.params) : { rows: [] };
     res.json(result.rows.map(row => ({ ...row, look_match: reelLookMatch(tags, parseTagList(row.ai_look_tags)) })));
+  }));
+  const availableReel = async (req) => {
+    if (!/^[1-9]\d*$/.test(req.params.postId)) return null;
+    const postId = Number(req.params.postId);
+    if (!Number.isSafeInteger(postId) || postId > 2147483647) return null;
+    const scope = modelScopeClause('posts', 2);
+    const { rows } = await pool.query(`SELECT posts.id FROM posts
+      WHERE posts.id = $1 AND ${sortedVisibilityClause()} AND ${PLAYABLE_CLAUSE}
+        AND ${scope.clause}`, [postId, ...scope.params(req.workspaceModelId)]);
+    return rows.length ? postId : null;
+  };
+  app.post('/workspaces/:modelId/reels/:postId/reject', wrap(async (req, res) => {
+    const postId = await availableReel(req);
+    if (!postId) return res.status(404).json({ error: 'reel_not_available' });
+    res.json(await applyModelReaction(pool, { modelId: req.workspaceModelId, postId, reaction: 'not_interested' }));
+  }));
+  app.delete('/workspaces/:modelId/reels/:postId/reject', wrap(async (req, res) => {
+    const postId = await availableReel(req);
+    if (!postId) return res.status(404).json({ error: 'reel_not_available' });
+    await undoModelRejection(pool, { modelId: req.workspaceModelId, postId });
+    res.json({ success: true });
   }));
   app.get('/workspaces/:modelId/proposals', wrap(async (req, res) => {
     const result = await pool.query("SELECT * FROM model_creator_proposals WHERE model_id = $1 AND status = 'pending' ORDER BY share DESC, username", [req.workspaceModelId]);
