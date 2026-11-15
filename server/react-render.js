@@ -3,7 +3,7 @@ const os = require('os');
 const path = require('path');
 const { buildFfmpegArgs, probeVideo, renderVideo, resolveFfmpegThreads, resolveFfmpegNice, resolveFreezeMargin } = require('./react-ffmpeg');
 const transfer = require('./react-transfer');
-const { usableFile } = require('./react-reference');
+const { usableFile, markDanceReference } = require('./react-reference');
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const SHORTCODE = /^[A-Za-z0-9_-]{5,64}$/;
@@ -16,8 +16,10 @@ function validateRenderRequest(body, env = process.env) {
     || !Number.isFinite(crop.top) || !Number.isFinite(crop.height)
     || crop.top < 0 || crop.height < 0.2 || crop.top + crop.height > 1) return 'invalid_crop';
   if (!Number.isInteger(body.syncMs) || body.syncMs < -7000 || body.syncMs > 32000) return 'invalid_sync';
-  if (!['stitched', 'solo'].includes(body.output)) return 'invalid_output';
-  if (typeof body.referenceAudio !== 'boolean') return 'invalid_reference_audio';
+  if (!['stitched', 'solo', 'dance'].includes(body.output)) return 'invalid_output';
+  if (typeof body.referenceAudio !== 'boolean' || (body.output === 'dance' && !body.referenceAudio)) {
+    return 'invalid_reference_audio';
+  }
   if (!transfer.isDriveUploadUrl(body.uploadUrl)) return 'invalid_upload_url';
   if (!transfer.isHqUrl(body.rawUrl, env)) return 'invalid_raw_url';
   if (!transfer.isHqUrl(body.callbackUrl, env)) return 'invalid_callback_url';
@@ -111,26 +113,29 @@ function createReactRenderWorker({ pool, env = process.env, download = transfer.
       });
       let referencePath, analysis = null;
       if (body.reference.kind === 'instagram') {
+        if (body.output === 'dance') markDanceReference(body.reference.shortcode, env);
         const ref = await ensureReference(pool, body.reference.shortcode);
         if (!ref) throw Object.assign(new Error('reference_not_available'), { code: 'reference_not_available' });
         referencePath = ref.path;
-        // Analysis is an enhancement: failed, pending or missing cached results
-        // must leave an otherwise available Instagram reference renderable.
-        try {
-          const result = await getAnalysis(body.reference.shortcode, ref);
-          if (result?.state === 'ready' && result.analysis && typeof result.path === 'string' &&
-              usableFile(result.path)) {
-            referencePath = result.path;
-            analysis = result.analysis;
-          }
-        } catch { /* The original reference remains usable after analysis failure. */ }
+        if (body.output !== 'dance') {
+          // Analysis is an enhancement: failed, pending or missing cached results
+          // must leave an otherwise available Instagram reference renderable.
+          try {
+            const result = await getAnalysis(body.reference.shortcode, ref);
+            if (result?.state === 'ready' && result.analysis && typeof result.path === 'string' &&
+                usableFile(result.path)) {
+              referencePath = result.path;
+              analysis = result.analysis;
+            }
+          } catch { /* The original reference remains usable after analysis failure. */ }
+        }
       } else {
         await download(body.reference.url, referenceDownload, { maxBytes: 500 * 1024 * 1024, allowedUrl });
         referencePath = referenceDownload;
       }
       const raw = await probe(rawPath, { ffprobePath: env.FFPROBE_PATH || 'ffprobe', nice });
       const reference = await probe(referencePath, { ffprobePath: env.FFPROBE_PATH || 'ffprobe', nice });
-      if (body.output === 'stitched' && body.syncMs < 0 && -body.syncMs / 1000 >= reference.durationSec) {
+      if (['stitched', 'dance'].includes(body.output) && body.syncMs < 0 && -body.syncMs / 1000 >= reference.durationSec) {
         throw Object.assign(new Error('reference_seek_out_of_range'), { code: 'reference_seek_out_of_range' });
       }
       await render({ ...body, analysis, rawPath, referencePath, outputPath, rawDuration: raw.durationSec,

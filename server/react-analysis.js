@@ -5,7 +5,7 @@ const { sortConfig } = require('./sort-status');
 const { attemptsToday, withSortLock } = require('./sort-runner');
 const { describeReactSpeech, cleanReactUtterances, estimateCostUsd, makeGeminiClient } = require('./gemini-sort');
 const { probeVideo, resolveFfmpegNice } = require('./react-ffmpeg');
-const { isValidShortcode, referenceFile, usableFile, ensureReactReference } = require('./react-reference');
+const { isValidShortcode, referenceFile, usableFile, isDanceReference, ensureReactReference } = require('./react-reference');
 const { inspectLayout, detectSilences, snapCreatorCues, muteCreator } = require('./react-analysis-media');
 
 const pending = state => state === 'queued' || state === 'running';
@@ -214,7 +214,7 @@ function createReactAnalysisWorker({ pool, env = process.env, now = Date.now,
           }
         } catch (error) { if (error.code !== 'ENOENT') throw error; }
         for (const shortcode of shortcodes) {
-          if (usableFile(referenceFile(shortcode, env))) await claim(shortcode);
+          if (!isDanceReference(shortcode, env) && usableFile(referenceFile(shortcode, env))) await claim(shortcode);
         }
         initializing = false;
         pump();

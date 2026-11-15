@@ -135,6 +135,68 @@ test('React analysis keeps the fetching shape then serves analysis and the React
     'missing derivative never returns metadata claiming creator muting');
 });
 
+test('dance references immediately return signed original URLs without consulting analysis', async t => {
+  let analyses = 0, lookups = 0;
+  const f = await fixture(t, undefined, {
+    request: async () => { analyses++; return { state: 'fetching', analysis: null }; },
+    getResult: async () => { lookups++; throw new Error('dance media must skip analysis'); },
+  });
+  f.reference('dance_ready', 'ready');
+  const response = await f.request('POST', '/film/v1/react-reference', {
+    shortcode: 'dance_ready', mode: 'dance', fetch: false,
+  });
+  assert.equal(response.status, 200);
+  assert.equal(response.body.durationSec, 7.25);
+  assert.equal(response.body.analysis, null);
+  assert.equal(response.body.videoUrl, response.body.originalVideoUrl);
+  const url = new URL(response.body.videoUrl);
+  assert.equal(url.pathname + url.search, originalSignedPath('dance_ready', Number(url.searchParams.get('exp'))));
+  const media = await appRequest(f.app, { path: url.pathname + url.search });
+  assert.equal(media.status, 200);
+  assert.equal(media.text, '0123456789');
+  assert.equal(analyses, 0);
+  assert.equal(lookups, 0);
+  assert.equal(f.db.prepare('SELECT COUNT(*) AS n FROM film_react_analysis').get().n, 0);
+  assert.ok(fs.existsSync(path.join(f.dir, 'dance_ready.mp4.dance')));
+  assert.deepEqual(f.calls, []);
+  const react = await f.request('POST', '/film/v1/react-reference', { shortcode: 'dance_ready', mode: 'react' });
+  assert.equal(react.status, 202);
+  assert.equal(analyses, 1, 'explicit React still requests analysis of a dance original');
+});
+
+test('dance fetch requests suppress analysis and keep fetching and fetch-false responses', async t => {
+  const calls = [];
+  const f = await fixture(t, { request: async (shortcode, options) => {
+    assert.ok(fs.existsSync(path.join(f.dir, `${shortcode}.mp4.dance`)), 'mark dance before fetching');
+    calls.push({ shortcode, options });
+    return { state: 'fetching', launched: true };
+  } }, { request: async () => assert.fail('dance must not request analysis') });
+  assert.deepEqual((await f.request('POST', '/film/v1/react-reference', {
+    shortcode: 'dance_fetch', mode: 'dance',
+  })).body, { state: 'fetching' });
+  assert.deepEqual(calls, [{ shortcode: 'dance_fetch', options: { analyze: false } }]);
+  f.reference('dance_pending', 'fetching', false);
+  for (const shortcode of ['dance_pending', 'dance_missing']) {
+    const response = await f.request('POST', '/film/v1/react-reference', { shortcode, mode: 'dance', fetch: false });
+    assert.equal(response.status, shortcode === 'dance_pending' ? 202 : 404);
+    assert.deepEqual(response.body, shortcode === 'dance_pending'
+      ? { state: 'fetching' } : { error: 'reel_not_available' });
+  }
+  assert.equal(calls.length, 1);
+});
+
+test('react-reference rejects every mode other than react, dance or the omitted default', async t => {
+  const f = await fixture(t, { request: async () => assert.fail('invalid mode must not fetch') }, {
+    request: async () => assert.fail('invalid mode must not analyze'),
+  });
+  for (const mode of [null, '', 'Dance', 'solo', 0, false, {}, [], ['dance']]) {
+    const response = await f.request('POST', '/film/v1/react-reference', { shortcode: 'valid_mode', mode });
+    assert.equal(response.status, 400);
+    assert.deepEqual(response.body, { error: 'invalid_mode' });
+  }
+  assert.deepEqual(fs.readdirSync(f.dir), [], 'invalid requests never write dance markers');
+});
+
 test('failed or timed-out analysis serves original with null analysis for posts and fetched refs', async t => {
   const f = await fixture(t);
   f.reference('failed_analysis', 'ready');

@@ -80,6 +80,61 @@ test('successful fetch publishes its pin before queuing analysis and tolerates a
   assert.equal(calls.length, 1, 'a cached fetch does not queue duplicate work');
 });
 
+test('dance fetch completion skips analysis while concurrent React interest is retained', async t => {
+  for (const requests of [[false], [false, true, false], [true, false]]) {
+    const gate = deferred(), calls = [];
+    const f = await fixture(t, { download: async (post, opts) => {
+      await gate.promise;
+      fs.writeFileSync(path.join(opts.videoDir, `${post.shortcode}.mp4`), 'video');
+      return { status: 'cached' };
+    }, onReady: async (shortcode, reference) => calls.push({ shortcode, reference }) });
+    try {
+      const responses = await Promise.all(requests.map(analyze => f.worker.request('dance_shared', { analyze })));
+      assert.equal(responses.filter(result => result.launched).length, 1);
+      for (const response of responses) assert.equal(response.state, 'fetching');
+      gate.resolve();
+      await f.worker.waitForIdle();
+      assert.equal(calls.length, requests.some(Boolean) ? 1 : 0, JSON.stringify(requests));
+      assert.equal(f.launches.length, 1);
+      assert.equal(f.db.prepare('SELECT COUNT(*) AS n FROM film_react_analysis').get().n, 0);
+      assert.equal(f.db.prepare('SELECT state FROM film_react_refs').get().state, 'ready');
+    } finally {
+      gate.resolve();
+      await f.worker.waitForIdle();
+    }
+  }
+});
+
+test('React interest survives a committed dance claim before its local registration', async t => {
+  const committed = deferred(), release = deferred(), calls = [];
+  const f = await fixture(t, { onReady: async shortcode => calls.push(shortcode) });
+  const transaction = f.pool.transaction;
+  let held = false;
+  f.pool.transaction = async work => {
+    const result = await transaction(work);
+    if (result?.entry && !held) {
+      held = true;
+      committed.resolve();
+      await release.promise;
+    }
+    return result;
+  };
+  const dance = f.worker.request('dance_handoff', { analyze: false });
+  try {
+    await committed.promise;
+    assert.deepEqual(await f.worker.request('dance_handoff'), { state: 'fetching', launched: false });
+    release.resolve();
+    assert.deepEqual(await dance, { state: 'fetching', launched: true });
+    await f.worker.waitForIdle();
+    assert.deepEqual(calls, ['dance_handoff']);
+    assert.equal(f.launches.length, 1);
+  } finally {
+    release.resolve();
+    await dance;
+    await f.worker.waitForIdle();
+  }
+});
+
 test('missing keys fail before reserving capacity, log once at startup and retry after a key is added', async t => {
   const logs = [], requests = [];
   t.mock.method(console, 'error', line => logs.push(line));

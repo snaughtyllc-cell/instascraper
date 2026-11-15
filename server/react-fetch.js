@@ -149,7 +149,7 @@ function createReactFetchWorker({ pool, env = process.env, now = Date.now, apify
   const dailyMax = Number.isSafeInteger(configuredCap) && configuredCap >= 0 ? configuredCap : 100;
   const client = apify || createApifyClient(env, fetchImpl, sleep, timeoutMs);
   if (!apify && !apifyToken(env)) warnNoApifyKey();
-  const claims = new Map(), queue = [], idleWaiters = [];
+  const claims = new Map(), requestInterests = new Map(), queue = [], idleWaiters = [];
   let active = 0, initialization, heartbeat;
 
   async function transaction(work) {
@@ -361,7 +361,7 @@ function createReactFetchWorker({ pool, env = process.env, now = Date.now, apify
       }
       console.log(`[Metric] react_fetch outcome=${error || 'ready'}`);
     }
-    if (!error && entry.publishedPath && onReady) {
+    if (!error && entry.publishedPath && entry.analyze && onReady) {
       try { await onReady(entry.shortcode, { path: entry.publishedPath,
         durationSec: entry.durationSec }); }
       catch { console.error('[React analysis] enqueue_failed'); }
@@ -398,8 +398,23 @@ function createReactFetchWorker({ pool, env = process.env, now = Date.now, apify
     }
   }
 
-  async function request(shortcode) {
+  async function request(shortcode, { analyze = true } = {}) {
     if (!isValidShortcode(shortcode)) return unavailable();
+    // Retain overlapping callers' interest even after a database claim commits
+    // but before its transaction promise returns and registers the local claim.
+    const interest = requestInterests.get(shortcode) || { count: 0, analyze: false };
+    interest.count++;
+    interest.analyze ||= analyze;
+    requestInterests.set(shortcode, interest);
+    try { return await requestReference(shortcode, interest); }
+    finally {
+      if (--interest.count === 0) requestInterests.delete(shortcode);
+    }
+  }
+
+  async function requestReference(shortcode, interest) {
+    const analyze = interest.analyze;
+    if (analyze && claims.has(shortcode)) claims.get(shortcode).analyze = true;
     await start();
     const result = await transaction(async db => {
       // Recover every orphan, including unrelated queued rows whose reservations
@@ -445,11 +460,12 @@ function createReactFetchWorker({ pool, env = process.env, now = Date.now, apify
         WHERE film_react_refs.state <> 'fetching' RETURNING attempts`, [shortcode, stamp, stamp]);
       if (!claimed.rows.length) return { state: 'fetching', launched: false };
       await db.query('INSERT INTO film_react_ref_attempts (attempt_id,shortcode,created_at) VALUES ($1,$2,$3)', [id, shortcode, stamp]);
-      return { state: 'fetching', launched: true, entry: { id, shortcode, attempt: claimed.rows[0].attempts } };
+      return { state: 'fetching', launched: true, entry: { id, shortcode, attempt: claimed.rows[0].attempts, analyze } };
     });
     if (result.entry) {
       const { entry } = result;
       delete result.entry;
+      entry.analyze ||= interest.analyze;
       claims.set(shortcode, entry);
       queue.push(entry);
       if (!heartbeat) {
@@ -458,6 +474,9 @@ function createReactFetchWorker({ pool, env = process.env, now = Date.now, apify
       }
       pump();
     }
+    // A React request joining a dance fetch must retain its analysis callback;
+    // later dance requests must never downgrade that interest.
+    if (analyze && claims.has(shortcode)) claims.get(shortcode).analyze = true;
     return result;
   }
 
