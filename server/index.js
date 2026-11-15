@@ -42,6 +42,7 @@ const { approveForModel } = require('./workspaces');
 const { reelLookMatch } = require('./look-match');
 const { loadTaste, tasteForFeed, refreshTaste } = require('./model-taste');
 const { computeProposals } = require('./proposals');
+const { registerFilmApi } = require('./film-api');
 
 function refreshProposalsAfterResponse(res, modelId) {
   res.once('finish', () => {
@@ -99,6 +100,7 @@ function checkProdSecrets(env = process.env) {
 
 app.use(cors((req, callback) => callback(null, corsOptionsForRequest(req))));
 app.use(browserSecurityHeaders);
+registerFilmApi(app, { pool });
 app.use(express.json());
 
 const SESSION_COOKIE_NAME = 'instascraper.sid';
@@ -1038,8 +1040,16 @@ app.get('/models/niches/available', async (req, res) => {
 // credential columns from model-credentials.js. 'role' is deliberately excluded — see
 // buildCredentialFields. Both handlers below build columns/placeholders/params by
 // iterating THIS constant against a hand-built `merged` object — never Object.keys(req.body).
-const MODEL_BASE_FIELDS = ['name', 'primary_niche', 'secondary_niches', 'delivery_method', 'delivery_contact', 'delivery_day', 'look_tags'];
+const MODEL_BASE_FIELDS = ['name', 'primary_niche', 'secondary_niches', 'delivery_method', 'delivery_contact', 'delivery_day', 'look_tags', 'hq_project_id'];
 const MODEL_ALL_WRITE_FIELDS = [...MODEL_BASE_FIELDS, ...MODEL_WRITE_FIELDS];
+
+function validHqProjectId(value) {
+  return value === undefined || value === null || (typeof value === 'string' && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(value.trim()));
+}
+
+function isDuplicateHqProjectError(err) {
+  return /models_hq_project_uk|models\.hq_project_id/i.test(`${err?.constraint || ''} ${err?.message || ''}`);
+}
 
 async function validateRequestedNiches(primaryNiche, secondaryNiches) {
   const known = new Set(await availableNiches());
@@ -1057,7 +1067,7 @@ async function validateRequestedNiches(primaryNiche, secondaryNiches) {
 // the row, so they were left as-is.
 app.get('/models', async (req, res) => {
   const result = await pool.query(
-    `SELECT id, name, primary_niche, secondary_niches, delivery_method, delivery_contact, delivery_day, look_tags, status, email, role, login_enabled, notion_page_id, created_at, updated_at
+    `SELECT id, name, primary_niche, secondary_niches, delivery_method, delivery_contact, delivery_day, look_tags, hq_project_id, status, email, role, login_enabled, notion_page_id, created_at, updated_at
      FROM models WHERE status = 'active' ORDER BY created_at DESC`
   );
   const vocab = (await pool.query('SELECT value FROM look_tags')).rows;
@@ -1067,6 +1077,7 @@ app.get('/models', async (req, res) => {
 app.post('/models', async (req, res) => {
   const { name, primary_niche, secondary_niches, delivery_method, delivery_contact, delivery_day } = req.body;
   if (!name || !primary_niche) return res.status(400).json({ error: 'name and primary_niche required' });
+  if (!validHqProjectId(req.body.hq_project_id)) return res.status(400).json({ error: 'HQ project ID must be a UUID or null' });
   const credentialError = validateModelCredentials(req.body);
   if (credentialError) return res.status(400).json({ error: credentialError });
   const nicheError = await validateRequestedNiches(primary_niche, secondary_niches);
@@ -1078,6 +1089,7 @@ app.post('/models', async (req, res) => {
     delivery_contact: delivery_contact || '',
     delivery_day: delivery_day || 'monday',
     look_tags: JSON.stringify(cleanModelLookTags(req.body.look_tags, (await pool.query('SELECT value FROM look_tags')).rows)),
+    hq_project_id: req.body.hq_project_id?.trim().toLowerCase() ?? null,
     ...buildCredentialFields(req.body),
   };
   const { sql, params } = buildModelInsert(merged, MODEL_ALL_WRITE_FIELDS);
@@ -1086,6 +1098,7 @@ app.post('/models', async (req, res) => {
     refreshProposalsAfterResponse(res, result.rows[0].id);
     res.json({ success: true, id: result.rows[0]?.id });
   } catch (err) {
+    if (isDuplicateHqProjectError(err)) return res.status(409).json({ error: 'HQ project ID already linked' });
     if (isDuplicateEmailError(err)) return res.status(409).json({ error: 'Email already in use' });
     throw err;
   }
@@ -1096,6 +1109,7 @@ app.put('/models/:id', async (req, res) => {
   const modelId = Number(req.params.id);
   if (!Number.isSafeInteger(modelId) || modelId <= 0) return res.status(400).json({ error: 'Invalid model id' });
   if (!name || !primary_niche) return res.status(400).json({ error: 'name and primary_niche required' });
+  if (!validHqProjectId(req.body.hq_project_id)) return res.status(400).json({ error: 'HQ project ID must be a UUID or null' });
   const current = await pool.query("SELECT email, password_hash, login_enabled, primary_niche, secondary_niches, look_tags FROM models WHERE id = $1 AND status = 'active'", [modelId]);
   if (current.rowCount === 0) return res.status(404).json({ error: 'Model not found' });
   const credentialError = validateModelCredentials(req.body, current.rows[0]);
@@ -1109,6 +1123,7 @@ app.put('/models/:id', async (req, res) => {
     delivery_contact: delivery_contact || '',
     delivery_day: delivery_day || 'monday',
     ...(req.body.look_tags !== undefined ? { look_tags: JSON.stringify(cleanModelLookTags(req.body.look_tags, (await pool.query('SELECT value FROM look_tags')).rows)) } : {}),
+    ...(req.body.hq_project_id !== undefined ? { hq_project_id: req.body.hq_project_id?.trim().toLowerCase() ?? null } : {}),
     ...buildCredentialFields(req.body),
   };
   const { sql, params } = buildModelUpdate(merged, MODEL_ALL_WRITE_FIELDS, modelId);
@@ -1120,6 +1135,7 @@ app.put('/models/:id', async (req, res) => {
     )) refreshProposalsAfterResponse(res, modelId);
     res.json({ success: true });
   } catch (err) {
+    if (isDuplicateHqProjectError(err)) return res.status(409).json({ error: 'HQ project ID already linked' });
     if (isDuplicateEmailError(err)) return res.status(409).json({ error: 'Email already in use' });
     throw err;
   }

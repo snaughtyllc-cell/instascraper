@@ -17,7 +17,7 @@ const NICHE_OPTIONS = ['talking', 'dance', 'skit', 'snapchat', 'omegle', 'osc'];
 const EMPTY_FORM = {
   name: '', primary_niche: '', secondary_niches: '',
   delivery_method: 'whatsapp', delivery_contact: '', delivery_day: 'monday',
-  email: '', password: '', login_enabled: false, look_tags: [],
+  email: '', password: '', login_enabled: false, look_tags: [], hq_project_id: '',
 };
 
 export default function ModelsTab() {
@@ -105,11 +105,12 @@ export default function ModelsTab() {
     if (form.login_enabled && !form.email.trim()) return alert('Email is required when model login is enabled.');
     if (form.login_enabled && !editingId && !form.password) return alert('Set a temporary password before enabling model login.');
     if (form.password && form.password.length < 8) return alert('Model passwords must be at least 8 characters.');
+    const payload = { ...form, hq_project_id: form.hq_project_id.trim() || null };
     try {
       if (editingId) {
-        await updateModel(editingId, form);
+        await updateModel(editingId, payload);
       } else {
-        await createModel(form);
+        await createModel(payload);
       }
       setShowForm(false);
       setEditingId(null);
@@ -127,6 +128,7 @@ export default function ModelsTab() {
       delivery_day: model.delivery_day || 'monday',
       email: model.email || '', password: '', login_enabled: !!model.login_enabled,
       look_tags: model.look_tags || [],
+      hq_project_id: model.hq_project_id || '',
     });
     setEditingId(model.id);
     setShowForm(true);
@@ -274,6 +276,15 @@ export default function ModelsTab() {
                 onChange={e => setForm({ ...form, delivery_contact: e.target.value })}
                 className="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-white focus:border-gold focus:outline-none"
                 placeholder={form.delivery_method === 'whatsapp' ? '+1234567890' : form.delivery_method === 'sheet' ? 'Google Sheet URL' : 'Notion page ID'}
+              />
+            </div>
+            <div>
+              <label className="block text-sm text-gray-400 mb-1">HQ project ID</label>
+              <input
+                type="text" value={form.hq_project_id}
+                onChange={e => setForm({ ...form, hq_project_id: e.target.value })}
+                className="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-white focus:border-gold focus:outline-none"
+                placeholder="HQ project UUID"
               />
             </div>
           </div>
