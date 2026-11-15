@@ -1,3 +1,4 @@
+const { effectiveNicheExpr } = require('./sort-status');
 // server/me-feed.js
 // [R2-#2] parseNiches lives HERE (Task 5) — the /me/feed route uses it immediately, and
 // /me/saves (Task 6) reuses it. One definition, one import site.
@@ -19,7 +20,7 @@ function nicheVisibilityClause(niches, startIdx = 1) {
   if (list.length === 0) return { clause: null, params: [] };
   const ph = list.map((_, i) => `$${startIdx + i}`).join(', ');
   const clause =
-    `COALESCE(posts.content_type, ct.content_type) IN (${ph})` +
+    `${effectiveNicheExpr()} IN (${ph})` +
     ` AND (posts.soft_deleted = 0 OR posts.soft_deleted IS NULL)` +
     ` AND (posts.archived = 0 OR posts.archived IS NULL)`;
   return { clause, params: list };
@@ -74,7 +75,7 @@ function buildMeFeedQuery(niches, { page = 1, limit = 24, pageSize = limit, all 
   const offset = (Math.max(1, Number(page)) - 1) * pageSize;
   const limIdx = params.length + 1, offIdx = params.length + 2;
   const sql = `
-    SELECT posts.*, COALESCE(posts.content_type, ct.content_type) AS niche
+    SELECT posts.*, ${effectiveNicheExpr()} AS niche
     FROM posts
     LEFT JOIN creator_types ct ON posts.account_handle = ct.account_handle
     WHERE ${clause} AND ${PLAYABLE_CLAUSE}${modelClause}

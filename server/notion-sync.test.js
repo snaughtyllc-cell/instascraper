@@ -201,7 +201,7 @@ function sqlitePool() {
     status TEXT DEFAULT 'active', email TEXT, role TEXT, login_enabled INTEGER, password_hash TEXT,
     notion_page_id TEXT, character_context TEXT, persona_statement TEXT, comfort_ceiling TEXT,
     created_at TEXT, updated_at TEXT)`);
-  s.exec(`CREATE TABLE posts (id INTEGER, account_handle TEXT, content_type TEXT, video_cache_status TEXT, soft_deleted INTEGER, archived INTEGER)`);
+  s.exec(`CREATE TABLE posts (id INTEGER, account_handle TEXT, content_type TEXT, sort_status TEXT DEFAULT 'auto', video_cache_status TEXT, soft_deleted INTEGER, archived INTEGER)`);
   s.exec(`CREATE TABLE creator_types (account_handle TEXT, content_type TEXT)`);
   s.exec(`CREATE TABLE watch_terms (id INTEGER PRIMARY KEY AUTOINCREMENT, term TEXT, kind TEXT, source TEXT, status TEXT, UNIQUE(term, kind))`);
   // Adapter must route writes to .run() — better-sqlite3 .all() throws on INSERT/UPDATE.

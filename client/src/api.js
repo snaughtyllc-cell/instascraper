@@ -14,10 +14,8 @@ export const getJobStatus = (id) => api.get(`/scrape/jobs/${id}`);
 
 export const importUrls = (urls) => api.post('/scrape/import-urls', { urls });
 export const getContent = (params) => api.get('/content', { params });
-export const tagPost = (id, tag) => api.post(`/content/${id}/tag`, { tag });
 export const saveNotes = (id, notes) => api.post(`/content/${id}/notes`, { notes });
 export const archivePost = (id, archived) => api.post(`/content/${id}/archive`, { archived });
-export const setCreatorType = (handle, contentType) => api.post(`/creators/${handle}/type`, { contentType });
 export const setPostContentType = (id, contentType) => api.post(`/content/${id}/content-type`, { contentType });
 export const bulkUpdateContent = (ids, action, value) => api.post('/content/bulk', { ids, action, value });
 export const getContentTypes = () => api.get('/content-types');
@@ -25,9 +23,20 @@ export const addContentType = (label) => api.post('/content-types', { label });
 export const deleteContentType = (id) => api.delete(`/content-types/${id}`);
 export const getCreators = () => api.get('/creators');
 
-export const exportContent = (format = 'json') => {
-  window.open(`${api.defaults.baseURL}/export?format=${format}&tag=recreate`, '_blank');
+export const exportContent = (format = 'json', contentType = '') => {
+  const params = new URLSearchParams({ format });
+  if (contentType) params.set('contentType', contentType);
+  window.open(`${api.defaults.baseURL}/export?${params}`, '_blank');
 };
+
+// Auto-sort review and administration
+export const getNeedsLook = (params) => api.get('/sort/needs-look', { params });
+export const createSuggestedType = (value) => api.post(`/sort/suggested-types/${encodeURIComponent(value)}/create`);
+export const getBackfillEstimate = () => api.get('/sort/backfill/estimate');
+export const startBackfill = () => api.post('/sort/backfill');
+export const getSortUsage = () => api.get('/admin/sort-usage');
+export const getStartFreshPreview = () => api.get('/sort/start-fresh/preview');
+export const startFresh = () => api.post('/sort/start-fresh', { confirm: true });
 
 export const getEngagementSummary = (handle) => api.get(`/engagement/summary/${handle}`);
 export const getEngagementLeaderboard = () => api.get('/engagement/leaderboard');

@@ -29,6 +29,11 @@ const { buildCredentialFields, validateModelCredentials, modelCredentialsChanged
 const { corsOptionsForRequest, browserSecurityHeaders } = require('./security');
 const { MODEL_ASSIGNMENT_FIELDS, toModelPosts } = require('./model-post');
 const { applyModelReaction, upsertFeedback } = require('./model-reactions');
+const { effectiveNicheExpr } = require('./sort-status');
+const { modelCanAccessPost } = require('./model-access');
+const { getCreators } = require('./creators-mix');
+const { registerSortRoutes, redecideNeedsLook } = require('./sort-routes');
+const { runAutoSort } = require('./sort-runner');
 
 const app = express();
 app.disable('x-powered-by');
@@ -228,10 +233,12 @@ app.use('/scheduler', requireAdmin);
 app.use('/models', requireAdmin);
 app.use('/ideas', requireAdmin);
 app.use('/admin', requireAdmin);
+app.use('/sort', requireAdmin);
 app.use('/notion', requireAdmin);
 app.use('/radar', requireAdmin);
 app.use('/audio', requireAdmin);
 app.use('/me', requireModel);
+registerSortRoutes(app, { pool, runAutoSort });
 
 const ContentIdeaAgent = require('./ai-agent');
 const { deliverBatch } = require('./delivery');
@@ -303,7 +310,7 @@ app.post('/scrape/import-urls', async (req, res) => {
 // ─── Content Routes ─────────────────────────────────────────────
 
 app.get('/content', async (req, res) => {
-  const { page = 1, limit = 24, sort = 'newest', tag, account, minViews, startDate, endDate, search, showArchived, contentType, untagged } = req.query;
+  const { page = 1, limit = 24, sort = 'newest', account, minViews, startDate, endDate, search, showArchived, contentType } = req.query;
   let where = [];
   let params = [];
   let paramIdx = 1;
@@ -311,8 +318,6 @@ app.get('/content', async (req, res) => {
   where.push(`(soft_deleted = 0 OR soft_deleted IS NULL)`);
   if (showArchived !== 'true') where.push(`(archived = 0 OR archived IS NULL)`);
   if (contentType) { where.push(`COALESCE(posts.content_type, ct.content_type) = $${paramIdx++}`); params.push(contentType); }
-  if (tag) { where.push(`tag = $${paramIdx++}`); params.push(tag); }
-  if (untagged === 'true') where.push(`(tag IS NULL OR tag = '')`);
   if (account) { where.push(`posts.account_handle = $${paramIdx++}`); params.push(account); }
   if (minViews) { where.push(`view_count >= $${paramIdx++}`); params.push(Number(minViews)); }
   if (startDate) { where.push(`posted_at >= $${paramIdx++}`); params.push(startDate); }
@@ -348,15 +353,6 @@ app.get('/content', async (req, res) => {
   });
 });
 
-app.post('/content/:id/tag', async (req, res) => {
-  const { tag } = req.body;
-  const validTags = ['recreate', 'reference', 'skip', null];
-  if (!validTags.includes(tag)) return res.status(400).json({ error: 'Invalid tag' });
-  const result = await pool.query('UPDATE posts SET tag = $1 WHERE id = $2', [tag, Number(req.params.id)]);
-  if (result.rowCount === 0) return res.status(404).json({ error: 'Post not found' });
-  res.json({ success: true });
-});
-
 app.post('/content/:id/notes', async (req, res) => {
   const { notes } = req.body;
   const result = await pool.query('UPDATE posts SET notes = $1 WHERE id = $2', [notes || '', Number(req.params.id)]);
@@ -366,11 +362,12 @@ app.post('/content/:id/notes', async (req, res) => {
 
 app.post('/content/:id/content-type', async (req, res) => {
   const { contentType } = req.body;
-  if (contentType) {
+  if (contentType !== null) {
+    if (typeof contentType !== 'string' || !contentType) return res.status(400).json({ error: 'Invalid content type' });
     const ok = await pool.query('SELECT 1 FROM content_types WHERE value = $1', [contentType]);
     if (ok.rowCount === 0) return res.status(400).json({ error: 'Invalid content type' });
   }
-  const result = await pool.query('UPDATE posts SET content_type = $1 WHERE id = $2', [contentType, Number(req.params.id)]);
+  const result = await pool.query("UPDATE posts SET content_type = $1, sort_status = 'manual' WHERE id = $2", [contentType, Number(req.params.id)]);
   if (result.rowCount === 0) return res.status(404).json({ error: 'Post not found' });
   res.json({ success: true });
 });
@@ -405,6 +402,7 @@ app.post('/content-types', asyncHandler(async (req, res) => {
     [v.value, v.label, Number(max.rows[0].next) || 0, new Date().toISOString()]
   );
   res.status(201).json(ins.rows[0]);
+  redecideNeedsLook({ pool }).catch(error => console.error('[Sort] redecide:', error.message));
 }));
 
 app.delete('/content-types/:id', asyncHandler(async (req, res) => {
@@ -412,10 +410,9 @@ app.delete('/content-types/:id', asyncHandler(async (req, res) => {
   res.json({ ok: true });
 }));
 
-app.get('/creators', async (req, res) => {
-  const result = await pool.query(`SELECT p.account_handle, ct.content_type, COUNT(*) as post_count FROM posts p LEFT JOIN creator_types ct ON p.account_handle = ct.account_handle WHERE p.account_handle != '' GROUP BY p.account_handle, ct.content_type ORDER BY post_count DESC`);
-  res.json(result.rows);
-});
+app.get('/creators', asyncHandler(async (req, res) => {
+  res.json(await getCreators(pool));
+}));
 
 app.post('/content/:id/archive', async (req, res) => {
   const { archived } = req.body;
@@ -580,19 +577,23 @@ app.post('/suggested/:username/snooze', async (req, res) => {
 // ─── Delete Log Routes ──────────────────────────────────────────
 
 app.get('/delete-log', async (req, res) => {
+  const page = Math.max(1, parseInt(req.query.page, 10) || 1);
+  const limit = Math.min(100, Math.max(1, parseInt(req.query.limit, 10) || 50));
   const result = await pool.query(`
     SELECT dl.*, p.view_count, p.like_count FROM deletion_log dl
     LEFT JOIN posts p ON dl.post_id = p.id
-    ORDER BY dl.deleted_at DESC LIMIT 100
-  `);
+    ORDER BY dl.deleted_at DESC, dl.id DESC LIMIT $1 OFFSET $2
+  `, [limit, (page - 1) * limit]);
   const stats = await pool.query(`
     SELECT
-      COUNT(*) FILTER (WHERE deleted_at > TO_CHAR(NOW() - INTERVAL '7 days', 'YYYY-MM-DD"T"HH24:MI:SS"Z"')) as last_7d,
-      COUNT(*) FILTER (WHERE deleted_at > TO_CHAR(NOW() - INTERVAL '30 days', 'YYYY-MM-DD"T"HH24:MI:SS"Z"')) as last_30d,
-      COUNT(*) FILTER (WHERE restored_at IS NOT NULL) as restored
+      COALESCE(SUM(CASE WHEN REPLACE(deleted_at,' ','T') > $1 THEN 1 ELSE 0 END),0) as last_7_days,
+      COALESCE(SUM(CASE WHEN REPLACE(deleted_at,' ','T') > $2 THEN 1 ELSE 0 END),0) as last_30_days,
+      COALESCE(SUM(CASE WHEN restored_at IS NOT NULL THEN 1 ELSE 0 END),0) as restored,
+      COUNT(*) as total
     FROM deletion_log
-  `);
-  res.json({ entries: result.rows, stats: stats.rows[0] });
+  `, [new Date(Date.now() - 7 * 86400000).toISOString(), new Date(Date.now() - 30 * 86400000).toISOString()]);
+  const total = Number(stats.rows[0].total);
+  res.json({ entries: result.rows, stats: stats.rows[0], total, totalPages: Math.ceil(total / limit) });
 });
 
 app.post('/delete-log/:id/restore', async (req, res) => {
@@ -1293,18 +1294,21 @@ app.post('/ideas/export-notion/:modelId', async (req, res) => {
 // ─── Export Routes ──────────────────────────────────────────────
 
 app.get('/export', async (req, res) => {
-  const { format = 'json', tag = 'recreate' } = req.query;
-  const result = await pool.query('SELECT * FROM posts WHERE tag = $1', [tag]);
+  const { format = 'json', contentType } = req.query;
+  const niche = effectiveNicheExpr();
+  const result = await pool.query(`SELECT * FROM posts WHERE (soft_deleted = 0 OR soft_deleted IS NULL)
+    AND ${niche} ${contentType ? '= $1' : 'IS NOT NULL'}`, contentType ? [contentType] : []);
+  const filename = `content-${contentType ? String(contentType).replace(/[^a-z0-9-]/gi, '') || 'all' : 'all'}`;
   if (format === 'csv') {
     const { Parser } = require('json2csv');
-    const fields = ['id', 'shortcode', 'video_url', 'thumbnail_url', 'caption', 'like_count', 'comment_count', 'view_count', 'posted_at', 'account_handle', 'post_url', 'tag', 'notes'];
+    const fields = ['id', 'shortcode', 'video_url', 'thumbnail_url', 'caption', 'like_count', 'comment_count', 'view_count', 'posted_at', 'account_handle', 'post_url', 'content_type', 'notes'];
     const parser = new Parser({ fields });
     const csv = parser.parse(result.rows);
     res.setHeader('Content-Type', 'text/csv');
-    res.setHeader('Content-Disposition', 'attachment; filename=recreate-content.csv');
+    res.setHeader('Content-Disposition', `attachment; filename=${filename}.csv`);
     return res.send(csv);
   }
-  res.setHeader('Content-Disposition', 'attachment; filename=recreate-content.json');
+  res.setHeader('Content-Disposition', `attachment; filename=${filename}.json`);
   res.json(result.rows);
 });
 
@@ -1315,7 +1319,7 @@ app.use('/thumbnails', express.static(DEFAULT_THUMB_DIR));
 app.get('/thumb/:postId', asyncHandler(async (req, res) => {
   const postId = Number(req.params.postId);
   if (req.session?.user?.role === 'model') {
-    const allowed = await modelCanAccessPost(req.session.user.modelId, postId);
+    const allowed = await modelCanAccessPost(pool, req.session.user.modelId, postId);
     if (!allowed) return res.status(404).send('No thumbnail');
   }
   const result = await pool.query('SELECT thumbnail_url, shortcode FROM posts WHERE id = $1', [Number(req.params.postId)]);
@@ -1371,7 +1375,7 @@ app.get('/video/:id', asyncHandler(async (req, res) => {
   const id = Number(req.params.id);
   if (!isValidVideoId(id)) return res.status(404).send('not found');
   if (req.session?.user?.role === 'model') {
-    const allowed = await modelCanAccessPost(req.session.user.modelId, id, { requirePlayable: true });
+    const allowed = await modelCanAccessPost(pool, req.session.user.modelId, id, { requirePlayable: true });
     if (!allowed) return res.status(404).send('not found');
   }
   const r = await pool.query(
@@ -1394,31 +1398,6 @@ app.get('/suggested/reels/:id/thumb', asyncHandler(async (req, res) => {
 
 // [R2-#3] THE single top-level me-feed import — Task 6 reuses these, never re-requires.
 const { buildMeFeedQuery, nicheVisibilityClause, parseNiches, allowedNicheOptions } = require('./me-feed');
-
-async function modelCanAccessPost(modelId, postId, { requirePlayable = false } = {}) {
-  if (!Number.isSafeInteger(Number(modelId)) || !Number.isSafeInteger(Number(postId))) return false;
-  const m = await pool.query('SELECT primary_niche, secondary_niches FROM models WHERE id = $1', [modelId]);
-  if (m.rowCount === 0) return false;
-  const niches = parseNiches(m.rows[0]);
-  const params = [postId, modelId, ...niches];
-  const nicheClause = niches.length
-    ? ` OR COALESCE(posts.content_type, ct.content_type) IN (${niches.map((_, i) => `$${i + 3}`).join(', ')})`
-    : '';
-  const playableClause = requirePlayable ? ` AND posts.video_cache_status = 'cached'` : '';
-  const r = await pool.query(
-    `SELECT posts.id
-       FROM posts
-       LEFT JOIN creator_types ct ON posts.account_handle = ct.account_handle
-       LEFT JOIN model_assigned_posts a ON a.post_id = posts.id AND a.model_id = $2 AND a.status = 'assigned'
-      WHERE posts.id = $1
-        AND (posts.soft_deleted = 0 OR posts.soft_deleted IS NULL)
-        AND (posts.archived = 0 OR posts.archived IS NULL)
-        AND (a.model_id IS NOT NULL${nicheClause})
-        ${playableClause}
-      LIMIT 1`,
-    params);
-  return r.rowCount > 0;
-}
 
 app.get('/me/feed', asyncHandler(async (req, res) => {
   const modelId = req.session.user.modelId; // requireModel guarantees this
@@ -1455,7 +1434,7 @@ const { saveParams } = require('./me-saves');
 
 app.get('/me/assignments', asyncHandler(async (req, res) => {
   const r = await pool.query(
-    `SELECT posts.*, COALESCE(posts.content_type, ct.content_type) AS niche,
+    `SELECT posts.*, ${effectiveNicheExpr()} AS niche,
             a.assigned_at, a.status AS assignment_status,
             f.feedback, f.notes AS feedback_notes, f.updated_at AS feedback_at
        FROM model_assigned_posts a
@@ -1477,7 +1456,7 @@ app.get('/me/assignments', asyncHandler(async (req, res) => {
 app.post('/me/saves/:postId', asyncHandler(async (req, res) => {
   const p = saveParams(req.session.user.modelId, req.params.postId);
   if (!p) return res.status(400).json({ error: 'Invalid post id' });
-  if (!(await modelCanAccessPost(p.modelId, p.postId))) return res.status(404).json({ error: 'Post not available' });
+  if (!(await modelCanAccessPost(pool, p.modelId, p.postId))) return res.status(404).json({ error: 'Post not available' });
   const state = await applyModelReaction(pool, { modelId: p.modelId, postId: p.postId, reaction: 'save' });
   res.json({ ok: true, ...state });
 }));
@@ -1495,7 +1474,7 @@ app.get('/me/saves', asyncHandler(async (req, res) => {
   if (m.rowCount === 0) return res.status(404).json({ error: 'Model not found' });
   const niches = parseNiches(m.rows[0]);
   const nicheClause = niches.length
-    ? ` OR COALESCE(posts.content_type, ct.content_type) IN (${niches.map((_, i) => `$${i + 2}`).join(', ')})`
+    ? ` OR ${effectiveNicheExpr()} IN (${niches.map((_, i) => `$${i + 4}`).join(', ')})`
     : '';
   const r = await pool.query(
     `SELECT posts.* FROM model_saved_posts s
@@ -1505,8 +1484,10 @@ app.get('/me/saves', asyncHandler(async (req, res) => {
      WHERE s.model_id = $1
        AND (posts.soft_deleted = 0 OR posts.soft_deleted IS NULL)
        AND (posts.archived = 0 OR posts.archived IS NULL)
-       AND (a.model_id IS NOT NULL${nicheClause})
-     ORDER BY s.saved_at DESC`, [modelId, ...niches]);
+       AND (a.model_id IS NOT NULL
+         OR EXISTS (SELECT 1 FROM model_saved_posts s2 WHERE s2.post_id = posts.id AND s2.model_id = $2)
+         OR EXISTS (SELECT 1 FROM model_post_feedback f2 WHERE f2.post_id = posts.id AND f2.model_id = $3)${nicheClause})
+     ORDER BY s.saved_at DESC`, [modelId, modelId, modelId, ...niches]);
   res.json({ posts: toModelPosts(r.rows) });
 }));
 
@@ -1518,7 +1499,7 @@ app.post('/me/feedback/:postId', asyncHandler(async (req, res) => {
   const allowed = new Set(['want_to_make', 'not_my_style', 'too_hard', 'already_done', 'need_script', 'done']);
   if (!allowed.has(feedback)) return res.status(400).json({ error: 'Invalid feedback' });
 
-  if (!(await modelCanAccessPost(p.modelId, p.postId))) return res.status(404).json({ error: 'Post not available' });
+  if (!(await modelCanAccessPost(pool, p.modelId, p.postId))) return res.status(404).json({ error: 'Post not available' });
 
   if (feedback === 'want_to_make') {
     const state = await applyModelReaction(pool, { modelId: p.modelId, postId: p.postId, reaction: 'save' });
@@ -1545,11 +1526,12 @@ app.get('/me/ideas', asyncHandler(async (req, res) => {
     const ph = all.map((_, i) => `$${i + 1}`).join(', ');
     const pr = await pool.query(
       `SELECT id, shortcode, view_count, caption, post_url, content_type, account_handle, posted_at,
-              content_type AS niche
+              ${effectiveNicheExpr()} AS niche
        FROM posts WHERE shortcode IN (${ph})
          AND (soft_deleted = 0 OR soft_deleted IS NULL)
          AND (archived = 0 OR archived IS NULL)
-         AND video_cache_status = 'cached'`, all);
+         AND video_cache_status = 'cached'
+         AND ${effectiveNicheExpr()} IS NOT NULL`, all);
     byCode = Object.fromEntries(toModelPosts(pr.rows).map(p => [p.shortcode, p]));
   }
   const enriched = ideas.map((idea, k) => ({

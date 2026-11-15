@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import * as Sentry from '@sentry/react';
-import api from './api';
+import api, { getNeedsLook } from './api';
 import ScrapeTab from './pages/ScrapeTab';
 import LibraryTab from './pages/LibraryTab';
 import EngagementTab from './pages/EngagementTab';
@@ -10,6 +10,7 @@ import DeleteLogTab from './pages/DeleteLogTab';
 import ModelsTab from './pages/ModelsTab';
 import AudioTab from './pages/AudioTab';
 import AdminCockpitTab from './pages/AdminCockpitTab';
+import NeedsLookTab from './pages/NeedsLookTab';
 import LoginPage from './components/LoginPage';
 import ModelApp from './ModelApp';
 
@@ -18,6 +19,7 @@ const TABS = [
   { id: 'tracked', label: 'Tracked' },
   { id: 'scrape', label: 'Scrape' },
   { id: 'library', label: 'Library' },
+  { id: 'needslook', label: 'Needs a look' },
   { id: 'engagement', label: 'Engagement' },
   { id: 'models', label: 'Models' },
   { id: 'suggested', label: 'Suggested' },
@@ -31,6 +33,7 @@ export default function App() {
   const [role, setRole] = useState(null);
   const [modelId, setModelId] = useState(null);
   const [loginNotice, setLoginNotice] = useState('');
+  const [needsLookTotal, setNeedsLookTotal] = useState(0);
 
   useEffect(() => {
     checkAuth();
@@ -62,6 +65,22 @@ export default function App() {
     );
     return () => api.interceptors.response.eject(interceptor);
   }, []);
+
+  useEffect(() => {
+    if (authState !== 'app' || role !== 'admin') return undefined;
+    let cancelled = false;
+    const updateCount = async () => {
+      try {
+        const { data } = await getNeedsLook({ limit: 1 });
+        if (!cancelled) setNeedsLookTotal(Number(data.total || 0));
+      } catch (err) {
+        console.error('Could not refresh needs-a-look count:', err);
+      }
+    };
+    updateCount();
+    const interval = setInterval(updateCount, 30000);
+    return () => { cancelled = true; clearInterval(interval); };
+  }, [authState, role, activeTab]);
 
   const checkAuth = async () => {
     try {
@@ -158,6 +177,9 @@ export default function App() {
                   }`}
                 >
                   {tab.label}
+                  {tab.id === 'needslook' && (
+                    <span className="ml-1.5 rounded-full bg-black/20 px-1.5 py-0.5 text-xs tabular-nums">{needsLookTotal}</span>
+                  )}
                 </button>
               ))}
             </nav>
@@ -182,6 +204,7 @@ export default function App() {
         {activeTab === 'tracked' && <TrackedAccountsTab />}
         {activeTab === 'scrape' && <ScrapeTab />}
         {activeTab === 'library' && <LibraryTab />}
+        {activeTab === 'needslook' && <NeedsLookTab onTotalChange={setNeedsLookTotal} />}
         {activeTab === 'engagement' && <EngagementTab />}
         {activeTab === 'models' && <ModelsTab />}
         {activeTab === 'suggested' && <SuggestedAccountsTab />}

@@ -9,6 +9,7 @@ function makePostsDb() {
   const sqlite = new Database(':memory:');
   sqlite.exec(`CREATE TABLE posts (
     id INTEGER PRIMARY KEY, content_type TEXT, account_handle TEXT, posted_at TEXT,
+    sort_status TEXT DEFAULT 'auto',
     soft_deleted INTEGER DEFAULT 0, archived INTEGER DEFAULT 0,
     video_url TEXT, video_url_refreshed_at TEXT, video_cache_status TEXT)`);
   sqlite.exec(`CREATE TABLE creator_types (account_handle TEXT, content_type TEXT)`);
@@ -23,7 +24,7 @@ test('empty niches → sql null (nothing to show)', () => {
 });
 test('nicheVisibilityClause uses IN() placeholders (not ANY) + archived + soft_deleted', () => {
   const { clause, params } = nicheVisibilityClause(['talking', 'dance'], 5);
-  assert.match(clause, /COALESCE\(posts\.content_type, ct\.content_type\) IN \(\$5, \$6\)/);
+  assert.match(clause, /CASE WHEN posts\.sort_status IN \('auto','manual'\) THEN posts\.content_type ELSE NULL END IN \(\$5, \$6\)/);
   assert.match(clause, /archived/);
   assert.match(clause, /soft_deleted/);
   assert.doesNotMatch(clause, /ANY/);
@@ -96,7 +97,7 @@ test('buildMeFeedQuery can fetch one extra row without skipping between 24-item 
 test('buildMeFeedQuery all:true builds a query with NO niche IN() clause but WITH archived/soft_deleted, and executes against sqlite returning ALL visible+cached posts across niches', () => {
   const { sql, params } = buildMeFeedQuery([], { page: 1, limit: 24, all: true });
   assert.ok(sql, 'sql should not be null in all mode');
-  assert.doesNotMatch(sql, /IN \(/);
+  assert.doesNotMatch(sql, /END IN \(/);
   assert.match(sql, /soft_deleted/);
   assert.match(sql, /archived/);
   // all-mode: no visibility params, so limit $1 / offset $2
@@ -148,3 +149,19 @@ test('model feed excludes assigned, saved, and not-interested reels without hidi
   assert.deepStrictEqual(rows.map((row) => row.id), [4]);
   assert.deepStrictEqual(params, ['talking', 7, 7, 7, 24, 0]);
 });
+
+for (const [name, status, contentType, creatorType, expected] of [
+  ['unsorted reel with creator type is hidden', 'unsorted', null, 'talking', []],
+  ['unsorted reel with content_type is hidden', 'unsorted', 'talking', null, []],
+  ['needs_look reel hidden', 'needs_look', 'talking', 'talking', []],
+  ['auto reel visible', 'auto', 'talking', null, [1]],
+  ['manual reel visible', 'manual', 'talking', null, [1]],
+]) {
+  test(name, () => {
+    const sqlite = makePostsDb();
+    sqlite.prepare("INSERT INTO posts (id, account_handle, content_type, sort_status, video_cache_status) VALUES (1, 'creator', ?, ?, 'cached')").run(contentType, status);
+    if (creatorType) sqlite.prepare("INSERT INTO creator_types VALUES ('creator', ?)").run(creatorType);
+    const { sql, params } = buildMeFeedQuery(['talking']);
+    assert.deepStrictEqual(sqlite.prepare(sql.replace(/\$\d+/g, '?')).all(...params).map((row) => row.id), expected);
+  });
+}

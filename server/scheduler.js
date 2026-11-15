@@ -5,6 +5,7 @@ const { BudgetExceededError, aggregateCandidates, scoreCandidate } = require('./
 const ContentIdeaAgent = require('./ai-agent');
 const { deliverBatch } = require('./delivery');
 const radar = require('./radar');
+const { runAutoSort } = require('./sort-runner');
 
 function cadenceConfig(env = process.env) {
   const num = (v, d) => { const n = Number(v); return Number.isFinite(n) && n >= 0 ? n : d; };
@@ -109,6 +110,7 @@ const jobStatus = {
   cleanup: { lastRun: null, nextRun: null, status: 'idle', message: '' },
   discovery: { lastRun: null, nextRun: null, status: 'idle', message: '' },
   ideaGeneration: { lastRun: null, nextRun: null, status: 'idle', message: '' },
+  autoSort: { lastRun: null, status: 'idle', message: '' },
 };
 
 async function runAutoScrape() {
@@ -187,6 +189,10 @@ async function runEngagementRollup() {
   } catch (err) { jobStatus.rollup.status = 'error'; jobStatus.rollup.message = err.message; }
 }
 
+function cleanupProtectClause() {
+  return "NOT (sort_status = 'auto' OR (sort_status = 'manual' AND content_type IS NOT NULL)) AND tag IS NULL";
+}
+
 async function runAutoCleanup() {
   jobStatus.cleanup.status = 'running';
   jobStatus.cleanup.lastRun = new Date().toISOString();
@@ -200,13 +206,16 @@ async function runAutoCleanup() {
       notInClause = `AND account_handle NOT IN (${placeholders})`;
       params.push(...activeHandles);
     }
-    const candidates = await pool.query(`SELECT id, shortcode, account_handle FROM posts WHERE tag IS NULL AND (soft_deleted = 0 OR soft_deleted IS NULL) AND scraped_at < TO_CHAR(NOW() - INTERVAL '30 days', 'YYYY-MM-DD"T"HH24:MI:SS"Z"') ${notInClause}`, params);
+    const candidates = await pool.query(`SELECT id, shortcode, account_handle FROM posts WHERE ${cleanupProtectClause()} AND (soft_deleted = 0 OR soft_deleted IS NULL) AND scraped_at < TO_CHAR(NOW() - INTERVAL '30 days', 'YYYY-MM-DD"T"HH24:MI:SS"Z"') ${notInClause}`, params);
     if (candidates.rows.length === 0) { jobStatus.cleanup.message = 'No posts to clean up'; jobStatus.cleanup.status = 'idle'; return; }
+    let hidden = 0;
     for (const post of candidates.rows) {
-      await pool.query(`UPDATE posts SET soft_deleted = 1, soft_deleted_at = TO_CHAR(NOW(), 'YYYY-MM-DD"T"HH24:MI:SS"Z"') WHERE id = $1`, [post.id]);
+      const changed = await pool.query(`UPDATE posts SET soft_deleted = 1, soft_deleted_at = TO_CHAR(NOW(), 'YYYY-MM-DD"T"HH24:MI:SS"Z"') WHERE id = $1 AND ${cleanupProtectClause()} AND (soft_deleted = 0 OR soft_deleted IS NULL)`, [post.id]);
+      if (!changed.rowCount) continue;
       await pool.query(`INSERT INTO deletion_log (post_id, shortcode, account_handle, reason) VALUES ($1, $2, $3, 'auto:unreferenced_30d')`, [post.id, post.shortcode, post.account_handle]);
+      hidden++;
     }
-    jobStatus.cleanup.message = `Soft-deleted ${candidates.rows.length} unreferenced posts`;
+    jobStatus.cleanup.message = `Soft-deleted ${hidden} unreferenced posts`;
     jobStatus.cleanup.status = 'idle';
   } catch (err) { jobStatus.cleanup.status = 'error'; jobStatus.cleanup.message = err.message; }
 }
@@ -382,10 +391,22 @@ async function runVideoSweep() {
   try {
     const t = await sweepVideos({ batchLimit: 100 });
     jobStatus.videoSweep.message = `Swept: ${t.cached} cached, ${t.expired} expired, ${t.skipped} skipped, ${t.errored} errored`;
+    await runSortCatchUp();
   } catch (err) {
     jobStatus.videoSweep.message = `Failed: ${err.message}`;
   }
   jobStatus.videoSweep.status = 'idle';
+}
+
+async function runSortCatchUp() {
+  jobStatus.autoSort = { status: 'running', lastRun: new Date().toISOString() };
+  try {
+    const result = await runAutoSort({ pool });
+    jobStatus.autoSort = { ...jobStatus.autoSort, status: 'idle', ...result };
+  } catch (error) {
+    console.error('[Sort] catch-up failed:', error.message);
+    jobStatus.autoSort = { ...jobStatus.autoSort, status: 'error', message: error.message };
+  }
 }
 
 function startScheduler(scraper) {
@@ -404,6 +425,7 @@ function startScheduler(scraper) {
   cron.schedule('0 8 * * *', () => runIdeaGeneration()); // Daily 8am, checks delivery_day
   cron.schedule('0 5 * * *', () => runThumbnailSweep());
   cron.schedule('*/30 * * * *', () => runVideoSweep()); // catch-up: fill the video cache continuously
+  cron.schedule('15 * * * *', () => runSortCatchUp());
   // Kick one catch-up sweep ~20s after boot so the cache starts filling right after a
   // deploy instead of waiting up to 30 min for the first cron tick. Delayed so it
   // doesn't compete with cold-start request handling; runVideoSweep swallows its own errors.
@@ -413,4 +435,4 @@ function startScheduler(scraper) {
 
 function getSchedulerStatus() { return jobStatus; }
 
-module.exports = { startScheduler, getSchedulerStatus, runAutoScrape, runEngagementRollup, runAutoCleanup, runDiscovery, runIdeaGeneration, runThumbnailSweep, runVideoSweep, cadenceConfig, computeInterval, backoffDays, daysSince, isDue, selectDueAccounts, buildCadenceAccounts, discoveryConfig, selectDiscoverySources, qualifiesByReelShare };
+module.exports = { startScheduler, getSchedulerStatus, runAutoScrape, runEngagementRollup, runAutoCleanup, runDiscovery, runIdeaGeneration, runThumbnailSweep, runVideoSweep, runSortCatchUp, cleanupProtectClause, cadenceConfig, computeInterval, backoffDays, daysSince, isDue, selectDueAccounts, buildCadenceAccounts, discoveryConfig, selectDiscoverySources, qualifiesByReelShare };
