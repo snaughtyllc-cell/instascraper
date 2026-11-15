@@ -16,11 +16,11 @@ if (sqlitePath === undefined) delete process.env.SQLITE_PATH;
 else process.env.SQLITE_PATH = sqlitePath;
 const { appRequest } = require('./test-support/app-request');
 
-async function fixture(t, worker) {
+async function fixture(t, worker, analysisWorker) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'react-fetch-api-'));
   const originalEnv = {};
   for (const [name, value] of Object.entries({ FILM_SERVICE_KEY: 'api-key', FILM_MEDIA_SECRET: 'media-key',
-    PUBLIC_BASE_URL: 'https://media.example.test', REACT_REF_DIR: dir })) {
+    PUBLIC_BASE_URL: 'https://media.example.test', REACT_REF_DIR: dir, GEMINI_API_KEY: '' })) {
     originalEnv[name] = process.env[name];
     process.env[name] = value;
   }
@@ -56,7 +56,9 @@ async function fixture(t, worker) {
   const app = express();
   const calls = [];
   const reactFetchWorker = worker || { request: async shortcode => { calls.push(shortcode); return { state: 'fetching', launched: true }; } };
-  registerFilmApi(app, { pool, reactWorker: { enqueue: async () => {} }, reactFetchWorker });
+  registerFilmApi(app, { pool, reactWorker: { enqueue: async () => {} }, reactFetchWorker,
+    reactAnalysisWorker: analysisWorker || { request: async () => ({ state: 'failed', analysis: null }),
+      getResult: async () => ({ state: 'failed', analysis: null }) } });
   const request = (method, url, body, headers = {}) => appRequest(app, {
     method, path: url, body, headers: { Authorization: 'Bearer api-key', ...headers },
   });
@@ -72,6 +74,78 @@ function signedPath(shortcode, exp = Math.floor(Date.now() / 1000) + 3600, names
   return `/film/v1/react-media/${shortcode}?exp=${exp}&sig=${sig}`;
 }
 
+test('React analysis keeps the fetching shape then serves analysis and the React-ready MP4', async t => {
+  let result = { state: 'fetching', analysis: null };
+  const calls = [];
+  const f = await fixture(t, undefined, {
+    request: async (shortcode, reference) => { calls.push({ shortcode, reference }); return result; },
+    getResult: async () => result,
+  });
+  f.reference('analyzed_123', 'ready');
+  const pending = await f.request('POST', '/film/v1/react-reference', { shortcode: 'analyzed_123', fetch: false });
+  assert.equal(pending.status, 202);
+  assert.deepEqual(pending.body, { state: 'fetching' });
+  assert.equal(calls[0].shortcode, 'analyzed_123');
+  assert.equal(calls[0].reference.path, path.join(f.dir, 'analyzed_123.mp4'));
+  const analysis = { version: 1, seam: 0.42, layout: [{ start: 0, end: 7.25, kind: 'split' }],
+    cues: [{ start: 1, end: 2, text: 'Creator line' }], creatorMuted: true };
+  const readyFile = path.join(f.dir, 'analyzed_123.react.mp4');
+  fs.writeFileSync(readyFile, 'muted creator');
+  result = { state: 'ready', analysis, path: readyFile };
+  const ready = await f.request('POST', '/film/v1/react-reference', { shortcode: 'analyzed_123' });
+  assert.equal(ready.status, 200);
+  assert.deepEqual(ready.body.analysis, analysis);
+  assert.equal(ready.body.durationSec, 7.25);
+  const url = new URL(ready.body.videoUrl);
+  assert.equal(url.pathname + url.search, signedPath('analyzed_123', Number(url.searchParams.get('exp'))));
+  const media = await appRequest(f.app, { path: url.pathname + url.search, headers: { Range: 'bytes=0-4' } });
+  assert.equal(media.status, 206);
+  assert.equal(media.text, 'muted');
+  assert.deepEqual(f.calls, []);
+  fs.unlinkSync(path.join(f.dir, 'analyzed_123.mp4'));
+  assert.equal((await appRequest(f.app, { path: url.pathname + url.search })).text, 'muted creator',
+    'a ready derivative remains playable without the original pin');
+  fs.writeFileSync(path.join(f.dir, 'analyzed_123.mp4'), 'original');
+  fs.unlinkSync(readyFile);
+  assert.equal((await appRequest(f.app, { path: url.pathname + url.search })).text, 'original',
+    'a missing derivative falls back to the original pin');
+  assert.equal((await f.request('POST', '/film/v1/react-reference', { shortcode: 'analyzed_123' })).body.analysis, null,
+    'missing derivative never returns metadata claiming creator muting');
+});
+
+test('failed or timed-out analysis serves original with null analysis for posts and fetched refs', async t => {
+  const f = await fixture(t);
+  f.reference('failed_analysis', 'ready');
+  f.db.prepare('INSERT INTO posts (id,shortcode) VALUES (?,?)').run(42, 'pinned_analysis');
+  fs.writeFileSync(path.join(f.dir, 'pinned_analysis.mp4'), 'pinned original');
+  for (const shortcode of ['failed_analysis', 'pinned_analysis']) {
+    const response = await f.request('POST', '/film/v1/react-reference', { shortcode });
+    assert.equal(response.status, 200);
+    assert.equal(response.body.analysis, null);
+    const url = new URL(response.body.videoUrl);
+    assert.equal(url.pathname, `/film/v1/react-media/${shortcode}`);
+    const media = await appRequest(f.app, { path: url.pathname + url.search });
+    assert.equal(media.status, 200);
+    assert.equal(media.text, shortcode === 'pinned_analysis' ? 'pinned original' : '0123456789');
+  }
+});
+
+test('analysis errors cannot block an available reference or its signed media', async t => {
+  const f = await fixture(t, undefined, {
+    request: async () => { throw new Error('private provider error'); },
+    getResult: async () => { throw new Error('private analysis error'); },
+  });
+  f.reference('broken_analysis', 'ready');
+  const response = await f.request('POST', '/film/v1/react-reference', { shortcode: 'broken_analysis' });
+  assert.equal(response.status, 200);
+  assert.equal(response.body.analysis, null);
+  assert.ok(!JSON.stringify(response.body).includes('private'));
+  const url = new URL(response.body.videoUrl);
+  const media = await appRequest(f.app, { path: url.pathname + url.search });
+  assert.equal(media.status, 200);
+  assert.equal(media.text, '0123456789');
+});
+
 test('unknown React references return fetching and delegate to the fetch worker', async t => {
   const f = await fixture(t);
   const response = await f.request('POST', '/film/v1/react-reference', { shortcode: 'unknown_123' });
@@ -81,7 +155,7 @@ test('unknown React references return fetching and delegate to the fetch worker'
   assert.equal(f.db.prepare('SELECT COUNT(*) AS count FROM posts').get().count, 0);
 });
 
-test('fetch false returns unavailable without worker, budget, cap or ledger activity', async t => {
+test('fetch false reports existing fetches without worker, budget, cap or ledger activity', async t => {
   const f = await fixture(t);
   let workerCalls = 0, budgetCalls = 0, capReads = 0, actorLaunches = 0, ledgerCalls = 0;
   const query = f.pool.query;
@@ -112,8 +186,9 @@ test('fetch false returns unavailable without worker, budget, cap or ledger acti
     const response = await appRequest(app, { method: 'POST', path: '/film/v1/react-reference',
       body: { shortcode, fetch: false }, headers: { Authorization: 'Bearer api-key' } });
     if (workerCalls) await worker.waitForIdle();
-    assert.equal(response.status, 404, shortcode);
-    assert.deepEqual(response.body, { error: 'reel_not_available' });
+    const fetching = shortcode === 'fetching_123';
+    assert.equal(response.status, fetching ? 202 : 404, shortcode);
+    assert.deepEqual(response.body, fetching ? { state: 'fetching' } : { error: 'reel_not_available' });
   }
   assert.equal(workerCalls, 0);
   assert.equal(budgetCalls, 0);

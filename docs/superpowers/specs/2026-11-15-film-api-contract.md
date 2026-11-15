@@ -18,7 +18,7 @@ Film (UI)  ──/api/filming/find/*──▶  HQ (knows the model)  ──/film
 ## Auth
 
 - **Server-to-server:** header `Authorization: Bearer <FILM_SERVICE_KEY>`. This is a new InstaScraper env var, shared with HQ as `INSTASCRAPER_FILM_KEY`. It's separate from `INSTASCRAPER_API_KEY` and grants only `/film/v1/*`. A missing or wrong key returns 401. The comparison is constant-time.
-- **Media:** the browser loads videos and thumbnails straight from InstaScraper through **signed URLs**, so large files don't pass through HQ. The URL is `/film/v1/media/:reelId?exp=<unixSeconds>&sig=<hex>`, where `sig = HMAC-SHA256(FILM_MEDIA_SECRET, "<reelId>.<exp>")`, with a 6-hour expiry. Thumbnails use the same pattern at `/film/v1/thumb/:reelId`. Fetched React references use `/film/v1/react-media/:shortcode?exp=<unixSeconds>&sig=<hex>` and the separate signature payload `"react-media.<shortcode>.<exp>"`, also valid for 6 hours. No bearer is needed; a bad or expired signature returns 403. Video supports HTTP Range (206).
+- **Media:** the browser loads videos and thumbnails straight from InstaScraper through **signed URLs**, so large files don't pass through HQ. The URL is `/film/v1/media/:reelId?exp=<unixSeconds>&sig=<hex>`, where `sig = HMAC-SHA256(FILM_MEDIA_SECRET, "<reelId>.<exp>")`, with a 6-hour expiry. Thumbnails use the same pattern at `/film/v1/thumb/:reelId`. All React references use `/film/v1/react-media/:shortcode?exp=<unixSeconds>&sig=<hex>` and the separate signature payload `"react-media.<shortcode>.<exp>"`, also valid for 6 hours. No bearer is needed; a bad or expired signature returns 403. Video supports HTTP Range (206).
 
 ## Reel object
 
@@ -54,9 +54,9 @@ Film (UI)  ──/api/filming/find/*──▶  HQ (knows the model)  ──/film
 | POST | `/models/:hqProjectId/reels/:reelId/filming` | `{ "hqItemId": "<uuid>" }` | `{ ok: true }`. HQ calls this after it creates the "Film this" item, so InstaScraper records `want_to_make` (strong positive) and links the reel to the HQ item. |
 | GET | `/media/:reelId` | `exp, sig` | the mp4 (Range-capable) |
 | GET | `/thumb/:reelId` | `exp, sig` | jpeg |
-| POST | `/react-reference` | `{ "shortcode": "AbCdE123", "fetch": true }` (`fetch` optional) | `200 { videoUrl, durationSec }`, `202 { state: "fetching" }`, or 404 when unavailable |
+| POST | `/react-reference` | `{ "shortcode": "AbCdE123", "fetch": true }` (`fetch` optional) | `200 { videoUrl, durationSec, analysis }`, `202 { state: "fetching" }`, or 404 when unavailable |
 | POST | `/react-prefetch` | `{ "shortcodes": ["AbCdE123"] }` | `202 { queued }`, the number of newly queued fetches |
-| GET | `/react-media/:shortcode` | `exp, sig` | fetched mp4 (Range-capable), 404 unless ready |
+| GET | `/react-media/:shortcode` | `exp, sig` | React-ready mp4 or original fallback (Range-capable), for posts and fetched references |
 
 - Save, skip and filming on a reel she can't access (not sorted, not in her scope) return 404 `{ "error": "reel_not_available" }`.
 - Errors are always JSON `{ error }`. 5xx means HQ should show "Couldn't load picks, try again".
@@ -82,15 +82,18 @@ Film records the model's unmirrored camera while the reference plays above it. H
 callback. The reference, prefetch and render routes use the existing `FILM_SERVICE_KEY` bearer authentication.
 
 - `POST /film/v1/react-reference` with `{ "shortcode": "<5–64 letters, digits, _ or ->" }` returns
-  `200 { "videoUrl": "<absolute signed media URL>", "durationSec": number|null }` for an existing playable reel.
+  `200 { "videoUrl": "<absolute signed react-media URL>", "durationSec": number|null, "analysis": Analysis|null }`
+  for an existing playable reel. Every React reference, including a posts-based pin, uses
+  `/film/v1/react-media/<shortcode>?exp&sig` with the `react-media.<shortcode>.<exp>` signature payload.
   The optional `fetch` field is a boolean and defaults to `true`; any non-boolean value returns
   `400 { "error": "invalid_fetch" }`. With `fetch: false`, available posts/pins and ready fetched references
-  still return 200. Unavailable references return `404 { "error": "reel_not_available" }`, including references
-  already being fetched. This does not start a fetch or touch the daily cap or launch/cost ledgers, so non-React
+  proceed to analysis, and references already being fetched return `202 { "state": "fetching" }`.
+  Unavailable references return `404 { "error": "reel_not_available" }`. This does not start a fetch or touch the
+  Apify daily cap or launch/cost ledgers, so non-React
   shots can check availability without spending Apify credits.
   Malformed shortcodes return 400. The worker downloads a missing
   cached MP4 and pins it by hardlink (copy across filesystems) as `<REACT_REF_DIR>/<shortcode>.mp4`.
-  Pins survive video-cache pruning. Signed media checks the ordinary cache first, then the pin, then 404.
+  Pins survive video-cache pruning. React media serves the analyzed pin when ready, otherwise the original pin.
   Explicitly pinned references remain available through valid signed URLs even after feed visibility or cache
   status changes; ordinary unpinned feed media retains its existing visibility restrictions.
 - When the shortcode is unknown or its existing post has no available video, the service checks the separate
@@ -118,6 +121,30 @@ callback. The reference, prefetch and render routes use the existing `FILM_SERVI
 - `GET /film/v1/react-media/:shortcode?exp&sig` needs only its signed URL and serves a ready, nonempty reference
   file with HTTP Range support. Invalid or expired signatures return 403; missing files or references that
   are not ready return `404 { "error": "reel_not_available" }`.
+- Once a fetched reference or posts-based pin is available, a serial analysis job runs automatically.
+  Existing ready references without analysis are also discovered at startup and on reference requests.
+  While queued or analyzing, `react-reference` returns the unchanged `202 { "state": "fetching" }` shape.
+  Analysis failure, blocked Gemini budget, missing Gemini key, or exceeding `REACT_ANALYSIS_TIMEOUT_SEC`
+  (default 120 seconds including queue time) returns the original MP4 with `analysis: null`; React remains usable.
+  Successful analysis is cached in `film_react_analysis` and `<REACT_REF_DIR>/<shortcode>.react.mp4`.
+  The MP4 preserves the original video and mutes creator speech spans with 40 ms transitions, encoding audio
+  as stereo AAC at 48 kHz. It does not separate simultaneous overlapping voices or background music.
+  Silence detection (`-35dB`, at least 150 ms) expands creator boundaries to nearby silence edges within 350 ms.
+  Analysis uses deterministic 4 fps, 90×160 grayscale seam/layout detection and Gemini role transcription.
+  A weak seam in the current or next sampled frame marks the current frame full, followed by minimum-segment smoothing.
+  Gemini identifies the creator in the bottom pane or full screen, and strangers in the top video-call pane.
+  Calls reuse `GEMINI_API_KEY`, `GEMINI_MODEL`, the shared `AUTO_SORT_DAILY_MAX` cap and cost accounting;
+  failed paid attempts consume the cap too. The existing Gemini ledger records React attempts with `post_id=0`.
+
+  ```ts
+  type Analysis = {
+    version: 1;
+    seam: number | null; // 0..1 frame-height fraction; top pane is the stranger
+    layout: { start: number; end: number; kind: 'split' | 'full' }[]; // sorted, non-overlapping, whole duration
+    cues: { start: number; end: number; text: string }[]; // original creator's lines, <=200, <=300 chars each
+    creatorMuted: boolean; // true when creator cues were removed from served audio
+  };
+  ```
 - Fetches are deduplicated by shortcode and run at concurrency 1 by default, with an overall 180-second timeout.
   Apify authenticates with the existing token query parameter. Each fetch first uses
   `apify~instagram-reel-scraper` with `{ directUrls: ["https://www.instagram.com/reel/<shortcode>/"], resultsLimit: 1 }`.
@@ -158,12 +185,22 @@ callback. The reference, prefetch and render routes use the existing `FILM_SERVI
   `HQ_PUBLIC_URL` origin. Uploads require exactly `www.googleapis.com`, path `/upload/drive/v3/files`, and
   `uploadType=resumable`. Transfers refuse redirects, and ffmpeg/ffprobe cannot open network protocols.
 
-Stitched output places the selected reference crop above her camera, at 30 fps with H.264 (veryfast, CRF 20,
-yuv420p), AAC 160k, and faststart. Positive sync delays the reference and clones its initial frame;
+Stitched output places the selected reference crop above her camera at 1080×1920, 30 fps with H.264
+(veryfast, CRF 20, yuv420p), stereo 48 kHz AAC 192k, and faststart. Film can default the crop height to
+`analysis.seam`; the render honors the supplied crop. Instagram renders use cached React-ready media and layout
+when available. During full-screen creator segments the top pane freezes the last preceding safe split frame;
+an initial full segment uses the first following safe split frame. Selection ends `REACT_FREEZE_MARGIN_SEC`
+(default 0.35 seconds, clamped to 0..1) before a split-to-full boundary and starts 0.15 seconds after a
+full-to-split boundary. If these margins would leave less than 0.2 seconds, selection uses the original
+split midpoint ±0.1 seconds. URL references use the new mix without layout analysis.
+Positive sync delays the reference and clones its initial frame;
 negative sync seeks into it. A seek beyond the reference duration fails the job. The final frame is padded
-for 600 seconds and output ends with her take. Her mic stays at volume 1; optional reference audio is 0.8,
-mixed without normalization and limited. Missing audio yields reference-only audio or silence as appropriate.
-Solo output fills 1080×1920 with her camera and uses only her audio. Normal ffmpeg autorotation handles
+for 600 seconds and output ends with her take. Her mic uses an 80 Hz high-pass filter,
+`dynaudnorm=f=150:g=11:p=0.9:m=20`, and normalization to -16 LUFS / -1.5 dBTP with `linear=true`.
+Optional reference audio is normalized to -22 LUFS / -2 dBTP and ducked by her processed mic
+(sidechain threshold 0.03, ratio 6, attack 5 ms, release 350 ms).
+The mix disables normalization and uses a 0.89 limiter. Missing audio yields reference-only audio or silence as appropriate.
+Solo output fills 1080×1920 with her camera and uses only her processed mic audio. Normal ffmpeg autorotation handles
 iPhone rotation metadata. Raw downloads are streamed with a 10-minute timeout and configurable byte cap;
 URL references are capped at 500 MB. Temporary files are removed after success or failure.
 
@@ -205,8 +242,15 @@ Runtime configuration:
 | `REACT_FETCH_CONCURRENCY` | `1` simultaneous on-demand reference fetch by default; prefetch queues in process |
 | `REACT_FETCH_MEMORY_MB` | `512` MB per Apify run |
 | `REACT_FETCH_TIMEOUT_SEC` | `180` wall-clock seconds per on-demand reference fetch |
+| `REACT_ANALYSIS_TIMEOUT_SEC` | `120` seconds for queued + active analysis; failure falls back to original media and null analysis |
+| `GEMINI_API_KEY` | Existing Gemini key; missing key disables analysis with original-media fallback |
+| `GEMINI_MODEL` | `gemini-3.5-flash-lite`; same model as sorting |
+| `AUTO_SORT_DAILY_MAX` | `1000` shared Gemini attempts per rolling 24 hours across sorting, backfills, candidate reels and React analysis |
+| `GEMINI_PRICE_IN_PER_M` | `0.30`; Gemini input cost estimate per million tokens |
+| `GEMINI_PRICE_OUT_PER_M` | `2.50`; Gemini output cost estimate per million tokens |
 | `REACT_RENDER_CONCURRENCY` | `1` |
 | `REACT_RENDER_TIMEOUT_SEC` | `900` wall-clock seconds per ffmpeg render |
+| `REACT_FREEZE_MARGIN_SEC` | `0.35` seconds excluded before split-to-full boundaries, clamped to 0..1; full-to-split selection starts 0.15 seconds late |
 | `REACT_FFMPEG_THREADS` | `2`; encoder and filter thread caps, positive integer clamped to 1–16 |
 | `REACT_FFMPEG_NICE` | `10`; best-effort CPU nice level 1–19; `0` disables |
 | `REACT_RAW_MAX_MB` | `1024` |

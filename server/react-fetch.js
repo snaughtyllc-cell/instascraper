@@ -139,7 +139,7 @@ function createApifyClient(env = process.env, fetchImpl = fetch, sleep = delay, 
 function createReactFetchWorker({ pool, env = process.env, now = Date.now, apify,
   fetchImpl = fetch, sleep = delay, download = downloadReference, probe = probeVideo,
   budgetStatus = scraper.budgetStatus, recordRunLaunch = scraper.recordRunLaunch,
-  recordRunCompletion = scraper.recordRunCompletion } = {}) {
+  recordRunCompletion = scraper.recordRunCompletion, onReady } = {}) {
   const configuredConcurrency = Number(env.REACT_FETCH_CONCURRENCY);
   const concurrency = Number.isSafeInteger(configuredConcurrency) && configuredConcurrency > 0
     ? Math.min(configuredConcurrency, 2) : 1;
@@ -340,6 +340,7 @@ function createReactFetchWorker({ pool, env = process.env, now = Date.now, apify
         if (updated.rowCount) {
           fs.renameSync(result.staged, result.finalPath);
           entry.publishedPath = result.finalPath;
+          entry.durationSec = result.durationSec;
         }
       });
     } catch (caught) {
@@ -359,6 +360,11 @@ function createReactFetchWorker({ pool, env = process.env, now = Date.now, apify
         await pool.query('DELETE FROM film_react_ref_attempts WHERE attempt_id=$1 AND started_at IS NULL', [id]);
       }
       console.log(`[Metric] react_fetch outcome=${error || 'ready'}`);
+    }
+    if (!error && entry.publishedPath && onReady) {
+      try { await onReady(entry.shortcode, { path: entry.publishedPath,
+        durationSec: entry.durationSec }); }
+      catch { console.error('[React analysis] enqueue_failed'); }
     }
   }
 

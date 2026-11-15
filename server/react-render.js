@@ -1,8 +1,9 @@
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
-const { buildFfmpegArgs, probeVideo, renderVideo, resolveFfmpegThreads, resolveFfmpegNice } = require('./react-ffmpeg');
+const { buildFfmpegArgs, probeVideo, renderVideo, resolveFfmpegThreads, resolveFfmpegNice, resolveFreezeMargin } = require('./react-ffmpeg');
 const transfer = require('./react-transfer');
+const { usableFile } = require('./react-reference');
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const SHORTCODE = /^[A-Za-z0-9_-]{5,64}$/;
@@ -45,13 +46,21 @@ const safeError = error => {
 
 function createReactRenderWorker({ pool, env = process.env, download = transfer.downloadFile,
   probe = probeVideo, render = renderVideo, upload = transfer.uploadOutput, callback = transfer.sendCallback,
-  ensureReference = (db, shortcode) => require('./react-reference').ensureReactReference(db, shortcode),
+  ensureReference = (db, shortcode) => require('./react-reference').ensureReactReference(db, shortcode, { env }),
+  lookupAnalysis,
   tempRoot = os.tmpdir() }) {
   const concurrency = positiveNumber(env.REACT_RENDER_CONCURRENCY, 1, true);
   const threads = resolveFfmpegThreads(env.REACT_FFMPEG_THREADS);
   const nice = resolveFfmpegNice(env.REACT_FFMPEG_NICE);
+  const freezeMarginSec = resolveFreezeMargin(env.REACT_FREEZE_MARGIN_SEC);
   const jobs = new Map(), queue = [], idleWaiters = [];
-  let active = 0, initialization;
+  let active = 0, initialization, analysisWorker;
+
+  function getAnalysis(shortcode, reference) {
+    if (lookupAnalysis) return lookupAnalysis(shortcode, reference);
+    analysisWorker ||= require('./react-analysis').createReactAnalysisWorker({ pool, env });
+    return analysisWorker.request(shortcode, reference);
+  }
 
   async function persist(jobId, state, error = null, driveFileId = null) {
     await pool.query(`UPDATE film_react_jobs SET state=$1, error=$2, drive_file_id=$3, updated_at=$4 WHERE job_id=$5`,
@@ -100,11 +109,21 @@ function createReactRenderWorker({ pool, env = process.env, download = transfer.
       await download(body.rawUrl, rawPath, {
         maxBytes: positiveNumber(env.REACT_RAW_MAX_MB, 1024) * 1024 * 1024, allowedUrl,
       });
-      let referencePath;
+      let referencePath, analysis = null;
       if (body.reference.kind === 'instagram') {
         const ref = await ensureReference(pool, body.reference.shortcode);
         if (!ref) throw Object.assign(new Error('reference_not_available'), { code: 'reference_not_available' });
         referencePath = ref.path;
+        // Analysis is an enhancement: failed, pending or missing cached results
+        // must leave an otherwise available Instagram reference renderable.
+        try {
+          const result = await getAnalysis(body.reference.shortcode, ref);
+          if (result?.state === 'ready' && result.analysis && typeof result.path === 'string' &&
+              usableFile(result.path)) {
+            referencePath = result.path;
+            analysis = result.analysis;
+          }
+        } catch { /* The original reference remains usable after analysis failure. */ }
       } else {
         await download(body.reference.url, referenceDownload, { maxBytes: 500 * 1024 * 1024, allowedUrl });
         referencePath = referenceDownload;
@@ -114,9 +133,9 @@ function createReactRenderWorker({ pool, env = process.env, download = transfer.
       if (body.output === 'stitched' && body.syncMs < 0 && -body.syncMs / 1000 >= reference.durationSec) {
         throw Object.assign(new Error('reference_seek_out_of_range'), { code: 'reference_seek_out_of_range' });
       }
-      await render({ ...body, rawPath, referencePath, outputPath, rawDuration: raw.durationSec,
+      await render({ ...body, analysis, rawPath, referencePath, outputPath, rawDuration: raw.durationSec,
         rawHasAudio: raw.hasAudio, referenceHasAudio: reference.hasAudio },
-      { ffmpegPath: env.FFMPEG_PATH || 'ffmpeg', threads, nice,
+      { ffmpegPath: env.FFMPEG_PATH || 'ffmpeg', threads, nice, freezeMarginSec,
         timeoutMs: positiveNumber(env.REACT_RENDER_TIMEOUT_SEC, 900) * 1000 });
       driveFileId = await upload(body.uploadUrl, outputPath);
     } catch (error) { failure = safeError(error); }

@@ -90,16 +90,11 @@ test('Instagram renders resolve ready fetched references without adding posts', 
   db.exec('CREATE TABLE posts (id INTEGER PRIMARY KEY, shortcode TEXT, video_url TEXT)');
   db.prepare(`INSERT INTO film_react_refs (shortcode,state,duration_sec) VALUES (?,?,?)`)
     .run('fetched_ref', 'ready', 3);
-  const referenceDir = process.env.REACT_REF_DIR;
-  process.env.REACT_REF_DIR = path.join(f.dir, 'references');
-  t.after(() => {
-    if (referenceDir === undefined) delete process.env.REACT_REF_DIR;
-    else process.env.REACT_REF_DIR = referenceDir;
-  });
-  fs.mkdirSync(process.env.REACT_REF_DIR);
-  const referencePath = path.join(process.env.REACT_REF_DIR, 'fetched_ref.mp4');
+  const referenceDir = path.join(f.dir, 'references');
+  fs.mkdirSync(referenceDir);
+  const referencePath = path.join(referenceDir, 'fetched_ref.mp4');
   fs.writeFileSync(referencePath, 'fetched reference');
-  const worker = createReactRenderWorker({ pool, ...f.dependencies });
+  const worker = createReactRenderWorker({ pool, ...f.dependencies, env: { ...env, REACT_REF_DIR: referenceDir } });
   await worker.enqueue(request({ reference: { kind: 'instagram', shortcode: 'fetched_ref' } }));
   await worker.waitForIdle();
   assert.equal(f.callbacks[0].state, 'done');
@@ -108,18 +103,85 @@ test('Instagram renders resolve ready fetched references without adding posts', 
   assert.equal(fs.readFileSync(referencePath, 'utf8'), 'fetched reference');
 });
 
-test('worker passes trusted thread and priority configuration instead of request overrides', async t => {
+test('Instagram renders use the ready analysis file and pass its layout to ffmpeg', async t => {
+  const { pool } = await database(t), f = fixture(t);
+  const reactPath = path.join(f.dir, 'ready.react.mp4');
+  fs.writeFileSync(reactPath, 'stranger-only audio');
+  const analysis = { version: 1, seam: 0.42, creatorMuted: true, cues: [],
+    layout: [{ start: 0, end: 1, kind: 'split' }, { start: 1, end: 3, kind: 'full' }] };
+  const worker = createReactRenderWorker({ pool, ...f.dependencies,
+    ensureReference: async () => ({ path: '/original.mp4' }),
+    lookupAnalysis: async (shortcode, reference) => {
+      assert.equal(shortcode, 'ready_ref');
+      assert.equal(reference.path, '/original.mp4');
+      return { state: 'ready', analysis, path: reactPath };
+    } });
+  await worker.enqueue(request({ reference: { kind: 'instagram', shortcode: 'ready_ref' } }));
+  await worker.waitForIdle();
+  assert.equal(f.callbacks[0].state, 'done');
+  assert.equal(f.renders[0].referencePath, reactPath);
+  assert.deepEqual(f.renders[0].analysis, analysis);
+});
+
+test('analysis failures, pending analysis and missing ready files preserve original reference renders', async t => {
+  for (const result of [{ state: 'failed' }, { state: 'fetching' },
+    { state: 'ready', analysis: { version: 1 }, path: '/missing.react.mp4' }, new Error('unavailable')]) {
+    const { pool } = await database(t), f = fixture(t);
+    const worker = createReactRenderWorker({ pool, ...f.dependencies,
+      ensureReference: async () => ({ path: '/original.mp4' }),
+      lookupAnalysis: async () => { if (result instanceof Error) throw result; return result; } });
+    await worker.enqueue(request({ reference: { kind: 'instagram', shortcode: 'ready_ref' },
+      analysis: { layout: [{ start: 0, end: 3, kind: 'full' }] } }));
+    await worker.waitForIdle();
+    assert.equal(f.callbacks[0].state, 'done');
+    assert.equal(f.renders[0].referencePath, '/original.mp4');
+    assert.equal(f.renders[0].analysis, null);
+  }
+});
+
+test('empty, symlink and directory analysis paths fall back to the original file', async t => {
+  for (const kind of ['empty', 'symlink', 'directory']) {
+    const { pool } = await database(t), f = fixture(t), cached = path.join(f.dir, 'cached.react.mp4');
+    if (kind === 'empty') fs.writeFileSync(cached, '');
+    else if (kind === 'directory') fs.mkdirSync(cached);
+    else { fs.writeFileSync(path.join(f.dir, 'target'), 'video'); fs.symlinkSync(path.join(f.dir, 'target'), cached); }
+    const worker = createReactRenderWorker({ pool, ...f.dependencies,
+      ensureReference: async () => ({ path: '/original.mp4' }),
+      lookupAnalysis: async () => ({ state: 'ready', analysis: { version: 1 }, path: cached }) });
+    await worker.enqueue(request({ reference: { kind: 'instagram', shortcode: 'ready_ref' } }));
+    await worker.waitForIdle();
+    assert.equal(f.renders[0].referencePath, '/original.mp4');
+    assert.equal(f.renders[0].analysis, null);
+    assert.equal(f.callbacks[0].state, 'done');
+  }
+});
+
+test('URL renders do not look up analysis or trust request-supplied layout', async t => {
+  const { pool } = await database(t), f = fixture(t);
+  const worker = createReactRenderWorker({ pool, ...f.dependencies,
+    lookupAnalysis: async () => assert.fail('URL references are not analysed') });
+  await worker.enqueue(request({ analysis: { layout: [{ start: 0, end: 3, kind: 'full' }] } }));
+  await worker.waitForIdle();
+  assert.equal(f.renders[0].analysis, null);
+  assert.equal(f.callbacks[0].state, 'done');
+});
+
+test('worker passes trusted thread, priority and freeze configuration instead of request overrides', async t => {
   for (const [configured, expected] of [
-    [{}, { threads: 2, nice: 10 }],
-    [{ REACT_FFMPEG_THREADS: '4', REACT_FFMPEG_NICE: '6' }, { threads: 4, nice: 6 }],
-    [{ REACT_FFMPEG_THREADS: '100', REACT_FFMPEG_NICE: '0' }, { threads: 16, nice: 0 }],
-    [{ REACT_FFMPEG_THREADS: 'invalid', REACT_FFMPEG_NICE: '-1' }, { threads: 2, nice: 10 }],
+    [{}, { threads: 2, nice: 10, freezeMarginSec: 0.35 }],
+    [{ REACT_FFMPEG_THREADS: '4', REACT_FFMPEG_NICE: '6', REACT_FREEZE_MARGIN_SEC: '0.6' },
+      { threads: 4, nice: 6, freezeMarginSec: 0.6 }],
+    [{ REACT_FFMPEG_THREADS: '100', REACT_FFMPEG_NICE: '0', REACT_FREEZE_MARGIN_SEC: '2' },
+      { threads: 16, nice: 0, freezeMarginSec: 1 }],
+    [{ REACT_FFMPEG_THREADS: 'invalid', REACT_FFMPEG_NICE: '-1', REACT_FREEZE_MARGIN_SEC: 'invalid' },
+      { threads: 2, nice: 10, freezeMarginSec: 0.35 }],
+    [{ REACT_FREEZE_MARGIN_SEC: '-1' }, { threads: 2, nice: 10, freezeMarginSec: 0 }],
   ]) {
     const { pool } = await database(t), f = fixture(t), probes = [], renders = [];
     const worker = createReactRenderWorker({ pool, ...f.dependencies, env: { ...env, ...configured },
       probe: async (file, options) => { probes.push(options); return { durationSec: 3, hasAudio: true }; },
       render: async (opts, options) => { renders.push(options); fs.writeFileSync(opts.outputPath, 'rendered'); } });
-    await worker.enqueue(request({ threads: 1000, nice: 0 }));
+    await worker.enqueue(request({ threads: 1000, nice: 0, freezeMarginSec: 0.99 }));
     await worker.waitForIdle();
     assert.deepEqual(probes, Array.from({ length: 2 }, () => ({ ffprobePath: 'ffprobe', nice: expected.nice })));
     assert.deepEqual(renders, [{ ffmpegPath: 'ffmpeg', ...expected, timeoutMs: 900000 }]);

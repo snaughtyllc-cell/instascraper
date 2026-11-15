@@ -34,6 +34,15 @@ test('film migration upgrades existing models, enforces links, and is idempotent
   assert.throws(() => sqlite.exec("INSERT INTO film_react_refs (shortcode, state) VALUES ('fresh_ref', 'ready')"), /UNIQUE/);
   assert.deepEqual(sqlite.prepare('PRAGMA table_info(film_react_ref_attempts)').all().map(row => row.name),
     ['attempt_id', 'shortcode', 'created_at', 'started_at']);
+  assert.deepEqual(sqlite.prepare('PRAGMA table_info(film_react_analysis)').all().map(row => row.name),
+    ['shortcode', 'state', 'analysis_json', 'error', 'attempts', 'created_at', 'updated_at']);
+  sqlite.exec("INSERT INTO film_react_analysis (shortcode, state) VALUES ('fresh_ref', 'queued')");
+  const analysis = sqlite.prepare('SELECT * FROM film_react_analysis').get();
+  assert.equal(analysis.attempts, 0);
+  assert.equal(analysis.analysis_json, null);
+  assert.ok(analysis.created_at);
+  assert.ok(analysis.updated_at);
+  assert.throws(() => sqlite.exec("INSERT INTO film_react_analysis (shortcode, state) VALUES ('fresh_ref', 'ready')"), /UNIQUE/);
 });
 
 test('film migration emits compatible PostgreSQL reference schema', async () => {
@@ -42,4 +51,6 @@ test('film migration emits compatible PostgreSQL reference schema', async () => 
   assert.ok(statements.some(sql => /CREATE TABLE IF NOT EXISTS film_react_refs/.test(sql)
     && /shortcode TEXT PRIMARY KEY/.test(sql) && /TO_CHAR\(NOW\(\)/.test(sql)));
   assert.ok(statements.some(sql => /CREATE TABLE IF NOT EXISTS film_react_ref_attempts/.test(sql)));
+  assert.ok(statements.some(sql => /CREATE TABLE IF NOT EXISTS film_react_analysis/.test(sql)
+    && /shortcode TEXT PRIMARY KEY/.test(sql) && /TO_CHAR\(NOW\(\)/.test(sql)));
 });
