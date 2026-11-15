@@ -79,7 +79,7 @@ export default function SoundsPage({ active = true }) {
           <div className="flex items-end justify-between gap-4 px-1">
             <div className="min-w-0">
               <h2 className="text-base font-black text-model-ink">Trending sounds</h2>
-              <p className="mt-0.5 text-xs font-medium text-model-muted">Moving across creators in your niche</p>
+              <p className="mt-0.5 text-xs font-medium text-model-muted">Moving across your reel library</p>
             </div>
             {!loading && !error && (
               <span className="mb-0.5 shrink-0 rounded-full border border-model-line bg-model-surface px-2.5 py-1 text-[11px] font-bold text-model-muted shadow-sm">
@@ -148,7 +148,7 @@ export default function SoundsPage({ active = true }) {
             </div>
             <p className="mt-3 text-base font-bold text-model-ink">{emptyTitle}</p>
             <p className="mx-auto mt-1.5 max-w-xs text-sm leading-relaxed text-model-muted">
-              As reels in your niche come in, the sounds heating up will show up here.
+              As fresh reels come in, the sounds heating up will show up here.
             </p>
           </div>
         ) : (

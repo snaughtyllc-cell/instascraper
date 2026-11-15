@@ -21,7 +21,11 @@ function makeDb() {
   // a tiny adapter so trendingAudio(db,...) can run: .query(sql, params) → {rows}
   return {
     sqlite: s,
-    query: (sql, params = []) => ({ rows: s.prepare(sql.replace(/\$\d+/g, '?')).all(...params) }),
+    query: (sql, params = []) => {
+      assert.deepStrictEqual([...sql.matchAll(/\$(\d+)/g)].map(match => Number(match[1])), params.map((_, i) => i + 1),
+        'placeholders appear once in ascending order for the SQLite adapter');
+      return { rows: s.prepare(sql.replace(/\$\d+/g, '?')).all(...params) };
+    },
   };
 }
 
@@ -165,4 +169,48 @@ test("trending audio for a model with creators only counts her creators' reels",
   assert.deepStrictEqual(db.query(built.sql, built.params).rows.map(r => r.id), [2,1]);
   const fallback = await trendingAudio(db, { niches: ['talking'], modelId: 8, nowMs: NOW });
   assert.strictEqual(fallback[0].reel_count, 3);
+});
+
+test('model audio keeps sorted non-niche reels and ranks niche sounds and examples first', async () => {
+  const db = makeDb();
+  db.sqlite.exec(`INSERT INTO model_creators VALUES (7,'owned');
+    INSERT INTO posts (id,shortcode,account_handle,posted_at,content_type,sort_status,audio_id,video_cache_status,view_count) VALUES
+    (1,'niche','owned','${daysAgo(2)}','talking','auto','A','cached',100),
+    (2,'other-type','owned','${daysAgo(1)}','dance','manual','A','cached',9000),
+    (3,'other-audio1','owned','${daysAgo(1)}','dance','auto','B','cached',99000),
+    (4,'other-audio2','owned','${daysAgo(1)}','dance','auto','B','cached',99900),
+    (5,'unsorted','owned','${daysAgo(1)}','talking','unsorted','A','cached',999999),
+    (6,'needs-look','owned','${daysAgo(1)}','talking','needs_look','A','cached',999999),
+    (7,'null-type','owned','${daysAgo(1)}',NULL,'auto','A','cached',999999),
+    (8,'unowned','other','${daysAgo(1)}','talking','auto','A','cached',999999)`);
+  const rows = await trendingAudio(db, { niches: ['talking'], modelId: 7, nowMs: NOW, examples: 5 });
+  assert.deepStrictEqual(rows.map(row => row.audio_id), ['A', 'B']);
+  assert.ok(rows[0].trend_score < rows[1].trend_score, 'niche rank precedes a stronger trend score');
+  assert.strictEqual(rows[0].reel_count, 2, 'only sorted owned reels contribute');
+  assert.deepStrictEqual(rows[0].exampleReels.map(row => row.id), [1, 2]);
+  const built = buildAudioReelsQuery('A', ['talking'], { modelId: 7 });
+  assert.deepStrictEqual(db.query(built.sql, built.params).rows.map(row => row.id), [1, 2]);
+});
+
+test('zero-creator model audio includes all sorted types with niche matches first', async () => {
+  const db = makeDb();
+  db.sqlite.exec(`INSERT INTO posts (id,account_handle,posted_at,content_type,sort_status,audio_id,video_cache_status,view_count) VALUES
+    (1,'one','${daysAgo(2)}','talking','auto','A','cached',100),
+    (2,'two','${daysAgo(1)}','dance','manual','A','cached',9999),
+    (3,'three','${daysAgo(1)}','talking','needs_look','A','cached',99999)`);
+  const rows = await trendingAudio(db, { niches: ['talking'], modelId: 7, nowMs: NOW, examples: 5 });
+  assert.strictEqual(rows[0].reel_count, 2);
+  assert.deepStrictEqual(rows[0].exampleReels.map(row => row.id), [1, 2]);
+  const built = buildAudioReelsQuery('A', ['talking'], { modelId: 7 });
+  assert.deepStrictEqual(db.query(built.sql, built.params).rows.map(row => row.id), [1, 2]);
+});
+
+test('model audio without niches still returns sorted reels', async () => {
+  const db = makeDb();
+  seedUnsortedAudio(db);
+  const rows = await trendingAudio(db, { modelId: 7, nowMs: NOW, examples: 5 });
+  assert.strictEqual(rows[0].reel_count, 2);
+  assert.deepStrictEqual(rows[0].exampleReels.map(row => row.id), [2, 1]);
+  const built = buildAudioReelsQuery('A', [], { modelId: 7 });
+  assert.deepStrictEqual(db.query(built.sql, built.params).rows.map(row => row.id), [2, 1]);
 });

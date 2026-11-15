@@ -135,6 +135,7 @@ export const addWorkspaceCreator = (id, username) => api.post(`/workspaces/${id}
 export const removeWorkspaceCreator = (id, username) => api.delete(`/workspaces/${id}/creators/${encodeURIComponent(username)}`);
 export const getWorkspaceReels = (id, page = 1) => api.get(`/workspaces/${id}/reels`, { params: { page } });
 export const getWorkspaceProposals = (id) => api.get(`/workspaces/${id}/proposals`);
+export const refreshWorkspaceProposals = (id) => api.post(`/workspaces/${id}/proposals/refresh`);
 export const confirmWorkspaceProposal = (id, username) => api.post(`/workspaces/${id}/proposals/${encodeURIComponent(username)}/confirm`);
 export const rejectWorkspaceProposal = (id, username) => api.post(`/workspaces/${id}/proposals/${encodeURIComponent(username)}/reject`);
 export const confirmAllWorkspaceProposals = (id) => api.post(`/workspaces/${id}/proposals/confirm-all`);

@@ -32,6 +32,10 @@ function visibilityOnlyClause() {
     + ` AND (posts.archived = 0 OR posts.archived IS NULL)`;
 }
 
+function sortedVisibilityClause() {
+  return `${effectiveNicheExpr()} IS NOT NULL AND ${visibilityOnlyClause()}`;
+}
+
 // The reel-playback guarantee. The model feed must only surface reels /video/:id
 // can DELIVER FROM DISK — i.e. a cached file. We deliberately do NOT trust the
 // raw IG video_url here: those signed URLs expire within hours, so a
@@ -41,13 +45,14 @@ function visibilityOnlyClause() {
 // of showing reels that only *might* play. No placeholder — a bare status check.
 const PLAYABLE_CLAUSE = `posts.video_cache_status = 'cached'`;
 
-function buildMeFeedQuery(niches, { page = 1, limit = 24, pageSize = limit, all = false, shuffle = false, modelId = null, lookTags = [], taste = {} } = {}) {
+function buildMeFeedQuery(niches, { page = 1, limit = 24, pageSize = limit, all = false, shuffle = false, modelId = null, lookTags = [], taste = {}, niche = null } = {}) {
   let clause, params;
   if (all) {
     clause = visibilityOnlyClause(); params = [];
+  } else if (niche) {
+    ({ clause, params } = nicheVisibilityClause([niche], 1));
   } else {
-    ({ clause, params } = nicheVisibilityClause(niches, 1));
-    if (!clause) return { sql: null, params: [] };
+    clause = sortedVisibilityClause(); params = [];
   }
 
   let modelClause = '';
@@ -78,6 +83,15 @@ function buildMeFeedQuery(niches, { page = 1, limit = 24, pageSize = limit, all 
       )`;
   }
 
+  let nicheOrder = '';
+  const preferredNiches = [...new Set((Array.isArray(niches) ? niches : []).filter(Boolean))];
+  if (!all && !shuffle && preferredNiches.length) {
+    const ph = preferredNiches.map(value => {
+      params.push(value);
+      return `$${params.length}`;
+    }).join(', ');
+    nicheOrder = `CASE WHEN ${effectiveNicheExpr()} IN (${ph}) THEN 1 ELSE 0 END DESC, `;
+  }
   const lookTerms = shuffle ? [] : [...new Set(lookTags)].map(tag => {
     params.push(`%"${tag}"%`);
     return `CASE WHEN posts.ai_look_tags LIKE $${params.length} THEN 1 ELSE 0 END`;
@@ -94,8 +108,8 @@ function buildMeFeedQuery(niches, { page = 1, limit = 24, pageSize = limit, all 
     }
   }
   const rankTerms = [...lookTerms, ...tasteTerms];
-  const order = shuffle ? 'RANDOM()' : rankTerms.length
-    ? `(${rankTerms.join(' + ')}) DESC, posts.posted_at DESC` : 'posts.posted_at DESC';
+  const order = shuffle ? 'RANDOM()' : nicheOrder + (rankTerms.length
+    ? `(${rankTerms.join(' + ')}) DESC, posts.posted_at DESC` : 'posts.posted_at DESC');
   const offset = (Math.max(1, Number(page)) - 1) * pageSize;
   const limIdx = params.length + 1, offIdx = params.length + 2;
   const sql = `
@@ -107,4 +121,4 @@ function buildMeFeedQuery(niches, { page = 1, limit = 24, pageSize = limit, all 
     LIMIT $${limIdx} OFFSET $${offIdx}`;
   return { sql, params: [...params, limit, offset] };
 }
-module.exports = { buildMeFeedQuery, nicheVisibilityClause, parseNiches, allowedNicheOptions, visibilityOnlyClause, PLAYABLE_CLAUSE };
+module.exports = { buildMeFeedQuery, nicheVisibilityClause, parseNiches, allowedNicheOptions, visibilityOnlyClause, sortedVisibilityClause, PLAYABLE_CLAUSE };

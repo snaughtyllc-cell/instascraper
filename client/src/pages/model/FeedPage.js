@@ -363,7 +363,7 @@ export default function FeedPage({ active = true, resetSignal = 0 }) {
       ) : playbackPosts.length === 0 ? (
         <div className="flex h-full flex-col items-center justify-center bg-model-canvas px-6 text-center">
           <p className="text-model-ink text-base font-bold">No reels ready yet</p>
-          <p className="text-model-muted text-sm mt-1.5">Fresh reels for this niche are still processing.</p>
+          <p className="text-model-muted text-sm mt-1.5">Fresh reels are still processing.</p>
         </div>
       ) : (
         <div

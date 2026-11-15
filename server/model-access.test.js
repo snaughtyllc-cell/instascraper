@@ -46,12 +46,28 @@ test('assigned reel stays reachable and other model saves do not grant access', 
   assert.strictEqual(await modelCanAccessPost(pool, 7, 1), true);
 });
 
-test('sorted reels match the model niches and requirePlayable gates saved reels', async () => {
+test('sorted reels outside the model niches are accessible and requirePlayable gates saved reels', async () => {
   const pool = makePool();
-  pool.sqlite.exec("UPDATE posts SET sort_status = 'auto', content_type = 'dance'");
+  pool.sqlite.exec("UPDATE posts SET sort_status = 'auto', content_type = 'skit'");
   assert.strictEqual(await modelCanAccessPost(pool, 7, 1), true);
   pool.sqlite.exec("UPDATE posts SET video_cache_status = 'pending'; INSERT INTO model_saved_posts VALUES (7, 1)");
   assert.strictEqual(await modelCanAccessPost(pool, 7, 1, { requirePlayable: true }), false);
+});
+
+test('owned sorted non-niche reels are accessible while needs_look and null types are hidden', async () => {
+  const pool = makePool();
+  pool.sqlite.exec("INSERT INTO model_creators VALUES (7,'creator'); UPDATE posts SET sort_status = 'manual', content_type = 'skit'");
+  assert.strictEqual(await modelCanAccessPost(pool, 7, 1), true);
+  pool.sqlite.exec("UPDATE posts SET sort_status = 'needs_look'");
+  assert.strictEqual(await modelCanAccessPost(pool, 7, 1), false);
+  pool.sqlite.exec("UPDATE posts SET sort_status = 'auto', content_type = NULL");
+  assert.strictEqual(await modelCanAccessPost(pool, 7, 1), false);
+});
+
+test('a model with no niches can access sorted reels in her creator scope', async () => {
+  const pool = makePool();
+  pool.sqlite.exec("UPDATE models SET primary_niche = NULL, secondary_niches = NULL; UPDATE posts SET sort_status = 'auto'");
+  assert.strictEqual(await modelCanAccessPost(pool, 7, 1), true);
 });
 
 test('assigned reel from a non-owned creator still accessible', async () => {

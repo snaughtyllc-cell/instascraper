@@ -36,6 +36,53 @@ test('rejected and owned pairs are not re-proposed', async t => {
   assert.deepEqual(pool.sqlite.prepare('SELECT status, share FROM model_creator_proposals').get(), { status: 'rejected', share: 0.9 });
 });
 
+test('look match of at least 0.5 proposes below-threshold creators using current vocabulary', async t => {
+  const pool = await makeWorkspaceDb(t);
+  pool.sqlite.exec(`UPDATE models SET look_tags = '[" BRUNETTE ","emo","deleted"]' WHERE id = 1;
+    INSERT INTO tracked_accounts (username) VALUES ('half'), ('low'), ('manual'), ('unsorted'), ('deleted'), ('untyped'), ('rejected'), ('owned');
+    INSERT INTO posts (id, account_handle, content_type, sort_status, ai_look_tags) VALUES
+      (1, 'half', 'dance', 'auto', '["brunette"]'),
+      (2, 'low', 'dance', 'auto', '["brunette"]'), (3, 'low', 'dance', 'manual', '[]'),
+      (4, 'manual', 'dance', 'manual', '[]'),
+      (5, 'unsorted', 'dance', 'auto', '[]'), (6, 'unsorted', 'dance', 'unsorted', '["brunette","emo"]'),
+      (7, 'deleted', 'dance', 'auto', '["deleted"]'), (8, 'untyped', NULL, 'auto', '["brunette","emo"]'),
+      (9, 'rejected', 'dance', 'auto', '["brunette","emo"]'), (10, 'owned', 'dance', 'auto', '["brunette","emo"]');
+    INSERT INTO creator_look_tags (username, tag) VALUES ('manual', 'emo');
+    INSERT INTO model_creator_proposals (model_id, username, share, status) VALUES (1, 'rejected', 0, 'rejected');
+    INSERT INTO model_creators (model_id, username) VALUES (1, 'owned')`);
+  assert.deepEqual(await computeProposals(pool, { modelId: 1 }), { proposed: 2 });
+  assert.deepEqual(pool.sqlite.prepare("SELECT username, share FROM model_creator_proposals WHERE status = 'pending' ORDER BY username").all(),
+    [{ username: 'half', share: 0 }, { username: 'manual', share: 0 }]);
+  assert.equal(pool.sqlite.prepare("SELECT status FROM model_creator_proposals WHERE username = 'rejected'").get().status, 'rejected');
+});
+
+test('models without current look tags still require the niche threshold', async t => {
+  const pool = await makeWorkspaceDb(t);
+  pool.sqlite.exec(`UPDATE models SET look_tags = '["deleted"]' WHERE id = 1;
+    INSERT INTO tracked_accounts (username) VALUES ('other');
+    INSERT INTO posts (id, account_handle, content_type, sort_status, ai_look_tags)
+      VALUES (1, 'other', 'dance', 'auto', '["brunette","deleted"]')`);
+  assert.deepEqual(await computeProposals(pool, { modelId: 1 }), { proposed: 0 });
+  assert.equal(pool.sqlite.prepare('SELECT COUNT(*) AS n FROM model_creator_proposals').get().n, 0);
+});
+
+test('refresh endpoint recomputes only its model and returns newly proposed count', async t => {
+  const pool = await makeWorkspaceDb(t);
+  pool.sqlite.exec(`INSERT INTO tracked_accounts (username) VALUES ('talker'), ('dancer');
+    INSERT INTO posts (id, account_handle, content_type, sort_status) VALUES
+      (1, 'talker', 'talking', 'auto'), (2, 'dancer', 'dance', 'manual')`);
+  const app = express();
+  app.use(express.json());
+  registerWorkspaceRoutes(app, { pool });
+  const response = await appRequest(app, { method: 'POST', path: '/workspaces/1/proposals/refresh' });
+  assert.equal(response.status, 200);
+  assert.deepEqual(response.body, { proposed: 1 });
+  assert.deepEqual(pool.sqlite.prepare('SELECT model_id, username FROM model_creator_proposals').all(),
+    [{ model_id: 1, username: 'talker' }]);
+  assert.deepEqual((await appRequest(app, { method: 'POST', path: '/workspaces/1/proposals/refresh' })).body, { proposed: 0 });
+  assert.equal((await appRequest(app, { method: 'POST', path: '/workspaces/999/proposals/refresh' })).status, 404);
+});
+
 test('a creator added during proposal computation is not proposed', async t => {
   const pool = await makeWorkspaceDb(t);
   seed(pool);
