@@ -10,14 +10,22 @@ const { isValidShortcode, referenceFile, usableFile } = require('./react-referen
 const DAY = 24 * 60 * 60 * 1000;
 const RETRY_AFTER = 6 * 60 * 60 * 1000;
 const TRANSIENT_RETRY_AFTER = 10 * 60 * 1000;
-const TRANSIENT_FAILURE_CODES = new Set(['apify_failed', 'apify_busy', 'apify_network', 'fetch_timeout', 'worker_restarted']);
+const TRANSIENT_FAILURE_CODES = new Set(['apify_no_key', 'apify_failed', 'apify_busy', 'apify_network', 'fetch_timeout', 'worker_restarted']);
 const TERMINAL = new Set(['SUCCEEDED', 'FAILED', 'ABORTED', 'TIMED-OUT']);
-const FAILURE_CODES = new Set(['fetch_timeout', 'apify_failed', 'apify_busy', 'apify_network', 'apify_error_stub', 'no_video',
+const FAILURE_CODES = new Set(['fetch_timeout', 'apify_no_key', 'apify_failed', 'apify_busy', 'apify_network', 'apify_error_stub', 'no_video',
   'download_failed', 'download_too_large', 'invalid_video_type', 'invalid_video_url', 'invalid_video']);
 const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
 const failure = code => Object.assign(new Error(code), { code });
 const unavailable = () => ({ state: 'unavailable', launched: false });
 const positive = (value, fallback) => Number.isFinite(Number(value)) && Number(value) > 0 ? Number(value) : fallback;
+const apifyToken = env => env.REACT_APIFY_API_KEY || env.APIFY_API_KEY;
+let warnedNoApifyKey = false;
+
+function warnNoApifyKey() {
+  if (warnedNoApifyKey) return;
+  warnedNoApifyKey = true;
+  console.error('[React fetch] no Apify key configured (set REACT_APIFY_API_KEY)');
+}
 
 function allowedVideoUrl(value) {
   try {
@@ -77,10 +85,11 @@ function createApifyClient(env = process.env, fetchImpl = fetch, sleep = delay, 
   }
 
   async function request(route, resource, signal, options = {}, params = {}) {
-    if (!env.APIFY_API_KEY) throw failure('apify_failed');
+    const token = apifyToken(env);
+    if (!token) { warnNoApifyKey(); throw failure('apify_no_key'); }
     if (!deadlines.has(signal)) deadlines.set(signal, Date.now() + timeoutMs);
     const url = new URL(`https://api.apify.com/v2/${resource}`);
-    url.search = new URLSearchParams({ token: env.APIFY_API_KEY, ...params }).toString();
+    url.search = new URLSearchParams({ token, ...params }).toString();
     for (let attempt = 0; ; attempt++) {
       if (signal.aborted) throw failure('fetch_timeout');
       let response;
@@ -99,7 +108,8 @@ function createApifyClient(env = process.env, fetchImpl = fetch, sleep = delay, 
       catch { /* Error bodies are untrusted and may not be JSON. */ }
       finally { response.body?.destroy?.(); }
       const errorType = typeof body?.error?.type === 'string' ? body.error.type : '';
-      const safeType = /^[a-z0-9-]{1,64}$/.test(errorType) && !errorType.includes(env.APIFY_API_KEY)
+      const safeType = /^[a-z0-9-]{1,64}$/.test(errorType) && !errorType.includes(token)
+        && !(env.APIFY_API_KEY && errorType.includes(env.APIFY_API_KEY))
         ? errorType : 'unknown';
       console.error(`[React fetch] apify_http route=${route} status=${response.status} type=${safeType}`);
       if (signal.aborted) throw failure('fetch_timeout');
@@ -134,6 +144,7 @@ function createReactFetchWorker({ pool, env = process.env, now = Date.now, apify
   const configuredCap = Number(env.REACT_FETCH_DAILY_MAX ?? 100);
   const dailyMax = Number.isSafeInteger(configuredCap) && configuredCap >= 0 ? configuredCap : 100;
   const client = apify || createApifyClient(env, fetchImpl, sleep, timeoutMs);
+  if (!apify && !apifyToken(env)) warnNoApifyKey();
   const claims = new Map(), queue = [], idleWaiters = [];
   let active = 0, initialization, heartbeat;
 
@@ -319,7 +330,8 @@ function createReactFetchWorker({ pool, env = process.env, now = Date.now, apify
       });
     } catch (caught) {
       error = FAILURE_CODES.has(caught?.code || caught?.message) ? (caught.code || caught.message) : 'fetch_failed';
-      console.error(`[React fetch] failed code=${error}`);
+      if (error === 'apify_no_key') warnNoApifyKey();
+      else console.error(`[React fetch] failed code=${error}`);
       const failed = await pool.query("UPDATE film_react_refs SET state='failed', error=$1, updated_at=$2 WHERE shortcode=$3 AND state='fetching' AND attempts=$4",
         [error, new Date(now()).toISOString(), entry.shortcode, entry.attempt]);
       if (failed.rowCount && entry.publishedPath) fs.rmSync(entry.publishedPath, { force: true });
@@ -391,6 +403,15 @@ function createReactFetchWorker({ pool, env = process.env, now = Date.now, apify
       if (row?.state === 'fetching') return { state: 'fetching', launched: false };
       if (row?.state === 'failed' && Date.parse(row.updated_at) > now()
         - (TRANSIENT_FAILURE_CODES.has(row.error) ? TRANSIENT_RETRY_AFTER : RETRY_AFTER)) return unavailable();
+      if (!apify && !apifyToken(env)) {
+        warnNoApifyKey();
+        const stamp = new Date(now()).toISOString();
+        await db.query(`INSERT INTO film_react_refs (shortcode,state,error,attempts,created_at,updated_at)
+          VALUES ($1,'failed','apify_no_key',0,$2,$3)
+          ON CONFLICT (shortcode) DO UPDATE SET state='failed',error='apify_no_key',duration_sec=NULL,updated_at=excluded.updated_at
+          WHERE film_react_refs.state <> 'fetching'`, [shortcode, stamp, stamp]);
+        return unavailable();
+      }
       const budget = await budgetStatus(db, now());
       if (budget.over || budget.blocked) { console.log('[Metric] react_fetch blocked=budget'); return unavailable(); }
       const count = await db.query('SELECT COUNT(*) AS total FROM film_react_ref_attempts WHERE started_at >= $1 OR started_at IS NULL',

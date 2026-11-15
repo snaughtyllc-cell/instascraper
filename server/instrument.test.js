@@ -8,6 +8,7 @@ const uploadUrl = 'https://www.googleapis.com/upload/drive/v3/files?uploadType=r
 const rawUrl = 'https://hq.example.test/raw/SENTINEL_RAW_SECRET.mp4?signature=SENTINEL_RAW_SIGNATURE';
 const key = 'SENTINEL_SERVICE_KEY';
 const apifyKey = 'SENTINEL_APIFY_KEY';
+const reactApifyKey = 'SENTINEL_REACT_APIFY_KEY';
 const reactMediaUrl = 'https://scraper.example/film/v1/react-media/AbCdE123?exp=1234567890&sig=SENTINEL_MEDIA_SIGNATURE';
 const apifyDatasetUrl = 'https://api.apify.com/v2/datasets/SENTINEL_DATASET/items?token=SENTINEL_APIFY_KEY';
 const instagramVideoUrl = 'https://scontent.cdninstagram.com/video.mp4?sig=SENTINEL_CDN_SIGNATURE';
@@ -79,6 +80,24 @@ test('sensitive breadcrumbs and structured logs cannot carry URLs or credentials
   const unrelated = { category: 'http', data: { url: 'https://example.test/feed?limit=5', status_code: 200 } };
   assert.equal(options.beforeBreadcrumb(unrelated), unrelated);
   assert.equal(options.beforeSendLog(unrelated), unrelated);
+});
+
+test('React-only and shared Apify keys are scrubbed from all Sentry hooks', () => {
+  for (const env of [
+    { APIFY_API_KEY: '', REACT_APIFY_API_KEY: reactApifyKey },
+    { APIFY_API_KEY: apifyKey, REACT_APIFY_API_KEY: reactApifyKey },
+  ]) {
+    const options = instrument(env);
+    for (const secret of [env.REACT_APIFY_API_KEY, env.APIFY_API_KEY].filter(Boolean)) {
+      assert.equal(options.beforeSend({ extra: { nested: { token: secret } } }), null);
+      assert.equal(options.beforeBreadcrumb({ category: 'console', message: `Apify token ${secret}` }), null);
+      assert.equal(options.beforeSendLog({ attributes: { nested: { token: secret } } }), null);
+    }
+    const unrelated = { message: 'Apify request failed without exposing credentials' };
+    assert.equal(options.beforeSend(unrelated), unrelated);
+    assert.equal(options.beforeBreadcrumb(unrelated), unrelated);
+    assert.equal(options.beforeSendLog(unrelated), unrelated);
+  }
 });
 
 test('incoming render events omit body, query, metadata and all headers while preserving the error', () => {
