@@ -108,6 +108,9 @@ function buildMeFeedQuery(niches, { page = 1, limit = 24, pageSize = limit, all 
     }
   }
   const rankTerms = [...lookTerms, ...tasteTerms];
+  const configuredPerfWeight = Number(process.env.FEED_PERF_WEIGHT ?? 1);
+  const perfWeight = Number.isFinite(configuredPerfWeight) && configuredPerfWeight >= 0 ? configuredPerfWeight : 1;
+  if (!shuffle && perfWeight > 0) rankTerms.push(`COALESCE(posts.perf_score, 0) * ${perfWeight}`);
   const order = shuffle ? 'RANDOM()' : nicheOrder + (rankTerms.length
     ? `(${rankTerms.join(' + ')}) DESC, posts.posted_at DESC` : 'posts.posted_at DESC');
   const offset = (Math.max(1, Number(page)) - 1) * pageSize;

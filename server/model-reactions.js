@@ -34,4 +34,11 @@ async function applyModelReaction(db, { modelId, postId, reaction, nowIso = new 
   return result;
 }
 
-module.exports = { applyModelReaction, upsertFeedback };
+async function undoModelRejection(db, { modelId, postId }) {
+  await db.transaction(tx => tx.query(
+    "DELETE FROM model_post_feedback WHERE model_id = $1 AND post_id = $2 AND feedback = 'not_my_style'",
+    [modelId, postId]));
+  await refreshTaste(db, modelId);
+}
+
+module.exports = { applyModelReaction, upsertFeedback, undoModelRejection };

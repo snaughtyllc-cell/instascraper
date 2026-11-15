@@ -2,6 +2,7 @@ const fetch = require('node-fetch');
 const pool = require('./db');
 const { sweepThumbnails, downloadThumbnail } = require('./thumbnails');
 const { calcViewER } = require('./engagement-metrics');
+const { refreshPerfScores } = require('./perf-score');
 
 const APIFY_BASE = 'https://api.apify.com/v2';
 const REEL_ACTOR_ID = 'apify~instagram-reel-scraper';
@@ -622,6 +623,7 @@ class InstagramScraper {
     let count = 0;
     let matched = 0;
     let accountHandle = '';
+    const savedHandles = new Set();
     // [R3-2, R3-3] One ISO-Z timestamp per scrape, bound as a param — not a SQL
     // NOW()/CURRENT_TIMESTAMP default, which renders differently per backend and
     // would break sweepVideos' ISO-Z freshness comparison against this column.
@@ -700,6 +702,7 @@ class InstagramScraper {
             audio_title = EXCLUDED.audio_title,
             audio_author = EXCLUDED.audio_author,
             is_original_audio = EXCLUDED.is_original_audio
+          RETURNING account_handle
         `, [
           post.shortcode, post.videoUrl, post.thumbnailUrl, post.caption,
           post.likeCount, post.commentCount, post.viewCount, post.postedAt,
@@ -708,10 +711,19 @@ class InstagramScraper {
           'pending', nowIso,
           post.audioId, post.audioTitle, post.audioAuthor, post.isOriginalAudio,
         ]);
-        if (insertResult.rowCount > 0) count++; // counts both new inserts and refreshed rows
+        if (insertResult.rowCount > 0) {
+          count++; // counts both new inserts and refreshed rows
+          savedHandles.add(insertResult.rows[0].account_handle);
+        }
       } catch (e) {
         // skip on error
       }
+    }
+
+    try {
+      await refreshPerfScores(pool, [...savedHandles]);
+    } catch (err) {
+      console.error('[PerfScore] post-scrape refresh failed:', err.message);
     }
 
     // Update tracked account if it exists
@@ -1116,6 +1128,7 @@ class InstagramScraper {
     }
 
     let count = 0;
+    const savedHandles = new Set();
     // [R3-2, R3-3] One ISO-Z timestamp per import call, bound as a param — see the
     // matching note in _handleScrapeResults above.
     const nowIso = new Date().toISOString();
@@ -1146,6 +1159,7 @@ class InstagramScraper {
             video_cache_status, video_url_refreshed_at)
           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17)
           ON CONFLICT (shortcode) DO NOTHING
+          RETURNING account_handle
         `, [
           shortcode,
           item.videoUrl || null,
@@ -1158,8 +1172,17 @@ class InstagramScraper {
           itemFollowers, er_percent, er_label, taggedJson,
           'pending', nowIso,
         ]);
-        if (insertResult.rowCount > 0) count++;
+        if (insertResult.rowCount > 0) {
+          count++;
+          savedHandles.add(insertResult.rows[0].account_handle);
+        }
       } catch (e) { /* skip duplicates */ }
+    }
+
+    try {
+      await refreshPerfScores(pool, [...savedHandles]);
+    } catch (err) {
+      console.error('[PerfScore] post-import refresh failed:', err.message);
     }
 
     // Fire-and-forget: same drain as the main scrape path, so URL-imported videos

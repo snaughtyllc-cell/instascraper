@@ -9,7 +9,7 @@ function makePostsDb() {
   const sqlite = new Database(':memory:');
   sqlite.exec(`CREATE TABLE posts (
     id INTEGER PRIMARY KEY, content_type TEXT, account_handle TEXT, posted_at TEXT,
-    sort_status TEXT DEFAULT 'auto', ai_look_tags TEXT,
+    sort_status TEXT DEFAULT 'auto', ai_look_tags TEXT, perf_score REAL,
     soft_deleted INTEGER DEFAULT 0, archived INTEGER DEFAULT 0,
     video_url TEXT, video_url_refreshed_at TEXT, video_cache_status TEXT)`);
   sqlite.exec(`CREATE TABLE creator_types (account_handle TEXT, content_type TEXT)`);
@@ -90,6 +90,7 @@ test('buildMeFeedQuery shuffle mode orders by random for feed refresh', () => {
   const { sql, params } = buildMeFeedQuery(['talking'], { page: 1, limit: 24, shuffle: true });
   assert.match(sql, /ORDER BY RANDOM\(\)/);
   assert.doesNotMatch(sql, /ORDER BY posts\.posted_at DESC/);
+  assert.doesNotMatch(sql, /perf_score/);
   assert.deepStrictEqual(params, [24, 0]);
 });
 
@@ -222,9 +223,9 @@ test('niche rank precedes look match, learned taste, and recency', () => {
   sqlite.close();
 });
 
-test('no model tags → order unchanged', () => {
+test('no model tags still ranks by performance', () => {
   assert.deepStrictEqual(buildMeFeedQuery(['talking'], { lookTags: [] }), buildMeFeedQuery(['talking']));
-  assert.match(buildMeFeedQuery(['talking'], { lookTags: [] }).sql, /THEN 1 ELSE 0 END DESC, posts\.posted_at DESC/);
+  assert.match(buildMeFeedQuery(['talking'], { lookTags: [] }).sql, /THEN 1 ELSE 0 END DESC, \(COALESCE\(posts\.perf_score, 0\) \* 1\) DESC, posts\.posted_at DESC/);
 });
 
 test('shuffle ignores look tags', () => {
@@ -265,7 +266,7 @@ test('disliked reels sink but remain in results; only exact rejected reel stays 
   sqlite.close();
 });
 
-test("empty taste and no look tags → today's order", () => {
+test('empty taste and no look tags retains the default rank', () => {
   assert.deepStrictEqual(buildMeFeedQuery(['talking'], { lookTags: [], taste: { types: [], tags: [], creators: [] } }), buildMeFeedQuery(['talking']));
 });
 
@@ -273,3 +274,92 @@ test('shuffle ignores taste', () => {
   assert.deepStrictEqual(buildMeFeedQuery(['talking'], { shuffle: true, taste: { tags: [['alt', 0.5]] } }),
     buildMeFeedQuery(['talking'], { shuffle: true }));
 });
+
+function withPerfWeight(value, run) {
+  const previous = process.env.FEED_PERF_WEIGHT;
+  if (value === undefined) delete process.env.FEED_PERF_WEIGHT;
+  else process.env.FEED_PERF_WEIGHT = value;
+  try {
+    run();
+  } finally {
+    if (previous === undefined) delete process.env.FEED_PERF_WEIGHT;
+    else process.env.FEED_PERF_WEIGHT = previous;
+  }
+}
+
+test('performance beats recency within a niche with equal look and taste', () => {
+  const sqlite = makePostsDb();
+  sqlite.exec(`INSERT INTO posts (id,account_handle,content_type,posted_at,video_cache_status,ai_look_tags,perf_score) VALUES
+    (1,'liked','talking','2026-07-01','cached','["alt"]',2),
+    (2,'liked','talking','2026-07-02','cached','["alt"]',-1)`);
+  withPerfWeight(undefined, () => {
+    assert.deepStrictEqual(rankedReels(sqlite, { lookTags: ['alt'], taste: { creators: [['liked', 0.5]] } }), [1, 2]);
+    assert.deepStrictEqual(rankedReels(sqlite, {}), [1, 2], 'performance applies on its own');
+  });
+  sqlite.close();
+});
+
+test('zero performance weight restores newest-first without look or taste', () => {
+  const sqlite = makePostsDb();
+  sqlite.exec(`INSERT INTO posts (id,content_type,posted_at,video_cache_status,perf_score) VALUES
+    (1,'talking','2026-07-01','cached',2),(2,'talking','2026-07-02','cached',-1)`);
+  withPerfWeight('0', () => {
+    assert.doesNotMatch(buildMeFeedQuery(['talking']).sql, /perf_score/);
+    assert.deepStrictEqual(rankedReels(sqlite, {}), [2, 1]);
+  });
+  sqlite.close();
+});
+
+test('niche preference beats performance, look, taste, and recency', () => {
+  const sqlite = makePostsDb();
+  sqlite.exec(`INSERT INTO posts (id,account_handle,content_type,posted_at,video_cache_status,ai_look_tags,perf_score) VALUES
+    (1,'neutral','talking','2026-07-01','cached','[]',-2),
+    (2,'liked','dance','2026-07-02','cached','["alt"]',2)`);
+  withPerfWeight('100', () => {
+    assert.deepStrictEqual(rankedReels(sqlite, { lookTags: ['alt'], taste: { creators: [['liked', 1]] } }), [1, 2]);
+  });
+  sqlite.close();
+});
+
+test('all mode ranks by performance without adding niche priority or filtering missing scores', () => {
+  const sqlite = makePostsDb();
+  sqlite.exec(`INSERT INTO posts (id,content_type,sort_status,posted_at,video_cache_status,perf_score) VALUES
+    (1,'talking','auto','2026-07-03','cached',-2),
+    (2,'dance','auto','2026-07-01','cached',2),
+    (3,NULL,'unsorted','2026-07-02','cached',NULL)`);
+  withPerfWeight(undefined, () => {
+    assert.deepStrictEqual(rankedReels(sqlite, { all: true }), [2, 3, 1]);
+    assert.doesNotMatch(buildMeFeedQuery(['talking'], { all: true, shuffle: true }).sql, /perf_score/);
+  });
+  sqlite.close();
+});
+
+test('performance is summed with look and taste and preserves ascending scoped placeholders', () => {
+  const sqlite = makePostsDb();
+  sqlite.exec(`INSERT INTO model_creators VALUES (7,'liked');
+    INSERT INTO posts (id,account_handle,content_type,posted_at,video_cache_status,ai_look_tags,perf_score) VALUES
+    (1,'liked','talking','2026-07-01','cached','[]',1.5),
+    (2,'liked','talking','2026-07-02','cached','["alt"]',0),
+    (3,'other','talking','2026-07-03','cached','["alt"]',2),
+    (4,'liked','dance','2026-07-04','cached','["alt"]',2)`);
+  const options = { modelId: 7, niche: 'talking', lookTags: ['alt'],
+    taste: { types: [['talking', -0.25]], tags: [['alt', 0.5]], creators: [['liked', 0.25]] } };
+  withPerfWeight('0.5', () => {
+    assert.match(buildMeFeedQuery(['talking'], options).sql, /COALESCE\(posts\.perf_score, 0\) \* 0\.5/);
+    assert.deepStrictEqual(rankedReels(sqlite, options), [2, 1], 'look and taste together outweigh weighted performance');
+  });
+  withPerfWeight('2', () => {
+    assert.deepStrictEqual(rankedReels(sqlite, options), [1, 2], 'weight scales performance within the summed rank');
+  });
+  sqlite.close();
+});
+
+for (const weight of ['invalid', 'NaN', 'Infinity', '-Infinity', '-1', '1; SELECT 1']) {
+  test(`invalid performance weight ${JSON.stringify(weight)} falls back to one`, () => {
+    withPerfWeight(weight, () => {
+      const query = buildMeFeedQuery(['talking']);
+      assert.match(query.sql, /COALESCE\(posts\.perf_score, 0\) \* 1\) DESC/);
+      withPerfWeight(undefined, () => assert.deepStrictEqual(query, buildMeFeedQuery(['talking'])));
+    });
+  });
+}

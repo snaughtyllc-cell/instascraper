@@ -1,7 +1,7 @@
 const { test } = require('node:test');
 const assert = require('node:assert');
 const Database = require('better-sqlite3');
-const { applyModelReaction } = require('./model-reactions');
+const { applyModelReaction, undoModelRejection } = require('./model-reactions');
 
 function makeDb() {
   const sqlite = new Database(':memory:');
@@ -17,6 +17,8 @@ function makeDb() {
   `);
   const db = {
     query(sql, params = []) {
+      const placeholders = [...sql.matchAll(/\$(\d+)/g)].map(match => Number(match[1]));
+      assert.deepStrictEqual(placeholders, params.map((_, index) => index + 1), 'SQLite parameter order');
       const converted = sql.replace(/\$\d+/g, '?');
       const statement = sqlite.prepare(converted);
       if (/^\s*SELECT/i.test(converted)) {
@@ -62,4 +64,28 @@ test('not interested atomically removes a save and records the skip', async () =
   assert.strictEqual(db.sqlite.prepare('SELECT 1 FROM model_saved_posts WHERE model_id=4 AND post_id=9').get(), undefined);
   assert.strictEqual(db.sqlite.prepare('SELECT feedback FROM model_post_feedback WHERE model_id=4 AND post_id=9').get().feedback, 'not_my_style');
   assert.strictEqual(db.sqlite.prepare("SELECT affinity FROM model_taste WHERE model_id=4 AND feature='creator:other'").get().affinity, -1 / 3);
+});
+
+test('undoing rejection clears only that model negative signal and refreshes taste', async t => {
+  const db = makeDb();
+  t.after(() => db.sqlite.close());
+  await applyModelReaction(db, { modelId: 1, postId: 2, reaction: 'not_interested' });
+  await applyModelReaction(db, { modelId: 2, postId: 2, reaction: 'not_interested' });
+  await undoModelRejection(db, { modelId: 1, postId: 2 });
+  assert.strictEqual(db.sqlite.prepare('SELECT 1 FROM model_post_feedback WHERE model_id=1 AND post_id=2').get(), undefined);
+  assert.strictEqual(db.sqlite.prepare('SELECT COUNT(*) AS n FROM model_taste WHERE model_id=1').get().n, 0);
+  assert.strictEqual(db.sqlite.prepare('SELECT feedback FROM model_post_feedback WHERE model_id=2 AND post_id=2').get().feedback, 'not_my_style');
+  assert.strictEqual(db.sqlite.prepare("SELECT affinity FROM model_taste WHERE model_id=2 AND feature='creator:mia'").get().affinity, -1 / 3);
+  await undoModelRejection(db, { modelId: 1, postId: 2 });
+});
+
+test('undoing an old rejection preserves a newer save and want-to-make feedback', async t => {
+  const db = makeDb();
+  t.after(() => db.sqlite.close());
+  await applyModelReaction(db, { modelId: 1, postId: 2, reaction: 'not_interested' });
+  await applyModelReaction(db, { modelId: 1, postId: 2, reaction: 'save' });
+  await undoModelRejection(db, { modelId: 1, postId: 2 });
+  assert.ok(db.sqlite.prepare('SELECT 1 FROM model_saved_posts WHERE model_id=1 AND post_id=2').get());
+  assert.strictEqual(db.sqlite.prepare('SELECT feedback FROM model_post_feedback WHERE model_id=1 AND post_id=2').get().feedback, 'want_to_make');
+  assert.strictEqual(db.sqlite.prepare("SELECT affinity FROM model_taste WHERE model_id=1 AND feature='creator:mia'").get().affinity, 1 / 3);
 });
