@@ -2,7 +2,7 @@ const fs = require('node:fs/promises');
 const path = require('node:path');
 const { parseNiches } = require('./me-feed');
 const { sortConfig, decideSort } = require('./sort-status');
-const { describeReel, estimateCostUsd, makeGeminiClient, cleanAiLookTags } = require('./gemini-sort');
+const { describeReel, estimateCostUsd, makeGeminiClient, cleanAiLookTags, cleanLayout } = require('./gemini-sort');
 const { downloadVideo, tempVideoPath, DEFAULT_VIDEO_DIR } = require('./videos');
 const { attemptsToday, withSortLock } = require('./sort-runner');
 
@@ -61,8 +61,8 @@ async function routeCandidate(username, {
           : ai.type;
         const cost = estimateCostUsd(ai.usage || {}, cfg);
         await pool.query(`UPDATE suggested_reels SET ai_type=$1, ai_confidence=$2, ai_error=NULL,
-          ai_classified_at=$3, ai_cost_usd=$4, ai_look_tags=$5 WHERE id=$6`,
-        [type, ai.confidence, new Date().toISOString(), cost, JSON.stringify(cleanAiLookTags(ai.lookTags, lookTags)), reel.id]);
+          ai_classified_at=$3, ai_cost_usd=$4, ai_look_tags=$5, ai_layout=$6 WHERE id=$7`,
+        [type, ai.confidence, new Date().toISOString(), cost, JSON.stringify(cleanAiLookTags(ai.lookTags, lookTags)), cleanLayout(ai.layout), reel.id]);
         result.sorted++;
         console.log(`[Route] @${handle} reel=${reel.id} estimated_usd=${cost.toFixed(6)}`);
       } catch (error) {

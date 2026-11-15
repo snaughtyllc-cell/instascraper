@@ -8,7 +8,7 @@ const { computeFit, routeCandidate } = require('./candidate-routing');
 const { sortConfig } = require('./sort-status');
 const { runAutoSort, sortUsage } = require('./sort-runner');
 const { videoFilePath } = require('./videos');
-const { ensureLookTables } = require('./workspace-migration');
+const { ensureLookTables, ensureWorkspaceTables } = require('./workspace-migration');
 
 const talking = { ai_type: 'talking', ai_confidence: 0.9, ai_classified_at: '2026-11-15T00:00:00Z', ai_error: null };
 const dance = { ...talking, ai_type: 'dance' };
@@ -45,6 +45,7 @@ async function setup(t, { source = 'Mia.Talks', count = 3 } = {}) {
     if (stmt.reader) { const rows = stmt.all(...params); return { rows, rowCount: rows.length }; }
     return { rows: [], rowCount: stmt.run(...params).changes };
   } };
+  await ensureWorkspaceTables(pool, { isPg: false });
   await ensureLookTables(pool, { isPg: false });
   const videoDir = await fs.mkdtemp(path.join(os.tmpdir(), 'candidate-routing-'));
   t.after(async () => { sqlite.close(); await fs.rm(videoDir, { recursive: true, force: true }); });
@@ -206,4 +207,15 @@ test('candidate reel stores ai_look_tags', async t => {
   };
   await routeCandidate('candidate', deps);
   assert.equal(deps.pool.sqlite.prepare('SELECT ai_look_tags FROM suggested_reels').get().ai_look_tags, '["brunette"]');
+});
+
+test('candidate descriptions persist sanitized layout without changing suggestion scoring', async t => {
+  const deps = await setup(t);
+  const layouts = ['split_screen', 'gameplay_overlay', 'invalid'];
+  const describe = deps.describe;
+  deps.describe = async input => ({ ...await describe(input), layout: layouts.shift() });
+  assert.deepEqual(await routeCandidate('candidate', deps), { sorted: 3, routed: [1] });
+  assert.deepEqual(deps.pool.sqlite.prepare('SELECT ai_layout FROM suggested_reels ORDER BY id').all(), [
+    { ai_layout: 'split_screen' }, { ai_layout: 'gameplay_overlay' }, { ai_layout: null },
+  ]);
 });

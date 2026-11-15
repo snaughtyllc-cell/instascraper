@@ -259,6 +259,59 @@ test('feed hard niche filtering, shuffle, and zero-creator fallback preserve sco
   assert.ok((await request('GET', `${filmPath}/feed`)).body.reels.some(row => row.id === 104));
 });
 
+test('model, workspace and Film feeds exempt React-mode types while saved reels remain available', async (t) => {
+  const previous = process.env.FEED_REQUIRE_EASY_FILM;
+  const previousExemptTypes = process.env.FEED_EASY_FILM_EXEMPT_TYPES;
+  delete process.env.FEED_REQUIRE_EASY_FILM;
+  delete process.env.FEED_EASY_FILM_EXEMPT_TYPES;
+  t.after(() => {
+    if (previous === undefined) delete process.env.FEED_REQUIRE_EASY_FILM;
+    else process.env.FEED_REQUIRE_EASY_FILM = previous;
+    if (previousExemptTypes === undefined) delete process.env.FEED_EASY_FILM_EXEMPT_TYPES;
+    else process.env.FEED_EASY_FILM_EXEMPT_TYPES = previousExemptTypes;
+  });
+  for (const [id, layout] of [[102, 'self_filmed'], [103, 'split_screen'], [105, 'gameplay_overlay'], [110, 'needs_footage']]) {
+    await pool.query('UPDATE posts SET ai_layout = $1 WHERE id = $2', [layout, id]);
+  }
+  for (const [id, overrides] of [
+    [111, {}], [112, { account_handle: 'outside' }], [113, { archived: 1 }],
+    [114, { video_cache_status: 'pending' }], [115, { soft_deleted: 1 }], [116, { sort_status: 'unsorted' }],
+  ]) {
+    await addPost(id, { content_type: 'omegle', ai_layout: 'split_screen', ...overrides });
+  }
+  const admin = await appRequest(app, { method: 'POST', path: '/login', body: { password: 'fake-film-admin-password' } });
+  const model = await appRequest(app, { method: 'POST', path: '/login', body: { email: 'film-model@example.test', password: 'fake-model-password' } });
+  assert.equal(admin.status, 200);
+  assert.equal(model.status, 200);
+  const adminHeaders = { Cookie: admin.headers['set-cookie'][0].split(';')[0] };
+  const modelHeaders = { Cookie: model.headers['set-cookie'][0].split(';')[0] };
+  const workspace = await appRequest(app, { path: '/workspaces/1/reels', headers: adminHeaders });
+  const me = await appRequest(app, { path: '/me/feed', headers: modelHeaders });
+  const film = await request('GET', `${filmPath}/feed`);
+  for (const response of [workspace, me, film]) assert.equal(response.status, 200);
+  for (const rows of [workspace.body, me.body.posts, film.body.reels]) {
+    assert.deepEqual(rows.map(row => row.id).sort(), [101, 102, 111], 'NULL, self_filmed and split-screen Omegle stay visible without bypassing other filters');
+  }
+  const talking = await request('GET', `${filmPath}/feed?niche=talking`);
+  assert.equal(talking.status, 200);
+  assert.deepEqual(talking.body.reels.map(row => row.id).sort(), [101, 102], 'exempt types still respect the selected niche');
+  for (const id of [103, 105, 110]) {
+    const saved = await request('POST', `${filmPath}/reels/${id}/save`, { saved: true });
+    assert.equal(saved.status, 200, 'layout does not restrict Film save availability');
+    assert.deepEqual(saved.body, { saved: true });
+  }
+  const filmSaves = await request('GET', `${filmPath}/saves`);
+  const meSaves = await appRequest(app, { path: '/me/saves', headers: modelHeaders });
+  assert.equal(filmSaves.status, 200);
+  assert.equal(meSaves.status, 200);
+  for (const rows of [filmSaves.body.reels, meSaves.body.posts]) {
+    assert.deepEqual(rows.map(row => row.id).sort(), [103, 105, 110], 'saved layouts needing footage remain visible');
+  }
+  for (const id of [103, 105, 110]) {
+    assert.equal((await request('POST', `${filmPath}/reels/${id}/skip`, {})).status, 200, 'layout does not restrict Film skip availability');
+  }
+});
+
 test('saves are newest first, paginated, model-specific and keep the saved scope exception', async () => {
   for (const [postId, savedAt] of [[101, '2026-11-10'], [105, '2026-11-12'], [104, '2026-11-11'], [106, '2026-11-15'], [109, '2026-11-09'], [107, '2026-11-16'], [108, '2026-11-16']]) {
     await pool.query('INSERT INTO model_saved_posts (model_id,post_id,saved_at) VALUES ($1,$2,$3)', [1, postId, savedAt]);

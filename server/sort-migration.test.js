@@ -34,6 +34,10 @@ test('first run adds columns, every existing reel unsorted', async () => {
   assert.deepStrictEqual(db.sqlite.prepare('SELECT ai_audio_kind FROM posts ORDER BY id').all(), [
     { ai_audio_kind: null }, { ai_audio_kind: null },
   ]);
+  assert.strictEqual(db.sqlite.prepare('PRAGMA table_info(posts)').all().find(column => column.name === 'ai_layout').type, 'TEXT');
+  assert.deepStrictEqual(db.sqlite.prepare('SELECT ai_layout FROM posts ORDER BY id').all(), [
+    { ai_layout: null }, { ai_layout: null },
+  ]);
   assert.deepStrictEqual(db.sqlite.prepare('SELECT ai_transcript FROM posts ORDER BY id').all(), [
     { ai_transcript: null }, { ai_transcript: null },
   ]);
@@ -56,4 +60,5 @@ test('PostgreSQL adds the performance column as nullable REAL', async () => {
     return { rows: [] };
   } }, { isPg: true });
   assert.ok(statements.includes('ALTER TABLE posts ADD COLUMN IF NOT EXISTS perf_score REAL'));
+  assert.ok(statements.includes('ALTER TABLE posts ADD COLUMN IF NOT EXISTS ai_layout TEXT'));
 });

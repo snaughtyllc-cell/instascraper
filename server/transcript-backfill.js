@@ -1,6 +1,6 @@
 const fs = require('node:fs/promises');
 const { sortConfig } = require('./sort-status');
-const { describeReel, estimateCostUsd, makeGeminiClient, cleanTranscript } = require('./gemini-sort');
+const { describeReel, estimateCostUsd, makeGeminiClient, cleanTranscript, cleanLayout } = require('./gemini-sort');
 const { attemptsToday, withSortLock } = require('./sort-runner');
 
 const eligible = `sort_status IN ('auto','manual') AND content_type='talking' AND video_cache_status='cached'
@@ -43,8 +43,8 @@ async function runTranscriptBackfill({ pool = require('./db'), describe, cfg = s
         });
         cost = ai.usage ? estimateCostUsd(ai.usage, cfg) : cost;
         await pool.query('UPDATE look_backfill_attempts SET cost_usd=$1 WHERE id=$2', [cost, attemptId]);
-        const update = await pool.query(`UPDATE posts SET ai_transcript=$1 WHERE id=$2 AND ${eligible}`,
-          [(ai.audioKind === 'own_speech' ? cleanTranscript(ai.transcript) : null) || '', post.id]);
+        const update = await pool.query(`UPDATE posts SET ai_transcript=$1, ai_layout=COALESCE($2,ai_layout) WHERE id=$3 AND ${eligible}`,
+          [(ai.audioKind === 'own_speech' ? cleanTranscript(ai.transcript) : null) || '', cleanLayout(ai.layout), post.id]);
         result.transcribed += update.rowCount;
       } catch (error) {
         // Empty text records a completed attempt, including no speech and errors.

@@ -16,7 +16,7 @@ async function makeWorkspaceDb(t) {
     CREATE TABLE suggested_reels (id INTEGER PRIMARY KEY, username TEXT, shortcode TEXT, thumbnail_url TEXT,
       video_url TEXT, view_count INTEGER, like_count INTEGER, comment_count INTEGER, permalink TEXT, rank INTEGER);
     CREATE TABLE posts (id INTEGER PRIMARY KEY, account_handle TEXT, content_type TEXT, sort_status TEXT DEFAULT 'unsorted',
-      soft_deleted INTEGER DEFAULT 0, archived INTEGER DEFAULT 0, video_cache_status TEXT, posted_at TEXT, perf_score REAL);
+      soft_deleted INTEGER DEFAULT 0, archived INTEGER DEFAULT 0, video_cache_status TEXT, posted_at TEXT, perf_score REAL, ai_layout TEXT);
     CREATE TABLE creator_types (account_handle TEXT, content_type TEXT);
     CREATE TABLE model_assigned_posts (model_id INTEGER, post_id INTEGER, status TEXT);
     CREATE TABLE model_saved_posts (model_id INTEGER, post_id INTEGER);

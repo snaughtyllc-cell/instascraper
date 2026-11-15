@@ -22,15 +22,28 @@ async function setup(t, count = 2) {
     describe: async () => ({ type: 'talking', confidence: 0.2, lookTags: ['brunette'], usage: { inTokens: 3400, outTokens: 100 } }) };
 }
 
-test('backfill writes only ai_look_tags', async t => {
+test('backfill writes look tags and the layout included in the video description', async t => {
   const deps = await setup(t, 1);
+  const describe = deps.describe;
+  deps.describe = async input => ({ ...await describe(input), layout: 'split_screen' });
   const before = deps.pool.sqlite.prepare('SELECT * FROM posts').get();
   assert.deepEqual(await runLookBackfill(deps), { tagged: 1, errored: 0, skippedCap: 0 });
-  assert.deepEqual(deps.pool.sqlite.prepare('SELECT * FROM posts').get(), { ...before, ai_look_tags: '["brunette"]' });
+  assert.deepEqual(deps.pool.sqlite.prepare('SELECT * FROM posts').get(), { ...before, ai_look_tags: '["brunette"]', ai_layout: 'split_screen' });
   const usage = await sortUsage(deps.pool, deps.cfg);
   assert.equal(usage.reels30d, 1);
   assert.equal(usage.today, 1);
   assert.ok(Math.abs(usage.usd30d - 0.00127) < 1e-10);
+});
+
+test('look backfill replaces stale layout only when the describe returns a valid layout', async t => {
+  const deps = await setup(t, 2);
+  deps.pool.sqlite.exec("UPDATE posts SET ai_layout='self_filmed'");
+  let calls = 0;
+  deps.describe = async () => ({ lookTags: ['brunette'], layout: ++calls === 1 ? 'needs_footage' : 'invalid' });
+  assert.equal((await runLookBackfill(deps)).tagged, 2);
+  assert.deepEqual(deps.pool.sqlite.prepare('SELECT ai_layout FROM posts ORDER BY id DESC').all(), [
+    { ai_layout: 'needs_footage' }, { ai_layout: 'self_filmed' },
+  ]);
 });
 
 test('respects daily cap', async t => {

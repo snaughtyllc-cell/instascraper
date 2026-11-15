@@ -3,6 +3,7 @@ import { saveNotes, archivePost, setPostContentType } from '../api';
 import API_URL from '../api-base';
 import { LookTagChips } from './LookTags';
 import Transcript from './Transcript';
+import LayoutBadge from './LayoutBadge';
 
 function formatCount(n) {
   if (!n) return '0';
@@ -282,6 +283,7 @@ export default function ContentCard({
           <span className="text-xs text-gray-500">{formatDate(post.posted_at)}</span>
         </div>
 
+        {isLibrary && <LayoutBadge layout={post.ai_layout} />}
         <LookTagChips tags={post.ai_look_tags} />
         <Transcript transcript={post.ai_transcript} />
 

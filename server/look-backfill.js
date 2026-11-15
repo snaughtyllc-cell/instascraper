@@ -1,6 +1,6 @@
 const fs = require('node:fs/promises');
 const { sortConfig } = require('./sort-status');
-const { describeReel, estimateCostUsd, makeGeminiClient, cleanAiLookTags } = require('./gemini-sort');
+const { describeReel, estimateCostUsd, makeGeminiClient, cleanAiLookTags, cleanLayout } = require('./gemini-sort');
 const { attemptsToday, withSortLock } = require('./sort-runner');
 
 const eligible = `sort_status IN ('auto','manual','needs_look') AND video_cache_status='cached'
@@ -43,8 +43,8 @@ async function runLookBackfill({ pool = require('./db'), describe, cfg = sortCon
         });
         cost = ai.usage ? estimateCostUsd(ai.usage, cfg) : cost;
         await pool.query('UPDATE look_backfill_attempts SET cost_usd=$1 WHERE id=$2', [cost, attemptId]);
-        const update = await pool.query(`UPDATE posts SET ai_look_tags=$1 WHERE id=$2 AND ${eligible}`,
-          [JSON.stringify(cleanAiLookTags(ai.lookTags, lookTags)), post.id]);
+        const update = await pool.query(`UPDATE posts SET ai_look_tags=$1, ai_layout=COALESCE($2,ai_layout) WHERE id=$3 AND ${eligible}`,
+          [JSON.stringify(cleanAiLookTags(ai.lookTags, lookTags)), cleanLayout(ai.layout), post.id]);
         result.tagged += update.rowCount;
       } catch (error) {
         await pool.query(`UPDATE posts SET ai_look_tags='[]' WHERE id=$1 AND ${eligible}`, [post.id]);
