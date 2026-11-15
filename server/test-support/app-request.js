@@ -64,10 +64,11 @@ function appRequest(app, { method = 'GET', path = '/', body, headers = {} } = {}
           else responseHeaders[name] = responseHeaders[name] ? `${responseHeaders[name]}, ${value}` : value;
         }
         const rawBody = wire.subarray(headerEnd + 4);
-        const text = (/\bchunked\b/i.test(responseHeaders['transfer-encoding'] || '') ? decodeChunks(rawBody) : rawBody).toString('utf8');
+        const buffer = /\bchunked\b/i.test(responseHeaders['transfer-encoding'] || '') ? decodeChunks(rawBody) : rawBody;
+        const text = buffer.toString('utf8');
         let parsed = text;
         try { parsed = JSON.parse(text); } catch {}
-        resolve({ status: res.statusCode, headers: responseHeaders, text, body: parsed });
+        resolve({ status: res.statusCode, headers: responseHeaders, text, body: parsed, buffer });
       } catch (error) { reject(error); }
       finally { socket.destroy(); }
     });

@@ -498,7 +498,7 @@ test('react-reference signs and pins cached media and survives pruning cache and
   process.env.PUBLIC_BASE_URL = 'https://media.example.test/';
   const response = await request('POST', '/film/v1/react-reference', { shortcode: 'film-101' });
   assert.equal(response.status, 200);
-  assert.deepEqual(Object.keys(response.body).sort(), ['analysis', 'durationSec', 'videoUrl']);
+  assert.deepEqual(Object.keys(response.body).sort(), ['analysis', 'durationSec', 'originalVideoUrl', 'videoUrl']);
   assert.equal(response.body.analysis, null);
   assert.equal(response.body.durationSec, null, 'unprobeable file has no invented duration');
   const url = new URL(response.body.videoUrl);
@@ -507,10 +507,18 @@ test('react-reference signs and pins cached media and survives pruning cache and
   const exp = url.searchParams.get('exp');
   assert.equal(url.searchParams.get('sig'), crypto.createHmac('sha256', process.env.FILM_MEDIA_SECRET)
     .update(`react-media.film-101.${exp}`).digest('hex'));
+  const originalUrl = new URL(response.body.originalVideoUrl);
+  assert.equal(originalUrl.origin, url.origin);
+  assert.equal(originalUrl.pathname, url.pathname);
+  assert.equal(originalUrl.searchParams.get('variant'), 'original');
+  assert.equal(originalUrl.searchParams.get('exp'), exp);
+  assert.equal(originalUrl.searchParams.get('sig'), crypto.createHmac('sha256', process.env.FILM_MEDIA_SECRET)
+    .update(`react-media.film-101.original.${exp}`).digest('hex'));
   assert.equal(fs.readFileSync(path.join(process.env.REACT_REF_DIR, 'film-101.mp4'), 'utf8'), 'reference bytes');
   fs.writeFileSync(`${cache}.replacement`, 'new cache bytes');
   fs.renameSync(`${cache}.replacement`, cache);
   assert.equal((await appRequest(app, { path: url.pathname + url.search })).text, 'reference bytes', 'React media stays pinned');
+  assert.equal((await appRequest(app, { path: originalUrl.pathname + originalUrl.search })).text, 'reference bytes', 'original media stays pinned');
   assert.equal((await appRequest(app, { path: signedPath('media', 101) })).text, 'new cache bytes', 'feed media prefers normal cache');
   fs.unlinkSync(cache);
   await pool.query('UPDATE posts SET video_cache_status = NULL WHERE id = $1', [101]);
@@ -518,6 +526,9 @@ test('react-reference signs and pins cached media and survives pruning cache and
   assert.equal(media.status, 206);
   assert.equal(media.text, 'reference');
   assert.equal(media.headers['content-range'], 'bytes 0-8/15');
+  const originalMedia = await appRequest(app, { path: originalUrl.pathname + originalUrl.search });
+  assert.equal(originalMedia.status, 200);
+  assert.equal(originalMedia.text, 'reference bytes', 'without analysis both URLs serve the original after cache pruning');
 });
 
 test('react-reference can explicitly authorize an existing reel outside Find visibility', async () => {
