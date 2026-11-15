@@ -21,8 +21,8 @@ function referenceFile(shortcode, env = process.env) {
   return path.resolve(dir, `${shortcode}.mp4`);
 }
 
-function getPinnedReferencePath(shortcode) {
-  const file = referenceFile(shortcode);
+function getPinnedReferencePath(shortcode, env = process.env) {
+  const file = referenceFile(shortcode, env);
   return file && usableFile(file) ? file : null;
 }
 
@@ -42,7 +42,7 @@ async function probeDuration(file) {
 
 async function ensurePostReference(post, shortcode, deps) {
   const fileSystem = deps.fs || fs;
-  const pin = referenceFile(shortcode);
+  const pin = referenceFile(shortcode, deps.env);
   const probe = deps.probeDuration || probeDuration;
   if (usableFile(pin, fileSystem)) return { post, path: pin, durationSec: await probe(pin) };
   const cache = videos.videoFilePath(post, videos.DEFAULT_VIDEO_DIR);
@@ -80,7 +80,7 @@ async function ensurePostReference(post, shortcode, deps) {
 async function fetchedReference(pool, shortcode, deps) {
   const fetched = await pool.query("SELECT duration_sec FROM film_react_refs WHERE shortcode = $1 AND state = 'ready'", [shortcode]);
   const row = fetched.rows[0];
-  const file = referenceFile(shortcode);
+  const file = referenceFile(shortcode, deps.env);
   if (!row || !usableFile(file, deps.fs || fs)) return null;
   return { post: null, path: file, durationSec: row.duration_sec, fetched: true };
 }

@@ -10,9 +10,10 @@ const { modelCanAccessPost } = require('./model-access');
 const modelTaste = require('./model-taste');
 const modelReactions = require('./model-reactions');
 const thumbnails = require('./thumbnails');
-const { isValidShortcode, ensureReactReference, getPinnedReferencePath, availableReferencePath } = require('./react-reference');
+const { isValidShortcode, ensureReactReference, getPinnedReferencePath, availableReferencePath, usableFile } = require('./react-reference');
 const { createReactRenderWorker, validateRenderRequest } = require('./react-render');
 const { createReactFetchWorker } = require('./react-fetch');
+const { createReactAnalysisWorker } = require('./react-analysis');
 
 const MEDIA_TTL_SECONDS = 6 * 60 * 60;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -135,13 +136,25 @@ async function reelPresenter(pool, req, res) {
   };
 }
 
-function registerFilmApi(app, { pool, reactWorker = createReactRenderWorker({ pool }),
-  reactFetchWorker = createReactFetchWorker({ pool }) }) {
+function registerFilmApi(app, { pool,
+  reactAnalysisWorker = createReactAnalysisWorker({ pool }),
+  reactWorker = createReactRenderWorker({ pool,
+    lookupAnalysis: (shortcode, reference) => reactAnalysisWorker.request(shortcode, reference) }),
+  reactFetchWorker = createReactFetchWorker({ pool,
+    onReady: (shortcode, reference) => reactAnalysisWorker.request(shortcode, reference) }) }) {
   const router = express.Router();
 
   router.get('/react-media/:shortcode', signedReactMedia, asyncHandler(async (req, res) => {
-    const result = await pool.query('SELECT state FROM film_react_refs WHERE shortcode = $1', [req.params.shortcode]);
-    const file = result.rows[0]?.state === 'ready' && getPinnedReferencePath(req.params.shortcode);
+    const shortcode = req.params.shortcode;
+    const result = await pool.query('SELECT state FROM film_react_refs WHERE shortcode = $1', [shortcode]);
+    const post = result.rows[0]?.state === 'ready' ? null
+      : (await pool.query('SELECT id FROM posts WHERE shortcode = $1 LIMIT 1', [shortcode])).rows[0];
+    if (result.rows[0]?.state !== 'ready' && !post) return res.status(404).json({ error: 'reel_not_available' });
+    let file = getPinnedReferencePath(shortcode);
+    try {
+      const ready = await reactAnalysisWorker.getResult(shortcode);
+      if (ready.state === 'ready' && ready.analysis && usableFile(ready.path)) file = ready.path;
+    } catch { console.error('[React analysis] media_fallback'); }
     if (!file) return res.status(404).json({ error: 'reel_not_available' });
     return sendCachedFile(res, file, { acceptRanges: true });
   }));
@@ -188,23 +201,33 @@ function registerFilmApi(app, { pool, reactWorker = createReactRenderWorker({ po
     if (!secret) return res.status(503).json({ error: 'media_unavailable' });
     const shortcode = req.body.shortcode;
     const reference = await ensureReactReference(pool, shortcode);
-    let fetched = reference?.fetched;
     let durationSec = reference?.durationSec;
     if (!reference) {
-      if (req.body.fetch === false) return res.status(404).json({ error: 'reel_not_available' });
+      if (req.body.fetch === false) {
+        const existing = await pool.query('SELECT state FROM film_react_refs WHERE shortcode = $1', [shortcode]);
+        if (existing.rows[0]?.state === 'fetching') return res.status(202).json({ state: 'fetching' });
+        return res.status(404).json({ error: 'reel_not_available' });
+      }
       const result = await reactFetchWorker.request(shortcode);
       if (result.state === 'fetching') return res.status(202).json({ state: 'fetching' });
       if (result.state !== 'ready') return res.status(404).json({ error: 'reel_not_available' });
-      fetched = true;
       durationSec = result.durationSec;
     }
+    let analysis = null;
+    try {
+      const result = await reactAnalysisWorker.request(shortcode, reference || {
+        path: getPinnedReferencePath(shortcode), durationSec,
+      });
+      if (result.state === 'fetching') return res.status(202).json({ state: 'fetching' });
+      if (result.state === 'ready' && usableFile(result.path)) analysis = result.analysis;
+    } catch { console.error('[React analysis] reference_fallback'); }
     const base = new URL(process.env.PUBLIC_BASE_URL || `${req.protocol}://${req.get('host')}`);
     if (!['http:', 'https:'].includes(base.protocol)) throw new Error('Invalid PUBLIC_BASE_URL');
     const exp = Math.floor(Date.now() / 1000) + MEDIA_TTL_SECONDS;
-    const url = new URL(fetched ? `/film/v1/react-media/${shortcode}` : `/film/v1/media/${reference.post.id}`, base);
+    const url = new URL(`/film/v1/react-media/${shortcode}`, base);
     url.searchParams.set('exp', String(exp));
-    url.searchParams.set('sig', fetched ? reactMediaSignature(shortcode, exp, secret) : signature(reference.post.id, exp, secret));
-    return res.json({ videoUrl: url.href, durationSec: durationSec ?? null });
+    url.searchParams.set('sig', reactMediaSignature(shortcode, exp, secret));
+    return res.json({ videoUrl: url.href, durationSec: durationSec ?? null, analysis });
   }));
 
   router.post('/react-prefetch', asyncHandler(async (req, res) => {

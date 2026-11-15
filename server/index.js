@@ -44,6 +44,7 @@ const { loadTaste, tasteForFeed, refreshTaste } = require('./model-taste');
 const { computeProposals } = require('./proposals');
 const { registerFilmApi } = require('./film-api');
 const { createReactFetchWorker } = require('./react-fetch');
+const { createReactAnalysisWorker } = require('./react-analysis');
 
 function refreshProposalsAfterResponse(res, modelId) {
   res.once('finish', () => {
@@ -103,8 +104,10 @@ function checkProdSecrets(env = process.env) {
 
 app.use(cors((req, callback) => callback(null, corsOptionsForRequest(req))));
 app.use(browserSecurityHeaders);
-const reactFetchWorker = createReactFetchWorker({ pool });
-const reactRenderWorker = registerFilmApi(app, { pool, reactFetchWorker });
+const reactAnalysisWorker = createReactAnalysisWorker({ pool });
+const reactFetchWorker = createReactFetchWorker({ pool,
+  onReady: (shortcode, reference) => reactAnalysisWorker.request(shortcode, reference) });
+const reactRenderWorker = registerFilmApi(app, { pool, reactFetchWorker, reactAnalysisWorker });
 app.use(express.json());
 
 const SESSION_COOKIE_NAME = 'instascraper.sid';
@@ -1706,6 +1709,7 @@ async function boot() {
   }
   try {
     await initWithRetry(() => pool.initDB());
+    await reactAnalysisWorker.start();
     await reactFetchWorker.start();
     await reactRenderWorker.start();
     health.markReady();

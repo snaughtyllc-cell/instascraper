@@ -68,7 +68,7 @@ beforeEach(async () => {
   process.env.HQ_PUBLIC_URL = 'https://hq.example.test';
   fs.rmSync(process.env.REACT_REF_DIR, { recursive: true, force: true });
   refreshed = [];
-  for (const table of ['film_react_refs', 'film_reel_items', 'model_taste', 'model_saved_posts', 'model_post_feedback', 'model_assigned_posts', 'model_creators', 'posts', 'models']) {
+  for (const table of ['film_react_analysis', 'film_react_refs', 'film_reel_items', 'model_taste', 'model_saved_posts', 'model_post_feedback', 'model_assigned_posts', 'model_creators', 'posts', 'models']) {
     await pool.query(`DELETE FROM ${table}`);
   }
   await pool.query(`INSERT INTO models (id,name,primary_niche,secondary_niches,look_tags,hq_project_id,email,password_hash,login_enabled)
@@ -416,15 +416,20 @@ test('react-reference signs and pins cached media and survives pruning cache and
   process.env.PUBLIC_BASE_URL = 'https://media.example.test/';
   const response = await request('POST', '/film/v1/react-reference', { shortcode: 'film-101' });
   assert.equal(response.status, 200);
-  assert.deepEqual(Object.keys(response.body).sort(), ['durationSec', 'videoUrl']);
+  assert.deepEqual(Object.keys(response.body).sort(), ['analysis', 'durationSec', 'videoUrl']);
+  assert.equal(response.body.analysis, null);
   assert.equal(response.body.durationSec, null, 'unprobeable file has no invented duration');
   const url = new URL(response.body.videoUrl);
   assert.equal(url.origin, 'https://media.example.test');
-  assert.equal(url.pathname + url.search, signedPath('media', 101, Number(url.searchParams.get('exp'))));
+  assert.equal(url.pathname, '/film/v1/react-media/film-101');
+  const exp = url.searchParams.get('exp');
+  assert.equal(url.searchParams.get('sig'), crypto.createHmac('sha256', process.env.FILM_MEDIA_SECRET)
+    .update(`react-media.film-101.${exp}`).digest('hex'));
   assert.equal(fs.readFileSync(path.join(process.env.REACT_REF_DIR, 'film-101.mp4'), 'utf8'), 'reference bytes');
   fs.writeFileSync(`${cache}.replacement`, 'new cache bytes');
   fs.renameSync(`${cache}.replacement`, cache);
-  assert.equal((await appRequest(app, { path: url.pathname + url.search })).text, 'new cache bytes', 'media prefers normal cache');
+  assert.equal((await appRequest(app, { path: url.pathname + url.search })).text, 'reference bytes', 'React media stays pinned');
+  assert.equal((await appRequest(app, { path: signedPath('media', 101) })).text, 'new cache bytes', 'feed media prefers normal cache');
   fs.unlinkSync(cache);
   await pool.query('UPDATE posts SET video_cache_status = NULL WHERE id = $1', [101]);
   const media = await appRequest(app, { path: url.pathname + url.search, headers: { Range: 'bytes=0-8' } });

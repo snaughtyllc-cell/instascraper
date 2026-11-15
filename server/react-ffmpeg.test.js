@@ -6,7 +6,7 @@ const { spawnSync } = require('node:child_process');
 const fs = require('node:fs/promises');
 const os = require('node:os');
 const path = require('node:path');
-const { buildFfmpegArgs, probeVideo, renderVideo, resolveFfmpegThreads } = require('./react-ffmpeg');
+const { buildFfmpegArgs, probeVideo, renderVideo, resolveFfmpegThreads, resolveFreezeMargin } = require('./react-ffmpeg');
 
 function options(overrides = {}) {
   return { rawPath: '/tmp/raw.mp4', referencePath: '/tmp/reference.mp4', outputPath: '/tmp/output.mp4',
@@ -25,16 +25,22 @@ test('stitched ffmpeg graph uses the specified geometry, encoders, duration and 
   assert.match(graph, /\[1:v\].*crop=iw:ih\*0.5:0:ih\*0,scale=1080:960/);
   assert.match(graph, /tpad=stop_mode=clone:stop_duration=600\[top\]/);
   assert.match(graph, /\[top\]\[bot\]vstack=inputs=2\[v\]/);
-  assert.match(graph, /volume=1.0/);
-  assert.match(graph, /volume=0.8/);
+  assert.match(graph, /highpass=f=80,dynaudnorm=f=150:g=11:p=0.9:m=20,loudnorm=I=-16:TP=-1.5:LRA=11:linear=true/);
+  assert.doesNotMatch(graph, /afftdn/);
+  assert.match(graph, /loudnorm=I=-22:TP=-2/);
+  assert.match(graph, /\[mic\]asplit=2\[micmix\]\[sidechain\]/);
+  assert.match(graph, /\[refaudio\]\[sidechain\]sidechaincompress=threshold=0.03:ratio=6:attack=5:release=350/);
   assert.match(graph, /amix=inputs=2:duration=first:normalize=0,alimiter/);
+  assert.match(graph, /alimiter=limit=0.89:level=0:latency=1/);
   assert.equal(args[args.indexOf('-t') + 1], '3');
   assert.equal(args[args.indexOf('-c:v') + 1], 'libx264');
   assert.equal(args[args.indexOf('-preset') + 1], 'veryfast');
   assert.equal(args[args.indexOf('-crf') + 1], '20');
   assert.equal(args[args.indexOf('-pix_fmt') + 1], 'yuv420p');
   assert.equal(args[args.indexOf('-c:a') + 1], 'aac');
-  assert.equal(args[args.indexOf('-b:a') + 1], '160k');
+  assert.equal(args[args.indexOf('-b:a') + 1], '192k');
+  assert.equal(args[args.indexOf('-ar') + 1], '48000');
+  assert.equal(args[args.indexOf('-ac') + 1], '2');
   assert.equal(args[args.indexOf('-movflags') + 1], '+faststart');
   assert.doesNotMatch(graph, /hflip/);
   assert.ok(!args.includes('-noautorotate'));
@@ -46,7 +52,42 @@ test('positive sync offsets the reference input and clones its first frame with 
   assert.ok(args.indexOf('-itsoffset') < args.indexOf('/tmp/reference.mp4'));
   assert.match(filter(args), /\[1:v\]setpts=PTS-STARTPTS/);
   assert.match(filter(args), /tpad=start_mode=clone:start_duration=1.234/);
-  assert.match(filter(args), /\[1:a\]asetpts=PTS-STARTPTS,adelay=1234:all=1,volume=0.8/);
+  assert.match(filter(args), /\[1:a\]asetpts=PTS-STARTPTS,loudnorm=I=-22:TP=-2/);
+  assert.match(filter(args), /adelay=1234:all=1/);
+});
+
+test('split selection uses safety margins only at adjacent full boundaries', () => {
+  const analysis = { layout: [
+    { start: 0, end: 1, kind: 'full' }, { start: 1, end: 3, kind: 'split' },
+    { start: 3, end: 4, kind: 'full' }, { start: 4, end: 6, kind: 'split' },
+    { start: 6, end: 8, kind: 'split' }, { start: 8, end: 9, kind: 'full' },
+    { start: 9, end: 10, kind: 'split' },
+  ] };
+  const graph = filter(buildFfmpegArgs(options({ analysis })));
+  assert.ok(graph.includes("select='gte(t,1.15)*lt(t,2.65)+gte(t,4.15)*lt(t,6)+" +
+    "gte(t,6)*lt(t,7.65)+gte(t,9.15)*lt(t,10)'"));
+  const initialSplit = { layout: [{ start: 0, end: 2, kind: 'split' }, { start: 2, end: 3, kind: 'full' }] };
+  assert.ok(filter(buildFfmpegArgs(options({ analysis: initialSplit }))).includes("select='gte(t,0)*lt(t,1.65)'"));
+  for (const kind of ['split', 'full']) {
+    assert.doesNotMatch(filter(buildFfmpegArgs(options({ analysis: { layout: [{ start: 0, end: 3, kind }] } }))), /select=/);
+  }
+});
+
+test('tiny split windows retain their original midpoint with a 0.2 second selection', () => {
+  for (const [analysis, expected] of [
+    [{ layout: [{ start: 0, end: 0.5, kind: 'split' }, { start: 0.5, end: 1, kind: 'full' }] },
+      "select='gte(t,0.15)*lt(t,0.35)'"],
+    [{ layout: [{ start: 0, end: 1, kind: 'full' }, { start: 1, end: 1.3, kind: 'split' },
+      { start: 1.3, end: 2, kind: 'full' }] }, "select='gte(t,1.05)*lt(t,1.25)'"],
+  ]) assert.ok(filter(buildFfmpegArgs(options({ analysis }))).includes(expected));
+});
+
+test('freeze margin defaults on invalid values and clamps finite values to zero through one', () => {
+  for (const value of [undefined, null, '', ' ', 'bad', '0.2;unsafe', NaN, Infinity, 'Infinity', true, {}, []]) {
+    assert.equal(resolveFreezeMargin(value), 0.35, String(value));
+  }
+  for (const [value, expected] of [[0, 0], ['0', 0], [-1, 0], ['-1', 0], [0.6, 0.6], ['0.6', 0.6],
+    [1, 1], ['2', 1]]) assert.equal(resolveFreezeMargin(value), expected, String(value));
 });
 
 test('ffmpeg thread caps default to two in the filter and output option sections', () => {
@@ -111,6 +152,8 @@ test('solo ffmpeg graph contains only her portrait video and microphone', () => 
   const args = buildFfmpegArgs(options({ output: 'solo', syncMs: 500 }));
   assert.match(filter(args), /scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920/);
   assert.match(filter(args), /\[0:a\]/);
+  assert.match(filter(args), /highpass=f=80,dynaudnorm=f=150:g=11:p=0.9:m=20,loudnorm=I=-16:TP=-1.5:LRA=11:linear=true/);
+  assert.doesNotMatch(filter(args), /afftdn|sidechaincompress/);
   assert.doesNotMatch(filter(args), /\[1:|vstack|amix/);
   assert.equal(args.filter(arg => arg === '-i').length, 1);
 });
@@ -174,6 +217,20 @@ test('renderVideo resolves thread caps from environment and execution options', 
   await renderVideo(options(), { ...fake, env: { REACT_FFMPEG_THREADS: '4' }, threads: 3 });
   const args = fake.calls[0].args;
   assert.equal(args[args.indexOf('-threads') + 1], '3');
+});
+
+test('renderVideo resolves freeze margin from trusted environment and execution options', async () => {
+  const analysis = { layout: [{ start: 0, end: 2, kind: 'split' }, { start: 2, end: 3, kind: 'full' }] };
+  for (const [configured, end] of [[undefined, 1.65], ['0', 2], ['0.6', 1.4], ['-1', 2], ['2', 1], ['bad', 1.65]]) {
+    const fake = fakeSpawn();
+    await renderVideo(options({ analysis, freezeMarginSec: 0.99 }), {
+      ...fake, env: { REACT_FREEZE_MARGIN_SEC: configured },
+    });
+    assert.ok(filter(fake.calls[0].args).includes(`select='gte(t,0)*lt(t,${end})'`), String(configured));
+  }
+  const fake = fakeSpawn();
+  await renderVideo(options({ analysis }), { ...fake, env: { REACT_FREEZE_MARGIN_SEC: '1' }, freezeMarginSec: 0 });
+  assert.ok(filter(fake.calls[0].args).includes("select='gte(t,0)*lt(t,2)'"));
 });
 
 test('probeVideo reads metadata and supports the configured binary', async () => {
@@ -271,6 +328,79 @@ test('priority never targets the parent process when spawn has no positive child
 });
 
 const ffmpegAvailable = spawnSync('ffmpeg', ['-version'], { stdio: 'ignore' }).status === 0;
+test('real ffmpeg freezes the last VFR split frame before sync and keeps mic louder than ducked reference',
+  { skip: !ffmpegAvailable, timeout: 120000 }, async () => {
+    const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'react-v2-ffmpeg-test-'));
+    const rawPath = path.join(directory, 'raw.mp4'), referencePath = path.join(directory, 'reference.mp4');
+    const outputPath = path.join(directory, 'output.mp4');
+    function run(args) {
+      const result = spawnSync('ffmpeg', ['-hide_banner', '-loglevel', 'error', '-nostdin', '-y', ...args],
+        { timeout: 30000, maxBuffer: 4 * 1024 * 1024 });
+      assert.equal(result.status, 0, result.stderr.toString());
+      return result.stdout;
+    }
+    function assertColor(at, expected) {
+      const pixels = run(['-ss', String(at), '-i', outputPath, '-frames:v', '1', '-vf',
+        'crop=1080:960:0:0,scale=1:1,format=rgb24', '-f', 'rawvideo', 'pipe:1']);
+      assert.equal(pixels.length, 3);
+      const matches = expected === 'yellow' ? pixels[0] > 150 && pixels[1] > 150 && pixels[2] < 30
+        : pixels[expected === 'blue' ? 2 : 1] > 80 && pixels[expected === 'blue' ? 2 : 1] > pixels[0] * 3;
+      assert.ok(matches,
+        `expected frozen ${expected} at ${at}s, got RGB ${[...pixels]}`);
+    }
+    function samplesAt(at) {
+      const buffer = run(['-ss', String(at), '-i', outputPath, '-t', '0.2', '-map', '0:a',
+        '-ac', '1', '-ar', '48000', '-f', 'f32le', 'pipe:1']);
+      return Array.from({ length: buffer.length / 4 }, (_, index) => buffer.readFloatLE(index * 4));
+    }
+    function amplitude(samples, frequency) {
+      let real = 0, imaginary = 0;
+      samples.forEach((sample, index) => {
+        real += sample * Math.cos(2 * Math.PI * frequency * index / 48000);
+        imaginary += sample * Math.sin(2 * Math.PI * frequency * index / 48000);
+      });
+      return Math.hypot(real, imaginary) * 2 / samples.length;
+    }
+    const analysis = { layout: [
+      { start: 0, end: 0.5, kind: 'full' }, { start: 0.5, end: 1.5, kind: 'split' },
+      { start: 1.5, end: 2.5, kind: 'full' }, { start: 2.5, end: 3.5, kind: 'split' },
+      { start: 3.5, end: 4, kind: 'full' },
+    ] };
+    try {
+      for (const [file, video, audio] of [
+        [rawPath, 'color=c=black:s=128x192:r=30:d=4',
+          'aevalsrc=0.05*sin(2*PI*440*t)*lt(t\\,2):s=48000:d=4'],
+        [referencePath, 'color=c=red:s=128x192:r=30:d=4',
+          'aevalsrc=0.5*sin(2*PI*1100*t)*gte(t\\,1):s=48000:d=4'],
+      ]) {
+        run(['-f', 'lavfi', '-i', video, '-f', 'lavfi', '-i', audio, ...(file === referencePath ? ['-vf',
+          "drawbox=c=blue:t=fill:enable='gte(t,0.5)*lt(t,1.5)',drawbox=c=green:t=fill:enable='gte(t,2.5)*lt(t,3.5)'," +
+          "drawbox=c=yellow:t=fill:enable='eq(n,44)',select='not(mod(n,5))+eq(n,44)'", '-fps_mode', 'vfr'] : []),
+        '-c:v', 'libx264', '-preset', 'ultrafast', '-threads', '2', '-pix_fmt', 'yuv420p', '-c:a', 'aac', file]);
+      }
+      for (const [syncMs, checks] of [
+        [500, [[0.2, 'blue'], [0.8, 'blue'], [2.4, 'yellow'], [3.3, 'green']]],
+        [-1000, [[0.2, 'blue'], [0.8, 'yellow'], [1.8, 'green'], [3.5, 'green']]],
+      ]) {
+        // Preserve the distinct final VFR frame in this timestamp regression;
+        // the default safety margin has its own late-boundary integration test.
+        await renderVideo(options({ rawPath, referencePath, outputPath, rawDuration: 4, syncMs, analysis }),
+          { timeoutMs: 60000, freezeMarginSec: 0 });
+        for (const [at, color] of checks) assertColor(at, color);
+      }
+      await renderVideo(options({ rawPath, referencePath, outputPath, rawDuration: 4, syncMs: 0, analysis }),
+        { timeoutMs: 60000, freezeMarginSec: 0 });
+      const micOnly = samplesAt(0.5), overlap = samplesAt(1.5), referenceOnly = samplesAt(3.2);
+      assert.ok(amplitude(overlap, 440) > 0.08, 'microphone must remain audible under reference audio');
+      const micLeadDb = 20 * Math.log10(amplitude(overlap, 440) / amplitude(overlap, 1100));
+      assert.ok(micLeadDb >= 8, `microphone must exceed ducked reference by at least 8 dB: ${micLeadDb}`);
+      assert.ok(amplitude(overlap, 1100) < amplitude(referenceOnly, 1100) * 0.5,
+        'processed microphone must duck reference audio by at least 6 dB');
+      assert.ok(Math.max(...micOnly.map(Math.abs), ...overlap.map(Math.abs), ...referenceOnly.map(Math.abs)) < 0.95,
+        'limited AAC output must stay below clipping');
+    } finally { await fs.rm(directory, { recursive: true, force: true }); }
+  });
+
 test('real ffmpeg renders 3s raw and 4s reference to portrait H264/AAC with positive sync',
   { skip: !ffmpegAvailable, timeout: 120000 }, async () => {
     const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'react-ffmpeg-test-'));
@@ -280,7 +410,7 @@ test('real ffmpeg renders 3s raw and 4s reference to portrait H264/AAC with posi
     try {
       for (const [file, source, sine, duration] of [
         [rawPath, 'testsrc=size=720x1280:rate=30', '440', '3'],
-        [referencePath, 'testsrc2=size=1080x1920:rate=30', '880', '4'],
+        [referencePath, 'testsrc2=size=1080x1920:rate=30', '1100', '4'],
       ]) {
         const result = spawnSync('ffmpeg', ['-hide_banner', '-loglevel', 'error', '-nostdin', '-y',
           '-f', 'lavfi', '-i', source, '-f', 'lavfi', '-i', `sine=frequency=${sine}:sample_rate=48000`,
@@ -306,6 +436,8 @@ test('real ffmpeg renders 3s raw and 4s reference to portrait H264/AAC with posi
       assert.ok(Math.abs(Number(info.format.duration) - 3) < 0.15, info.format.duration);
       assert.equal(audio.length, 1);
       assert.equal(audio[0].codec_name, 'aac');
+      assert.equal(audio[0].sample_rate, '48000');
+      assert.equal(audio[0].channels, 2);
 
       function decodedSample(file, at, filterGraph) {
         const decoded = spawnSync('ffmpeg', ['-hide_banner', '-loglevel', 'error', '-ss', String(at), '-i', file,
@@ -333,7 +465,7 @@ test('real ffmpeg renders 3s raw and 4s reference to portrait H264/AAC with posi
         assert.equal(decoded.status, 0, decoded.stderr.toString());
         const samples = decoded.stdout.length / 4;
         assert.ok(samples > 0);
-        return [440, 880].map(frequency => {
+        return [440, 1100].map(frequency => {
           let real = 0;
           let imaginary = 0;
           for (let index = 0; index < samples; index++) {
@@ -348,8 +480,9 @@ test('real ffmpeg renders 3s raw and 4s reference to portrait H264/AAC with posi
       const earlyAudio = audioAmplitudes(0.1);
       const mixedAudio = audioAmplitudes(0.8);
       assert.ok(earlyAudio[0] > 0.05, 'her microphone must play before the reference starts');
-      assert.ok(earlyAudio[1] < earlyAudio[0] * 0.05, 'reference audio must be silent during the offset');
-      assert.ok(mixedAudio[1] > mixedAudio[0] * 0.4, 'reference audio must join after the offset');
+      assert.ok(earlyAudio[1] < earlyAudio[0] * 0.05, `reference audio must be silent during the offset: ${earlyAudio}`);
+      assert.ok(mixedAudio[1] > 0.005, `reference audio must join after the offset: ${mixedAudio}`);
+      assert.ok(mixedAudio[0] > mixedAudio[1] * 2, 'processed microphone must dominate the ducked reference');
 
       const silentRaw = path.join(directory, 'raw-no-audio.mp4');
       const silentReference = path.join(directory, 'reference-no-audio.mp4');

@@ -4,6 +4,7 @@ const fs = require('node:fs/promises');
 const os = require('node:os');
 const path = require('node:path');
 const { describeReel, redecideFromDescription, estimateCostUsd, cleanTranscript } = require('./gemini-sort');
+const { describeReactSpeech, cleanReactUtterances } = require('./gemini-sort');
 
 const types = [
   { value: 'dance', label: 'Dance', description: 'The main activity is dancing to music.' },
@@ -196,4 +197,60 @@ test('cleanTranscript truncates at sentence or word boundaries within 4000 chara
   assert.ok(truncated.endsWith('bonjour'));
   assert.ok(original.startsWith(truncated));
   assert.equal(cleanTranscript(' Hola.\r\nBien.\rGracias. '), 'Hola.\nBien.\nGracias.');
+});
+
+test('React speech uses existing client/model and strict role schema at temperature zero', async t => {
+  const client = fake({ text: JSON.stringify({ utterances: [
+    { start: 1, end: 2, text: 'Hola', role: 'creator' },
+    { start: 2, end: 3, text: 'Hi', role: 'stranger' },
+  ] }) });
+  const result = await describeReactSpeech({ filePath: await video(t), durationSec: 3 }, { client, model: 'configured-model' });
+  const request = client.calls[0];
+  assert.equal(request.model, 'configured-model');
+  assert.equal(request.config.temperature, 0);
+  assert.equal(request.config.responseMimeType, 'application/json');
+  assert.deepEqual(request.config.responseJsonSchema.properties.utterances.items.properties.role.enum, ['creator', 'stranger']);
+  assert.equal(request.config.responseJsonSchema.additionalProperties, false);
+  assert.match(request.contents[0].parts[1].text, /face in the bottom pane/);
+  assert.match(request.contents[0].parts[1].text, /top pane \(the video call\)/);
+  assert.deepEqual(result.utterances.map(item => item.role), ['creator', 'stranger']);
+  assert.deepEqual(result.usage, { inTokens: 3400, outTokens: 80 });
+});
+
+test('React utterances clamp bounds, sort, and reject invalid or excess creator spans', () => {
+  assert.deepEqual(cleanReactUtterances([
+    { start: 2, end: 4, text: 'Later', role: 'stranger' },
+    { start: -1, end: 1, text: 'a'.repeat(400), role: 'creator' },
+  ], 3), [{ start: 0, end: 1, text: 'a'.repeat(300), role: 'creator' }, { start: 2, end: 3, text: 'Later', role: 'stranger' }]);
+  for (const invalid of [null, {}, [{ start: '1', end: 2, text: 'x', role: 'creator' }],
+    [{ start: 1, end: 2, text: 'x', role: 'unknown' }], [{ start: 1, end: Infinity, text: 'x', role: 'creator' }]]) {
+    assert.throws(() => cleanReactUtterances(invalid, 3), /Invalid React/);
+  }
+  assert.throws(() => cleanReactUtterances(Array.from({ length: 201 }, () => ({ start: 0, end: 1, text: 'x', role: 'creator' })), 3), /Too many creator/);
+});
+
+test('React upload waits for ACTIVE, uses abort signal and cleans uploaded file', async t => {
+  const events = [], controller = new AbortController();
+  const client = fake({ text: '{"utterances":[]}' });
+  client.files = {
+    upload: async request => { events.push('upload'); assert.equal(request.config.abortSignal, controller.signal); return { name: 'react/video', state: 'PROCESSING' }; },
+    get: async () => { events.push('get'); return { name: 'react/video', state: 'ACTIVE', uri: 'fake://react' }; },
+    delete: async () => { events.push('delete'); },
+  };
+  const result = await describeReactSpeech({ filePath: await video(t, 18 * 1024 * 1024 + 1), durationSec: 3 }, { client, signal: controller.signal });
+  assert.deepEqual(result.utterances, []);
+  assert.equal(client.calls[0].config.abortSignal, controller.signal);
+  assert.deepEqual(events, ['upload', 'get', 'delete']);
+});
+
+test('React requests never retry 403 and abort before calling the provider', async t => {
+  const filePath = await video(t);
+  let calls = 0;
+  const client = { models: { generateContent: async () => { calls++; throw Object.assign(new Error('forbidden'), { status: 403 }); } } };
+  await assert.rejects(describeReactSpeech({ filePath, durationSec: 3 }, { client }), /forbidden/);
+  assert.equal(calls, 1);
+  const controller = new AbortController();
+  controller.abort();
+  await assert.rejects(describeReactSpeech({ filePath, durationSec: 3 }, { client, signal: controller.signal }), /abort/i);
+  assert.equal(calls, 1);
 });

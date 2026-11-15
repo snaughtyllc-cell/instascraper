@@ -8,6 +8,39 @@ function resolveFfmpegThreads(value) {
   return Number.isInteger(threads) && threads > 0 ? Math.min(threads, 16) : 2;
 }
 
+function resolveFreezeMargin(value) {
+  if ((typeof value !== 'number' && typeof value !== 'string') ||
+      (typeof value === 'string' && value.trim() === '')) return 0.35;
+  const margin = Number(value);
+  return Number.isFinite(margin) ? Math.max(0, Math.min(1, margin)) : 0.35;
+}
+
+function splitSelection(analysis, margin) {
+  if (!Array.isArray(analysis?.layout) || !analysis.layout.length) return null;
+  let end = 0;
+  for (const segment of analysis.layout) {
+    if (!segment || !Number.isFinite(segment.start) || !Number.isFinite(segment.end) ||
+        segment.start < end || segment.end <= segment.start ||
+        !['split', 'full'].includes(segment.kind)) return null;
+    end = segment.end;
+  }
+  const splits = analysis.layout.filter(segment => segment.kind === 'split');
+  if (!splits.length || !analysis.layout.some(segment => segment.kind === 'full')) return null;
+  return analysis.layout.flatMap((segment, index, layout) => {
+    if (segment.kind !== 'split') return [];
+    let start = segment.start, end = segment.end;
+    if (layout[index - 1]?.kind === 'full') start += 0.15;
+    if (layout[index + 1]?.kind === 'full') end -= margin;
+    if (end - start < 0.2) {
+      const midpoint = (segment.start + segment.end) / 2;
+      start = midpoint - 0.1;
+      end = midpoint + 0.1;
+    }
+    // Keep decimal seconds stable for ffmpeg's expression parser.
+    return [`gte(t,${Number(start.toFixed(6))})*lt(t,${Number(end.toFixed(6))})`];
+  }).join('+');
+}
+
 function buildFfmpegArgs(opts) {
   const { rawPath, referencePath, outputPath, rawDuration, rawHasAudio, referenceHasAudio,
     crop, syncMs, output, referenceAudio } = opts;
@@ -21,6 +54,7 @@ function buildFfmpegArgs(opts) {
     throw new Error('invalid_render_options');
   }
   const threads = String(resolveFfmpegThreads(opts.threads));
+  const selection = splitSelection(opts.analysis, resolveFreezeMargin(opts.freezeMarginSec));
 
   const args = ['-hide_banner', '-loglevel', 'error', '-nostdin', '-y',
     '-protocol_whitelist', 'file,pipe', '-i', rawPath];
@@ -30,32 +64,48 @@ function buildFfmpegArgs(opts) {
       'crop=1080:1920,setsar=1,fps=30[v]');
   } else {
     if (syncMs > 0) args.push('-itsoffset', String(syncMs / 1000));
-    if (syncMs < 0) args.push('-ss', String(-syncMs / 1000));
+    // Freeze on the original reference timeline before seeking. An input seek
+    // could discard the split frame needed by a full segment at the seek point.
+    if (syncMs < 0 && !selection) args.push('-ss', String(-syncMs / 1000));
     args.push('-protocol_whitelist', 'file,pipe', '-i', referencePath);
     graph.push('[0:v]setpts=PTS-STARTPTS,scale=1080:960:force_original_aspect_ratio=increase,' +
       'crop=1080:960,setsar=1,fps=30[bot]');
     // Normalize the reference before adding cloned frames: keeping the input
     // offset here as well would apply positive sync twice (also true for audio).
     const startPad = syncMs > 0 ? `,tpad=start_mode=clone:start_duration=${syncMs / 1000}` : '';
+    // Exclude uncertain boundary frames, retaining original timestamps; fps
+    // fills each omitted full segment with
+    // the last split frame and start_time fills a leading full with the first
+    // later split frame. The final tpad also covers trailing full segments.
+    const freeze = selection ? `,select='${selection}',fps=30:start_time=0` : ',fps=30';
+    const seek = selection && syncMs < 0 ? `,trim=start=${-syncMs / 1000},setpts=PTS-STARTPTS` : '';
     graph.push(`[1:v]setpts=PTS-STARTPTS,crop=iw:ih*${crop.height}:0:ih*${crop.top},` +
-      'scale=1080:960:force_original_aspect_ratio=increase,crop=1080:960,setsar=1,fps=30' +
-      `${startPad},tpad=stop_mode=clone:stop_duration=600[top]`);
+      'scale=1080:960:force_original_aspect_ratio=increase,crop=1080:960,setsar=1' + freeze +
+      `,tpad=stop_mode=clone:stop_duration=600${seek}` +
+      `${startPad}[top]`);
     graph.push('[top][bot]vstack=inputs=2[v]');
   }
 
   if (rawHasAudio) {
-    graph.push(`[0:a]asetpts=PTS-STARTPTS,volume=1.0,apad,atrim=duration=${rawDuration}[mic]`);
+    graph.push('[0:a]asetpts=PTS-STARTPTS,highpass=f=80,dynaudnorm=f=150:g=11:p=0.9:m=20,' +
+      'loudnorm=I=-16:TP=-1.5:LRA=11:linear=true,aresample=48000,aformat=channel_layouts=stereo,asetpts=N/SR/TB,' +
+      `apad,atrim=duration=${rawDuration}[mic]`);
   }
   const useReferenceAudio = output === 'stitched' && referenceAudio && referenceHasAudio;
   if (useReferenceAudio) {
     const delay = syncMs > 0 ? `,adelay=${syncMs}:all=1` : '';
-    graph.push(`[1:a]asetpts=PTS-STARTPTS${delay},volume=0.8,apad,` +
+    const seek = selection && syncMs < 0 ? `,atrim=start=${-syncMs / 1000},asetpts=PTS-STARTPTS` : '';
+    graph.push(`[1:a]asetpts=PTS-STARTPTS${seek},loudnorm=I=-22:TP=-2,` +
+      `aresample=48000,aformat=channel_layouts=stereo${delay},asetpts=N/SR/TB,apad,` +
       `atrim=duration=${rawDuration}[refaudio]`);
   }
   if (rawHasAudio && useReferenceAudio) {
-    graph.push('[mic][refaudio]amix=inputs=2:duration=first:normalize=0,alimiter=latency=1[a]');
+    graph.push('[mic]asplit=2[micmix][sidechain]');
+    graph.push('[refaudio][sidechain]sidechaincompress=threshold=0.03:ratio=6:attack=5:release=350[ducked]');
+    graph.push('[micmix][ducked]amix=inputs=2:duration=first:normalize=0,' +
+      'alimiter=limit=0.89:level=0:latency=1[a]');
   } else if (rawHasAudio || useReferenceAudio) {
-    graph.push(`[${rawHasAudio ? 'mic' : 'refaudio'}]alimiter=latency=1[a]`);
+    graph.push(`[${rawHasAudio ? 'mic' : 'refaudio'}]alimiter=limit=0.89:level=0:latency=1[a]`);
   } else {
     graph.push(`anullsrc=r=48000:cl=stereo,atrim=duration=${rawDuration}[a]`);
   }
@@ -64,7 +114,7 @@ function buildFfmpegArgs(opts) {
     '-filter_complex', graph.join(';'), '-map', '[v]', '-map', '[a]',
     '-t', String(rawDuration), '-r', '30', '-c:v', 'libx264', '-preset', 'veryfast',
     '-threads', threads, '-x264-params', `threads=${threads}`,
-    '-crf', '20', '-pix_fmt', 'yuv420p', '-c:a', 'aac', '-b:a', '160k',
+    '-crf', '20', '-pix_fmt', 'yuv420p', '-c:a', 'aac', '-b:a', '192k', '-ar', '48000', '-ac', '2',
     '-movflags', '+faststart', outputPath);
   return args;
 }
@@ -148,7 +198,8 @@ async function probeVideo(file, options = {}) {
 async function renderVideo(opts, options = {}) {
   const env = options.env || process.env;
   const threads = resolveFfmpegThreads(options.threads ?? env.REACT_FFMPEG_THREADS);
-  await runProcess(options.ffmpegPath || env.FFMPEG_PATH || 'ffmpeg', buildFfmpegArgs({ ...opts, threads }), {
+  const freezeMarginSec = resolveFreezeMargin(options.freezeMarginSec ?? env.REACT_FREEZE_MARGIN_SEC);
+  await runProcess(options.ffmpegPath || env.FFMPEG_PATH || 'ffmpeg', buildFfmpegArgs({ ...opts, threads, freezeMarginSec }), {
     timeoutMs: validTimeout(options.timeoutMs,
       validTimeout(Number(env.REACT_RENDER_TIMEOUT_SEC) * 1000, 900000)),
     spawnImpl: options.spawnImpl,
@@ -158,4 +209,4 @@ async function renderVideo(opts, options = {}) {
   });
 }
 
-module.exports = { buildFfmpegArgs, probeVideo, renderVideo, resolveFfmpegThreads, resolveFfmpegNice };
+module.exports = { buildFfmpegArgs, probeVideo, renderVideo, resolveFfmpegThreads, resolveFfmpegNice, resolveFreezeMargin };

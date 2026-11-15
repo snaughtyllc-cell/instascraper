@@ -63,6 +63,23 @@ async function fixture(t, options = {}) {
     advance: ms => { time += ms; }, time: () => time };
 }
 
+test('successful fetch publishes its pin before queuing analysis and tolerates analysis failure', async t => {
+  const calls = [];
+  const f = await fixture(t, { onReady: async (shortcode, reference) => {
+    calls.push({ shortcode, reference });
+    assert.equal(fs.readFileSync(reference.path, 'utf8'), 'video');
+    assert.equal(reference.durationSec, 4.5);
+    assert.equal(f.db.prepare('SELECT state FROM film_react_refs WHERE shortcode=?').get(shortcode).state, 'ready');
+    throw new Error('analysis failure must not unpublish the reference');
+  } });
+  await f.worker.request('analyze_ref');
+  await f.worker.waitForIdle();
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].shortcode, 'analyze_ref');
+  assert.equal((await f.worker.request('analyze_ref')).state, 'ready');
+  assert.equal(calls.length, 1, 'a cached fetch does not queue duplicate work');
+});
+
 test('missing keys fail before reserving capacity, log once at startup and retry after a key is added', async t => {
   const logs = [], requests = [];
   t.mock.method(console, 'error', line => logs.push(line));
