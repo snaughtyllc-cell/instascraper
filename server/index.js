@@ -25,6 +25,7 @@ const { videoFilePath, DEFAULT_VIDEO_DIR } = require('./videos');
 const { buildBulkUpdate } = require('./content-bulk');
 const { calcViewER, engagementLabel, enrichViewsVsMedian, medianViewsByAccount } = require('./engagement-metrics');
 const { validateTypeLabel } = require('./content-types');
+const { parseTagList, cleanModelLookTags, validateLookTagInput } = require('./look-tags');
 const { buildCredentialFields, validateModelCredentials, modelCredentialsChanged, MODEL_WRITE_FIELDS, buildModelWriteColumns, buildModelInsert, buildModelUpdate, isDuplicateEmailError } = require('./model-credentials');
 const { corsOptionsForRequest, browserSecurityHeaders } = require('./security');
 const { MODEL_ASSIGNMENT_FIELDS, toModelPosts } = require('./model-post');
@@ -32,11 +33,14 @@ const { applyModelReaction, upsertFeedback } = require('./model-reactions');
 const { effectiveNicheExpr } = require('./sort-status');
 const { modelCanAccessPost } = require('./model-access');
 const { getCreators } = require('./creators-mix');
+const { validateCreatorLookTag } = require('./look-match');
 const { registerSortRoutes, redecideNeedsLook } = require('./sort-routes');
 const { runAutoSort } = require('./sort-runner');
 const { modelScopeClause } = require('./model-scope');
 const { registerWorkspaceRoutes } = require('./workspace-routes');
 const { approveForModel } = require('./workspaces');
+const { reelLookMatch } = require('./look-match');
+const { loadTaste, tasteForFeed, refreshTaste } = require('./model-taste');
 
 const app = express();
 app.disable('x-powered-by');
@@ -223,6 +227,7 @@ const requireModel = asyncHandler(async (req, res, next) => {
 app.use('/scrape', requireAdmin);
 app.use('/content', requireAdmin);
 app.use('/content-types', requireAdmin);
+app.use('/look-tags', requireAdmin);
 app.use('/creators', requireAdmin);
 app.use('/engagement', requireAdmin);
 app.use('/export', requireAdmin);
@@ -415,8 +420,46 @@ app.delete('/content-types/:id', asyncHandler(async (req, res) => {
   res.json({ ok: true });
 }));
 
+app.get('/look-tags', asyncHandler(async (req, res) => {
+  res.json((await pool.query('SELECT id, value, label, category, sort_order FROM look_tags ORDER BY category, sort_order, label')).rows);
+}));
+
+app.post('/look-tags', asyncHandler(async (req, res) => {
+  const tag = validateLookTagInput(req.body);
+  if (!tag.ok) return res.status(400).json({ error: tag.error });
+  const inserted = await pool.query(`INSERT INTO look_tags (value, label, category, sort_order, created_at)
+    VALUES ($1, $2, $3, (SELECT COALESCE(MAX(sort_order), -1) + 1 FROM look_tags), $4)
+    ON CONFLICT (value) DO NOTHING RETURNING id, value, label, category, sort_order`,
+  [tag.value, tag.label, tag.category, new Date().toISOString()]);
+  if (inserted.rows.length) return res.status(201).json(inserted.rows[0]);
+  res.json((await pool.query('SELECT id, value, label, category, sort_order FROM look_tags WHERE value = $1', [tag.value])).rows[0]);
+}));
+
+app.delete('/look-tags/:id', asyncHandler(async (req, res) => {
+  await pool.query('DELETE FROM look_tags WHERE id = $1', [Number(req.params.id)]);
+  res.json({ ok: true });
+}));
+
 app.get('/creators', asyncHandler(async (req, res) => {
   res.json(await getCreators(pool));
+}));
+
+app.post('/creators/:handle/look-tags', asyncHandler(async (req, res) => {
+  const username = req.params.handle.trim().replace(/^@/, '').toLowerCase();
+  if (!username) return res.status(400).json({ error: 'Creator is required' });
+  const tag = await validateCreatorLookTag(pool, req.body?.tag);
+  if (!tag.ok) return res.status(400).json({ error: tag.error });
+  await pool.query(`INSERT INTO creator_look_tags (username, tag, added_at) VALUES ($1, $2, $3)
+    ON CONFLICT (username, tag) DO NOTHING`, [username, tag.tag, new Date().toISOString()]);
+  res.json({ ok: true });
+}));
+
+app.delete('/creators/:handle/look-tags/:tag', asyncHandler(async (req, res) => {
+  const username = req.params.handle.trim().replace(/^@/, '').toLowerCase();
+  const tag = await validateCreatorLookTag(pool, req.params.tag);
+  if (!tag.ok) return res.status(400).json({ error: tag.error });
+  await pool.query('DELETE FROM creator_look_tags WHERE username = $1 AND tag = $2', [username, tag.tag]);
+  res.json({ ok: true });
 }));
 
 app.post('/content/:id/archive', async (req, res) => {
@@ -981,7 +1024,7 @@ app.get('/models/niches/available', async (req, res) => {
 // credential columns from model-credentials.js. 'role' is deliberately excluded — see
 // buildCredentialFields. Both handlers below build columns/placeholders/params by
 // iterating THIS constant against a hand-built `merged` object — never Object.keys(req.body).
-const MODEL_BASE_FIELDS = ['name', 'primary_niche', 'secondary_niches', 'delivery_method', 'delivery_contact', 'delivery_day'];
+const MODEL_BASE_FIELDS = ['name', 'primary_niche', 'secondary_niches', 'delivery_method', 'delivery_contact', 'delivery_day', 'look_tags'];
 const MODEL_ALL_WRITE_FIELDS = [...MODEL_BASE_FIELDS, ...MODEL_WRITE_FIELDS];
 
 async function validateRequestedNiches(primaryNiche, secondaryNiches) {
@@ -1000,10 +1043,11 @@ async function validateRequestedNiches(primaryNiche, secondaryNiches) {
 // the row, so they were left as-is.
 app.get('/models', async (req, res) => {
   const result = await pool.query(
-    `SELECT id, name, primary_niche, secondary_niches, delivery_method, delivery_contact, delivery_day, status, email, role, login_enabled, notion_page_id, created_at, updated_at
+    `SELECT id, name, primary_niche, secondary_niches, delivery_method, delivery_contact, delivery_day, look_tags, status, email, role, login_enabled, notion_page_id, created_at, updated_at
      FROM models WHERE status = 'active' ORDER BY created_at DESC`
   );
-  res.json(result.rows);
+  const vocab = (await pool.query('SELECT value FROM look_tags')).rows;
+  res.json(result.rows.map(model => ({ ...model, look_tags: cleanModelLookTags(parseTagList(model.look_tags), vocab) })));
 });
 
 app.post('/models', async (req, res) => {
@@ -1019,6 +1063,7 @@ app.post('/models', async (req, res) => {
     delivery_method: delivery_method || 'whatsapp',
     delivery_contact: delivery_contact || '',
     delivery_day: delivery_day || 'monday',
+    look_tags: JSON.stringify(cleanModelLookTags(req.body.look_tags, (await pool.query('SELECT value FROM look_tags')).rows)),
     ...buildCredentialFields(req.body),
   };
   const { sql, params } = buildModelInsert(merged, MODEL_ALL_WRITE_FIELDS);
@@ -1048,6 +1093,7 @@ app.put('/models/:id', async (req, res) => {
     delivery_method: delivery_method || 'whatsapp',
     delivery_contact: delivery_contact || '',
     delivery_day: delivery_day || 'monday',
+    ...(req.body.look_tags !== undefined ? { look_tags: JSON.stringify(cleanModelLookTags(req.body.look_tags, (await pool.query('SELECT value FROM look_tags')).rows)) } : {}),
     ...buildCredentialFields(req.body),
   };
   const { sql, params } = buildModelUpdate(merged, MODEL_ALL_WRITE_FIELDS, modelId);
@@ -1425,18 +1471,21 @@ const { buildMeFeedQuery, nicheVisibilityClause, parseNiches, allowedNicheOption
 
 app.get('/me/feed', asyncHandler(async (req, res) => {
   const modelId = req.session.user.modelId; // requireModel guarantees this
-  const m = await pool.query('SELECT primary_niche, secondary_niches FROM models WHERE id = $1', [modelId]);
+  const m = await pool.query('SELECT primary_niche, secondary_niches, look_tags FROM models WHERE id = $1', [modelId]);
   if (m.rows.length === 0) return res.status(404).json({ error: 'Model not found' });
   const myNiches = parseNiches(m.rows[0]);
   const page = Number(req.query.page) || 1;
   const sel = (req.query.niche || '').trim();
   const shuffle = req.query.refresh === '1';
+  const vocabulary = await pool.query('SELECT value FROM look_tags');
+  const lookTags = cleanModelLookTags(parseTagList(m.rows[0].look_tags), vocabulary.rows);
+  const taste = tasteForFeed(await loadTaste(pool, modelId), new Set(vocabulary.rows.map(row => row.value)));
 
   const pageSize = 24;
   let build, activeNiche;
   if (sel && !myNiches.includes(sel)) return res.status(403).json({ error: 'Niche not available for this model' });
-  if (sel) build = buildMeFeedQuery([sel], { page, limit: pageSize + 1, pageSize, shuffle, modelId });
-  else build = buildMeFeedQuery(myNiches, { page, limit: pageSize + 1, pageSize, shuffle, modelId });
+  if (sel) build = buildMeFeedQuery([sel], { page, limit: pageSize + 1, pageSize, shuffle, modelId, lookTags, taste });
+  else build = buildMeFeedQuery(myNiches, { page, limit: pageSize + 1, pageSize, shuffle, modelId, lookTags, taste });
   activeNiche = sel || null;
 
   // The content-type vocabulary powers the switcher (models can't hit the admin /content-types route).
@@ -1446,7 +1495,8 @@ app.get('/me/feed', asyncHandler(async (req, res) => {
   if (!build.sql) return res.json({ posts: [], niches: myNiches, availableNiches, activeNiche, hasMore: false });
   const r = await pool.query(build.sql, build.params);
   res.json({
-    posts: toModelPosts(r.rows.slice(0, pageSize)),
+    posts: toModelPosts(r.rows.slice(0, pageSize)).map((post, i) => ({ ...post,
+      look_match: reelLookMatch(lookTags, parseTagList(r.rows[i].ai_look_tags)) })),
     niches: myNiches,
     availableNiches,
     activeNiche,
@@ -1535,6 +1585,7 @@ app.post('/me/feedback/:postId', asyncHandler(async (req, res) => {
     return res.json({ ok: true, ...state });
   }
   await upsertFeedback(pool, { modelId: p.modelId, postId: p.postId, feedback, notes });
+  await refreshTaste(pool, p.modelId);
   res.json({ ok: true, feedback });
 }));
 

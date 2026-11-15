@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { archivePost, createSuggestedType, getContentTypes, getNeedsLook, setPostContentType } from '../api';
 import API_URL from '../api-base';
+import { LookTagChips } from '../components/LookTags';
 
 const PAGE_SIZE = 24;
 
@@ -114,6 +115,7 @@ export default function NeedsLookTab({ onTotalChange }) {
                   {post.ai_confidence != null && ` · ${Math.round(Number(post.ai_confidence) * 100)}% confidence`}
                 </p>
                 <p className="text-sm leading-relaxed text-gray-300">{post.ai_description || 'No description available.'}</p>
+                <LookTagChips tags={post.ai_look_tags} />
                 {post.ai_error && <p className="text-xs text-red-300">{post.ai_error}</p>}
                 <div className="flex flex-wrap gap-1.5" aria-label="Choose a content type">
                   {types.map((type) => (

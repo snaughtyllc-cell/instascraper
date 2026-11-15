@@ -1,6 +1,7 @@
 const assert = require('node:assert/strict');
 const Database = require('better-sqlite3');
-const { ensureWorkspaceTables } = require('../workspace-migration');
+const { ensureWorkspaceTables, ensureLookTables } = require('../workspace-migration');
+const { seedLookTags } = require('../look-tags');
 
 async function makeWorkspaceDb(t) {
   const sqlite = new Database(':memory:');
@@ -33,6 +34,8 @@ async function makeWorkspaceDb(t) {
     catch (error) { sqlite.exec('ROLLBACK'); throw error; }
   };
   await ensureWorkspaceTables(pool, { isPg: false });
+  await ensureLookTables(pool, { isPg: false });
+  await seedLookTags(pool);
   return pool;
 }
 

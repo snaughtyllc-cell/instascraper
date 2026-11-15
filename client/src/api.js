@@ -22,6 +22,13 @@ export const getContentTypes = () => api.get('/content-types');
 export const addContentType = (label) => api.post('/content-types', { label });
 export const deleteContentType = (id) => api.delete(`/content-types/${id}`);
 export const getCreators = () => api.get('/creators');
+export const getLookTags = () => api.get('/look-tags');
+export const addLookTag = (label, category) => api.post('/look-tags', { label, category });
+export const deleteLookTag = (id) => api.delete(`/look-tags/${id}`);
+export const addCreatorLookTag = (handle, tag) => api.post(`/creators/${encodeURIComponent(handle)}/look-tags`, { tag });
+export const removeCreatorLookTag = (handle, tag) => api.delete(`/creators/${encodeURIComponent(handle)}/look-tags/${encodeURIComponent(tag)}`);
+export const getLookBackfillEstimate = () => api.get('/sort/look-backfill/estimate');
+export const startLookBackfill = () => api.post('/sort/look-backfill');
 
 export const exportContent = (format = 'json', contentType = '') => {
   const params = new URLSearchParams({ format });
@@ -122,6 +129,7 @@ export default api;
 
 // Model workspaces
 export const getWorkspace = (id) => api.get(`/workspaces/${id}`);
+export const getWorkspaceTaste = (id) => api.get(`/workspaces/${id}/taste`);
 export const getWorkspaceCreators = (id) => api.get(`/workspaces/${id}/creators`);
 export const addWorkspaceCreator = (id, username) => api.post(`/workspaces/${id}/creators`, { username });
 export const removeWorkspaceCreator = (id, username) => api.delete(`/workspaces/${id}/creators/${encodeURIComponent(username)}`);

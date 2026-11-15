@@ -2,7 +2,7 @@ const fs = require('node:fs/promises');
 const path = require('node:path');
 const { parseNiches } = require('./me-feed');
 const { sortConfig } = require('./sort-status');
-const { describeReel, estimateCostUsd, makeGeminiClient } = require('./gemini-sort');
+const { describeReel, estimateCostUsd, makeGeminiClient, cleanAiLookTags } = require('./gemini-sort');
 const { downloadVideo, tempVideoPath, DEFAULT_VIDEO_DIR } = require('./videos');
 const { attemptsToday, withSortLock } = require('./sort-runner');
 
@@ -44,6 +44,7 @@ async function routeCandidate(username, {
       WHERE LOWER(username)=$1 AND ai_classified_at IS NULL ORDER BY rank,id LIMIT $2`,
     [handle, Math.min(3, available)])).rows;
     const types = (await pool.query('SELECT value,label FROM content_types ORDER BY sort_order,label')).rows;
+    const lookTags = (await pool.query("SELECT value,label,category FROM look_tags WHERE category <> 'custom' ORDER BY category,sort_order,label")).rows;
     for (const reel of candidates) {
       // A unique candidate key cannot collide with posts.id in the shared cache.
       const filePath = `${tempVideoPath(`candidate-${reel.id}`, videoDir)}.mp4`;
@@ -54,11 +55,11 @@ async function routeCandidate(username, {
           const client = makeGeminiClient(process.env.GEMINI_API_KEY);
           describe = input => describeReel(input, { client, model: cfg.model });
         }
-        const ai = await describe({ filePath, caption: reel.caption || '', handle, types });
+        const ai = await describe({ filePath, caption: reel.caption || '', handle, types, lookTags });
         const cost = estimateCostUsd(ai.usage || {}, cfg);
         await pool.query(`UPDATE suggested_reels SET ai_type=$1, ai_confidence=$2, ai_error=NULL,
-          ai_classified_at=$3, ai_cost_usd=$4 WHERE id=$5`,
-        [ai.type, ai.confidence, new Date().toISOString(), cost, reel.id]);
+          ai_classified_at=$3, ai_cost_usd=$4, ai_look_tags=$5 WHERE id=$6`,
+        [ai.type, ai.confidence, new Date().toISOString(), cost, JSON.stringify(cleanAiLookTags(ai.lookTags, lookTags)), reel.id]);
         result.sorted++;
         console.log(`[Route] @${handle} reel=${reel.id} estimated_usd=${cost.toFixed(6)}`);
       } catch (error) {

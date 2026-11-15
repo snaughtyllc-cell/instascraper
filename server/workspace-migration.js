@@ -33,4 +33,33 @@ async function ensureWorkspaceTables(db, { isPg }) {
   }
 }
 
-module.exports = { ensureWorkspaceTables, SUGGESTED_REEL_AI_COLUMNS };
+async function ensureLookTables(db, { isPg }) {
+  const id = isPg ? 'SERIAL PRIMARY KEY' : 'INTEGER PRIMARY KEY AUTOINCREMENT';
+  await db.query(`CREATE TABLE IF NOT EXISTS look_tags (
+    id ${id}, value TEXT UNIQUE NOT NULL, label TEXT NOT NULL,
+    category TEXT NOT NULL, sort_order INTEGER DEFAULT 0, created_at TEXT
+  )`);
+  await db.query(`CREATE TABLE IF NOT EXISTS creator_look_tags (
+    username TEXT NOT NULL, tag TEXT NOT NULL, added_at TEXT,
+    PRIMARY KEY (username, tag)
+  )`);
+  await db.query(`CREATE TABLE IF NOT EXISTS model_taste (
+    model_id INTEGER NOT NULL, feature TEXT NOT NULL, affinity REAL NOT NULL,
+    positives INTEGER DEFAULT 0, negatives INTEGER DEFAULT 0, updated_at TEXT,
+    PRIMARY KEY (model_id, feature)
+  )`);
+  await db.query(`CREATE TABLE IF NOT EXISTS look_backfill_attempts (
+    id ${id}, post_id INTEGER NOT NULL, attempted_at TEXT NOT NULL,
+    cost_usd REAL NOT NULL DEFAULT 0
+  )`);
+  for (const [table, column] of [['posts', 'ai_look_tags'], ['suggested_reels', 'ai_look_tags'], ['models', 'look_tags']]) {
+    const { rows } = await db.query(isPg
+      ? `SELECT column_name AS name FROM information_schema.columns WHERE table_schema = current_schema() AND table_name = '${table}'`
+      : `PRAGMA table_info(${table})`);
+    if (!rows.some(row => row.name === column)) {
+      await db.query(`ALTER TABLE ${table} ADD COLUMN ${isPg ? 'IF NOT EXISTS ' : ''}${column} TEXT`);
+    }
+  }
+}
+
+module.exports = { ensureWorkspaceTables, ensureLookTables, SUGGESTED_REEL_AI_COLUMNS };

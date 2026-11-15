@@ -8,6 +8,7 @@ const { computeFit, routeCandidate } = require('./candidate-routing');
 const { sortConfig } = require('./sort-status');
 const { runAutoSort, sortUsage } = require('./sort-runner');
 const { videoFilePath } = require('./videos');
+const { ensureLookTables } = require('./workspace-migration');
 
 const talking = { ai_type: 'talking', ai_confidence: 0.9, ai_classified_at: '2026-11-15T00:00:00Z', ai_error: null };
 const dance = { ...talking, ai_type: 'dance' };
@@ -44,6 +45,7 @@ async function setup(t, { source = 'Mia.Talks', count = 3 } = {}) {
     if (stmt.reader) { const rows = stmt.all(...params); return { rows, rowCount: rows.length }; }
     return { rows: [], rowCount: stmt.run(...params).changes };
   } };
+  await ensureLookTables(pool, { isPg: false });
   const videoDir = await fs.mkdtemp(path.join(os.tmpdir(), 'candidate-routing-'));
   t.after(async () => { sqlite.close(); await fs.rm(videoDir, { recursive: true, force: true }); });
   return {
@@ -182,4 +184,15 @@ test('candidate sorting and post sorting share the daily cap during concurrent r
   assert.equal((await routing).sorted, 1);
   assert.equal((await sorting).classified, 0);
   assert.equal((await sortUsage(deps.pool, deps.cfg)).today, 1);
+});
+test('candidate reel stores ai_look_tags', async t => {
+  const deps = await setup(t, { count: 1 });
+  deps.pool.sqlite.exec(`CREATE TABLE IF NOT EXISTS look_tags(value TEXT, label TEXT, category TEXT, sort_order INTEGER);
+    INSERT INTO look_tags(value,label,category) VALUES('brunette','Brunette','hair'),('private-custom','Private custom','custom')`);
+  deps.describe = async input => {
+    assert.deepEqual(input.lookTags.map(tag => tag.value), ['brunette']);
+    return { type: 'talking', confidence: 0.9, lookTags: ['brunette'] };
+  };
+  await routeCandidate('candidate', deps);
+  assert.equal(deps.pool.sqlite.prepare('SELECT ai_look_tags FROM suggested_reels').get().ai_look_tags, '["brunette"]');
 });

@@ -7,11 +7,13 @@ function makeDb(t) {
   const sqlite = new Database(':memory:');
   t.after(() => sqlite.close());
   sqlite.exec(`CREATE TABLE model_creators (model_id INTEGER, username TEXT);
+  CREATE TABLE look_tags (value TEXT);
+  CREATE TABLE creator_look_tags (username TEXT, tag TEXT);
   CREATE TABLE models (id INTEGER PRIMARY KEY, name TEXT);
   CREATE TABLE posts (
     id INTEGER PRIMARY KEY, account_handle TEXT, content_type TEXT,
     sort_status TEXT DEFAULT 'unsorted', archived INTEGER DEFAULT 0,
-    soft_deleted INTEGER DEFAULT 0
+    soft_deleted INTEGER DEFAULT 0, ai_look_tags TEXT
   )`);
   return {
     sqlite,
@@ -27,7 +29,7 @@ test('creators mix percentages exclude an unsorted reel', async (t) => {
     (3, 'creator', 'dance', 'auto'),
     (4, 'creator', 'dance', 'unsorted')`);
   assert.deepEqual(await getCreators(db), [{
-    account_handle: 'creator', post_count: 4, owners: [],
+    account_handle: 'creator', post_count: 4, owners: [], look: [],
     mix: [{ type: 'talking', pct: 67 }, { type: 'dance', pct: 33 }],
   }]);
 });
@@ -40,7 +42,7 @@ test('creator mixes and post counts exclude archived and deleted reels', async (
     (3, 'creator', 'dance', 'manual', 0, 1),
     (4, 'hidden', 'dance', 'manual', 1, 0)`);
   assert.deepEqual(await getCreators(db), [{
-    account_handle: 'creator', post_count: 1, owners: [], mix: [{ type: 'talking', pct: 100 }],
+    account_handle: 'creator', post_count: 1, owners: [], look: [], mix: [{ type: 'talking', pct: 100 }],
   }]);
 });
 
@@ -53,7 +55,7 @@ test('creator handles are case normalized into one mix', async (t) => {
     (4, '', 'dance', 'auto'),
     (5, NULL, 'dance', 'auto')`);
   assert.deepEqual(await getCreators(db), [{
-    account_handle: 'creator', post_count: 3, owners: [],
+    account_handle: 'creator', post_count: 3, owners: [], look: [],
     mix: [{ type: 'talking', pct: 67 }, { type: 'dance', pct: 33 }],
   }]);
 });
@@ -64,7 +66,7 @@ test('a creator with no decided reel has an empty mix', async (t) => {
     (1, 'creator', 'dance', 'needs_look'),
     (2, 'creator', 'dance', 'unsorted'),
     (3, 'creator', NULL, 'manual')`);
-  assert.deepEqual(await getCreators(db), [{ account_handle: 'creator', post_count: 3, owners: [], mix: [] }]);
+  assert.deepEqual(await getCreators(db), [{ account_handle: 'creator', post_count: 3, owners: [], mix: [], look: [] }]);
 });
 
 test('creator mixes include every model owner', async t => {

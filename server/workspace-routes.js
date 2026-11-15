@@ -2,6 +2,14 @@ const { buildMeFeedQuery, parseNiches } = require('./me-feed');
 const { addCreator, removeCreator, listWorkspaceCreators, approveForModel, normalizeUsername } = require('./workspaces');
 const { confirmAllProposals } = require('./proposals');
 const { attachTopReels } = require('./scraper');
+const { parseTagList, cleanModelLookTags } = require('./look-tags');
+const { reelLookMatch, creatorLookProfiles, creatorLookMatch, candidateLookProfile } = require('./look-match');
+const { loadTaste, tasteForFeed, creatorTaste } = require('./model-taste');
+
+async function workspaceLook(pool, model) {
+  const { rows } = await pool.query('SELECT value FROM look_tags');
+  return { tags: cleanModelLookTags(parseTagList(model.look_tags), rows), known: new Set(rows.map(row => row.value)) };
+}
 
 function registerWorkspaceRoutes(app, { pool }) {
   const wrap = handler => async (req, res, next) => {
@@ -22,7 +30,8 @@ function registerWorkspaceRoutes(app, { pool }) {
   app.get('/workspaces/:modelId', wrap(async (req, res) => {
     const { rows } = await pool.query('SELECT COUNT(*) AS count FROM model_creators WHERE model_id = $1', [req.workspaceModelId]);
     const creatorCount = Number(rows[0].count);
-    res.json({ model: req.workspaceModel, creatorCount, fallback: creatorCount === 0 });
+    const { tags } = await workspaceLook(pool, req.workspaceModel);
+    res.json({ model: { ...req.workspaceModel, look_tags: tags }, creatorCount, fallback: creatorCount === 0 });
   }));
   app.get('/workspaces/:modelId/creators', wrap(async (req, res) => {
     res.json(await listWorkspaceCreators(pool, req.workspaceModelId));
@@ -36,13 +45,23 @@ function registerWorkspaceRoutes(app, { pool }) {
     res.json(await removeCreator(pool, req.workspaceModelId, req.params.username));
   }));
   app.get('/workspaces/:modelId/reels', wrap(async (req, res) => {
-    const built = buildMeFeedQuery(parseNiches(req.workspaceModel), { modelId: req.workspaceModelId, page: Math.max(1, parseInt(req.query.page, 10) || 1) });
+    const { tags, known } = await workspaceLook(pool, req.workspaceModel);
+    const taste = tasteForFeed(await loadTaste(pool, req.workspaceModelId), known);
+    const built = buildMeFeedQuery(parseNiches(req.workspaceModel), { modelId: req.workspaceModelId, lookTags: tags, taste, page: Math.max(1, parseInt(req.query.page, 10) || 1) });
     const result = built.sql ? await pool.query(built.sql, built.params) : { rows: [] };
-    res.json(result.rows);
+    res.json(result.rows.map(row => ({ ...row, look_match: reelLookMatch(tags, parseTagList(row.ai_look_tags)) })));
   }));
   app.get('/workspaces/:modelId/proposals', wrap(async (req, res) => {
     const result = await pool.query("SELECT * FROM model_creator_proposals WHERE model_id = $1 AND status = 'pending' ORDER BY share DESC, username", [req.workspaceModelId]);
-    res.json(result.rows);
+    const { tags } = await workspaceLook(pool, req.workspaceModel);
+    const profiles = await creatorLookProfiles(pool, result.rows.map(row => row.username));
+    const taste = await loadTaste(pool, req.workspaceModelId);
+    const rows = result.rows.map(row => {
+      const profile = profiles.get(row.username) || new Map();
+      return { ...row, look_match: creatorLookMatch(tags, profile), taste_score: creatorTaste(taste, row.username, profile) };
+    });
+    rows.sort((a, b) => Number(b.share) - Number(a.share) || (b.look_match + b.taste_score) - (a.look_match + a.taste_score));
+    res.json(rows);
   }));
   app.post('/workspaces/:modelId/proposals/confirm-all', wrap(async (req, res) => {
     res.json(await confirmAllProposals(pool, req.workspaceModelId));
@@ -71,7 +90,21 @@ function registerWorkspaceRoutes(app, { pool }) {
       const result = await pool.query(`SELECT * FROM suggested_reels WHERE LOWER(username) IN (${placeholders}) ORDER BY rank`, usernames);
       reels = result.rows.map(row => ({ ...row, username: normalizeUsername(row.username) }));
     }
-    res.json(attachTopReels(rows, reels));
+    const { tags, known } = await workspaceLook(pool, req.workspaceModel);
+    const taste = await loadTaste(pool, req.workspaceModelId);
+    const ranked = attachTopReels(rows, reels).map(row => {
+      const profile = new Map([...candidateLookProfile(row.top_reels)].filter(([tag]) => known.has(tag)));
+      return { ...row, look_match: creatorLookMatch(tags, profile), taste_score: creatorTaste(taste, row.username, profile) };
+    });
+    ranked.sort((a, b) => Number(b.fit) - Number(a.fit) || (b.look_match + b.taste_score) - (a.look_match + a.taste_score) || Number(b.suggestion_score) - Number(a.suggestion_score));
+    res.json(ranked);
+  }));
+  app.get('/workspaces/:modelId/taste', wrap(async (req, res) => {
+    const { rows } = await pool.query('SELECT feature, affinity, positives, negatives FROM model_taste WHERE model_id = $1 ORDER BY affinity DESC, feature', [req.workspaceModelId]);
+    const { known } = await workspaceLook(pool, req.workspaceModel);
+    const current = rows.filter(row => !row.feature.startsWith('tag:') || known.has(row.feature.slice(4)));
+    res.json({ liked: current.filter(row => Number(row.affinity) > 0).slice(0, 5),
+      disliked: current.filter(row => Number(row.affinity) < 0).sort((a, b) => Number(a.affinity) - Number(b.affinity)).slice(0, 5) });
   }));
   app.post('/workspaces/:modelId/suggestions/:username/approve', wrap(async (req, res) => {
     const username = normalizeUsername(req.params.username);

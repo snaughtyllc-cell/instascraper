@@ -5,6 +5,7 @@ const { groupSuggestions, redecideNeedsLook, registerSortRoutes } = require('./s
 const { makeSortDb } = require('./test-support/sort-db');
 const { appRequest } = require('./test-support/app-request');
 const { sortConfig } = require('./sort-status');
+const { sortUsage } = require('./sort-runner');
 
 const cfg = { ...sortConfig({ GEMINI_API_KEY: 'fake-key' }), dailyMax: 100 };
 function result(type, confidence = 0.9) {
@@ -244,4 +245,92 @@ test('backfill waits for an overlapping automatic sort before finishing catch-up
     completed += 1;
     return { classified: completed === 1 ? 1 : 0, errored: 0, skippedCap: 0 };
   } });
+});
+test('redecide passes non-custom vocabulary and stores returned look tags', async t => {
+  const pool = await makeSortDb();
+  t.after(() => pool.sqlite.close());
+  pool.sqlite.exec(`CREATE TABLE IF NOT EXISTS look_tags(value TEXT,label TEXT,category TEXT,sort_order INTEGER);
+    DELETE FROM look_tags;
+    INSERT INTO look_tags(value,label,category) VALUES('bedroom','Bedroom','setting'),('private-custom','Private custom','custom');
+    INSERT INTO posts(id,sort_status,ai_description) VALUES(1,'needs_look','A person speaking.')`);
+  await redecideNeedsLook({ pool, cfg, redecide: async input => {
+    assert.deepEqual(input.lookTags.map(tag => tag.value), ['bedroom']);
+    return { ...result('talking'), lookTags: ['bedroom'] };
+  } });
+  assert.equal(pool.sqlite.prepare('SELECT ai_look_tags FROM posts').get().ai_look_tags, '["bedroom"]');
+});
+
+test('look-backfill estimate reports cached sorted untagged reels', async t => {
+  const pool = await makeSortDb();
+  t.after(() => pool.sqlite.close());
+  pool.sqlite.exec("INSERT INTO posts(id,sort_status,video_cache_status) VALUES(1,'manual','cached'),(2,'auto',NULL),(3,'unsorted','cached')");
+  const response = await inProcessRequest(pool, 'GET', '/sort/look-backfill/estimate');
+  assert.equal(response.status, 200);
+  assert.equal(response.body.count, 1);
+  assert.ok(Math.abs(response.body.estUsd - 0.00127) < 1e-10);
+});
+
+test('look-backfill starts in background, avoids duplicate loops and stops at cap', async t => {
+  const pool = await makeSortDb();
+  t.after(() => pool.sqlite.close());
+  let release;
+  const active = new Promise(resolve => { release = resolve; });
+  let calls = 0;
+  const request = makeRequest(pool, { runLookBackfill: async () => {
+    calls++;
+    await active;
+    return { tagged: 1, errored: 0, skippedCap: 1 };
+  } });
+  assert.deepEqual((await request('POST', '/sort/look-backfill')).body, { started: true });
+  assert.deepEqual((await request('POST', '/sort/look-backfill')).body, { started: true });
+  assert.equal(calls, 1);
+  release();
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(calls, 1);
+});
+
+test('redecide respects the shared daily cap before calling Gemini', async t => {
+  const pool = await makeSortDb();
+  t.after(() => pool.sqlite.close());
+  pool.sqlite.exec("INSERT INTO posts(id,sort_status,ai_description) VALUES(1,'needs_look','Speaking')");
+  let calls = 0;
+  await redecideNeedsLook({ pool, cfg: { ...cfg, dailyMax: 0 }, redecide: async () => { calls++; return result('talking'); } });
+  assert.equal(calls, 0);
+});
+
+test('redecide errors consume the cap and log estimated cost', async t => {
+  const pool = await makeSortDb();
+  t.after(() => pool.sqlite.close());
+  pool.sqlite.exec("INSERT INTO posts(id,sort_status,ai_description) VALUES(1,'needs_look','Speaking'),(2,'needs_look','Speaking')");
+  let calls = 0;
+  const options = { pool, cfg: { ...cfg, dailyMax: 1 }, redecide: async () => { calls++; throw new Error('Fake paid failure'); } };
+  await redecideNeedsLook(options);
+  await redecideNeedsLook(options);
+  assert.equal(calls, 1);
+  const usage = await sortUsage(pool, cfg);
+  assert.equal(usage.today, 1);
+  assert.equal(usage.reels30d, 1);
+  assert.ok(usage.usd30d > 0);
+});
+
+test('redecide shares the sort lock and counts successful cost once', async t => {
+  const pool = await makeSortDb();
+  t.after(() => pool.sqlite.close());
+  pool.sqlite.exec("INSERT INTO posts(id,sort_status,ai_description) VALUES(1,'needs_look','Speaking')");
+  let start, release;
+  const started = new Promise(resolve => { start = resolve; });
+  const { withSortLock } = require('./sort-runner');
+  const activeSort = withSortLock(async () => { start(); await new Promise(resolve => { release = resolve; }); });
+  await started;
+  let calls = 0;
+  const deciding = redecideNeedsLook({ pool, cfg, redecide: async () => { calls++; return result('talking'); } });
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(calls, 0);
+  release();
+  await activeSort;
+  await deciding;
+  const usage = await sortUsage(pool, cfg);
+  assert.equal(usage.today, 1);
+  const post = pool.sqlite.prepare('SELECT ai_cost_usd FROM posts').get();
+  assert.ok(Math.abs(usage.usd30d - post.ai_cost_usd) < 1e-10);
 });

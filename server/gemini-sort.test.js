@@ -28,7 +28,7 @@ test('request uses low media resolution, json schema and the model', async t => 
   assert.equal(req.model, 'gemini-3.5-flash-lite');
   assert.equal(req.config.mediaResolution, 'MEDIA_RESOLUTION_LOW');
   assert.equal(req.config.responseMimeType, 'application/json');
-  assert.deepEqual(Object.keys(req.config.responseJsonSchema.properties), ['type', 'confidence', 'description', 'suggested_type']);
+  assert.deepEqual(Object.keys(req.config.responseJsonSchema.properties), ['type', 'confidence', 'description', 'suggested_type', 'look_tags']);
   assert.deepEqual(req.config.thinkingConfig, { thinkingLevel: 'MINIMAL' });
   const parts = req.contents[0].parts;
   assert.equal(parts[0].videoMetadata.fps, 1);
@@ -77,4 +77,44 @@ test('empty type list permits only null without an invalid empty enum', async ()
   const client = fake({ text: '{"type":null,"confidence":0,"description":"Walking","suggested_type":"Lifestyle"}' });
   await redecideFromDescription({ types: [] }, { client });
   assert.deepEqual(client.calls[0].config.responseJsonSchema.properties.type, { type: 'null' });
+});
+
+const lookTags = [
+  { value: 'brunette', label: 'Brunette', category: 'hair' },
+  { value: 'bedroom', label: 'Bedroom', category: 'setting' },
+  { value: 'private-custom', label: 'Private custom', category: 'custom' },
+];
+test('schema lists only non-custom look tags, max 5', async () => {
+  const client = fake();
+  await redecideFromDescription({ types, lookTags }, { client });
+  const schema = client.calls[0].config.responseJsonSchema;
+  assert.deepEqual(schema.properties.look_tags, { type: 'array', items: { type: 'string', enum: ['brunette', 'bedroom'] }, maxItems: 5 });
+  assert.ok(schema.required.includes('look_tags'));
+  assert.ok(!JSON.stringify(client.calls[0]).includes('private-custom'));
+  assert.ok(!JSON.stringify(client.calls[0]).includes('Private custom'));
+});
+test('prompt forbids inferring ethnicity, age and body attributes', async t => {
+  const client = fake();
+  await describeReel({ filePath: await video(t), types, lookTags }, { client });
+  const prompt = client.calls[0].contents[0].parts[1].text;
+  assert.match(prompt, /never infer ethnicity/);
+  for (const forbidden of ['race', 'age', 'body type', 'other personal attributes']) assert.ok(prompt.includes(forbidden));
+  for (const visible of ['hair', 'makeup', 'fashion', 'aesthetic', 'setting']) assert.ok(prompt.includes(visible));
+});
+test('unknown and custom look tags dropped', async () => {
+  const client = fake({ text: JSON.stringify({ type: 'dance', confidence: 0.9, look_tags: ['brunette', 'private-custom', 'unknown', 'bedroom', 'brunette'] }) });
+  const result = await redecideFromDescription({ types, lookTags }, { client });
+  assert.deepEqual(result.lookTags, ['brunette', 'bedroom']);
+});
+test('no vocabulary → look_tags enum empty and result []', async () => {
+  const client = fake({ text: JSON.stringify({ look_tags: ['brunette'] }) });
+  const result = await redecideFromDescription({ types }, { client });
+  assert.deepEqual(client.calls[0].config.responseJsonSchema.properties.look_tags.items.enum, []);
+  assert.deepEqual(result.lookTags, []);
+});
+test('look tags capped at five and malformed output becomes an empty list', async () => {
+  const vocabulary = Array.from({ length: 8 }, (_, i) => ({ value: `tag-${i}`, category: 'aesthetic' }));
+  const client = fake({ text: JSON.stringify({ look_tags: vocabulary.map(tag => tag.value) }) });
+  assert.equal((await redecideFromDescription({ types, lookTags: vocabulary }, { client })).lookTags.length, 5);
+  assert.deepEqual((await redecideFromDescription({ types, lookTags }, { client: fake({ text: '{"look_tags":"brunette"}' }) })).lookTags, []);
 });

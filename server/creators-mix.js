@@ -1,4 +1,5 @@
 const { effectiveNicheExpr } = require('./sort-status');
+const { creatorLookProfiles, creatorLookList } = require('./look-match');
 
 async function getCreators(pool) {
   const niche = effectiveNicheExpr('p');
@@ -28,11 +29,13 @@ async function getCreators(pool) {
     creator.post_count += count;
     if (row.content_type) creator.mix.push({ type: row.content_type, count });
   }
+  const profiles = await creatorLookProfiles(pool, [...creators.keys()]);
   return [...creators.values()]
     .map((creator) => {
       const total = creator.mix.reduce((sum, item) => sum + item.count, 0);
       creator.mix.sort((a, b) => b.count - a.count || a.type.localeCompare(b.type));
       creator.mix = creator.mix.map(({ type, count }) => ({ type, pct: Math.round(count / total * 100) }));
+      creator.look = creatorLookList(profiles.get(creator.account_handle));
       return creator;
     })
     .sort((a, b) => b.post_count - a.post_count || a.account_handle.localeCompare(b.account_handle));

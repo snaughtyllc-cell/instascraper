@@ -6,6 +6,9 @@ const { applyModelReaction } = require('./model-reactions');
 function makeDb() {
   const sqlite = new Database(':memory:');
   sqlite.exec(`
+    CREATE TABLE posts (id INTEGER PRIMARY KEY, account_handle TEXT, content_type TEXT, ai_look_tags TEXT);
+    INSERT INTO posts (id,account_handle,content_type,ai_look_tags) VALUES (2,'mia','talking','["brunette"]'),(9,'other','dance','["glam"]');
+    CREATE TABLE model_taste (model_id INTEGER, feature TEXT, affinity REAL, positives INTEGER, negatives INTEGER, updated_at TEXT, PRIMARY KEY(model_id,feature));
     CREATE TABLE model_saved_posts (model_id INTEGER, post_id INTEGER, saved_at TEXT, PRIMARY KEY (model_id, post_id));
     CREATE TABLE model_post_feedback (
       model_id INTEGER, post_id INTEGER, feedback TEXT, notes TEXT, created_at TEXT, updated_at TEXT,
@@ -44,10 +47,12 @@ test('save and unsave preserve the saved/want-to-make invariant', async () => {
   await applyModelReaction(db, { modelId: 1, postId: 2, reaction: 'save', nowIso: '2026-07-12T00:00:00.000Z' });
   assert.ok(db.sqlite.prepare('SELECT 1 FROM model_saved_posts WHERE model_id=1 AND post_id=2').get());
   assert.strictEqual(db.sqlite.prepare('SELECT feedback FROM model_post_feedback WHERE model_id=1 AND post_id=2').get().feedback, 'want_to_make');
+  assert.strictEqual(db.sqlite.prepare("SELECT affinity FROM model_taste WHERE model_id=1 AND feature='creator:mia'").get().affinity, 1 / 3);
 
   await applyModelReaction(db, { modelId: 1, postId: 2, reaction: 'unsave' });
   assert.strictEqual(db.sqlite.prepare('SELECT 1 FROM model_saved_posts WHERE model_id=1 AND post_id=2').get(), undefined);
   assert.strictEqual(db.sqlite.prepare('SELECT 1 FROM model_post_feedback WHERE model_id=1 AND post_id=2').get(), undefined);
+  assert.strictEqual(db.sqlite.prepare('SELECT COUNT(*) AS n FROM model_taste WHERE model_id=1').get().n, 0);
 });
 
 test('not interested atomically removes a save and records the skip', async () => {
@@ -56,4 +61,5 @@ test('not interested atomically removes a save and records the skip', async () =
   await applyModelReaction(db, { modelId: 4, postId: 9, reaction: 'not_interested' });
   assert.strictEqual(db.sqlite.prepare('SELECT 1 FROM model_saved_posts WHERE model_id=4 AND post_id=9').get(), undefined);
   assert.strictEqual(db.sqlite.prepare('SELECT feedback FROM model_post_feedback WHERE model_id=4 AND post_id=9').get().feedback, 'not_my_style');
+  assert.strictEqual(db.sqlite.prepare("SELECT affinity FROM model_taste WHERE model_id=4 AND feature='creator:other'").get().affinity, -1 / 3);
 });

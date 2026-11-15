@@ -1,6 +1,6 @@
 const path = require('path');
 const { ensureSortStatus, SORT_COLUMNS } = require('./sort-migration');
-const { ensureWorkspaceTables } = require('./workspace-migration');
+const { ensureWorkspaceTables, ensureLookTables } = require('./workspace-migration');
 
 const USE_PG = !!process.env.DATABASE_URL;
 
@@ -457,6 +457,7 @@ async function initDB() {
 
   await ensureSortStatus(db, { isPg: USE_PG });
   await ensureWorkspaceTables(db, { isPg: USE_PG });
+  await ensureLookTables(db, { isPg: USE_PG });
 
   // [R1-#6] AFTER the migration loops (email now exists). Case-insensitive unique for
   // non-empty emails; partial + expression index works on Postgres AND SQLite.
@@ -479,6 +480,8 @@ async function initDB() {
 
   const { seedContentTypes } = require('./content-types');
   await seedContentTypes(db);
+  const { seedLookTags } = require('./look-tags');
+  await seedLookTags(db);
 
   console.log(`Database initialized (${USE_PG ? 'PostgreSQL' : 'SQLite'})`);
 }

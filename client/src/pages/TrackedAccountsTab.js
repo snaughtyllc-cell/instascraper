@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { getTrackedAccounts, addTrackedAccount, updateTrackedAccount, removeTrackedAccount, scrapeNow, getSchedulerStatus, triggerJob, scrapeTrackedBulk, getCreators, getContentTypes } from '../api';
+import { LookTagChips } from '../components/LookTags';
 
 function formatCount(n) {
   if (!n) return '0';
@@ -38,6 +39,7 @@ export default function TrackedAccountsTab() {
   const [newUsername, setNewUsername] = useState('');
   const [newTags, setNewTags] = useState('');
   const [creatorMix, setCreatorMix] = useState({});
+  const [creatorLook, setCreatorLook] = useState({});
   const [typeLabels, setTypeLabels] = useState({});
   const [loading, setLoading] = useState(true);
   const [scheduler, setScheduler] = useState(null);
@@ -55,6 +57,7 @@ export default function TrackedAccountsTab() {
       setAccounts(tracked.value.data);
       if (creators.status === 'fulfilled') {
         setCreatorMix(Object.fromEntries(creators.value.data.map((creator) => [creator.account_handle.toLowerCase(), creator.mix || []])));
+        setCreatorLook(Object.fromEntries(creators.value.data.map((creator) => [creator.account_handle.toLowerCase(), creator.look || []])));
       } else {
         console.error('Failed to load creator mix:', creators.reason);
       }
@@ -283,6 +286,7 @@ export default function TrackedAccountsTab() {
                       {creatorMix[account.username.toLowerCase()].map(({ type, pct }) => `${typeLabels[type] || type} ${pct}%`).join(' · ')}
                     </p>
                   )}
+                  <LookTagChips tags={creatorLook[account.username.toLowerCase()]} />
                   <div className="text-xs text-gray-500 mt-0.5">
                     {formatCount(account.followers)} followers &middot; {account.post_count || 0} posts &middot; {account.avg_er || 0}% avg ER &middot; Scraped {timeAgo(account.last_scraped_at)}
                   </div>
@@ -335,6 +339,7 @@ export default function TrackedAccountsTab() {
                   <div className="text-xs text-gray-600 mt-0.5">
                     {formatCount(account.followers)} followers &middot; Last scraped {timeAgo(account.last_scraped_at)}
                   </div>
+                  <LookTagChips tags={creatorLook[account.username.toLowerCase()]} />
                 </div>
                 <div className="flex gap-1.5">
                   <button

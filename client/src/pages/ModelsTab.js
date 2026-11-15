@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useCallback } from 'react';
-import { getModels, createModel, updateModel, deleteModel, getAvailableNiches, generateIdeas, getIdeas, exportIdeas, exportIdeasToNotion, getNotionPersonas, previewNotionPersona, importNotionPersona, resyncNotion, getModelActivity } from '../api';
+import { getModels, createModel, updateModel, deleteModel, getAvailableNiches, generateIdeas, getIdeas, exportIdeas, exportIdeasToNotion, getNotionPersonas, previewNotionPersona, importNotionPersona, resyncNotion, getModelActivity, getLookTags } from '../api';
+import { LookTagPicker } from '../components/LookTags';
 
 import ModelWorkspace from './ModelWorkspace';
 
@@ -16,13 +17,15 @@ const NICHE_OPTIONS = ['talking', 'dance', 'skit', 'snapchat', 'omegle', 'osc'];
 const EMPTY_FORM = {
   name: '', primary_niche: '', secondary_niches: '',
   delivery_method: 'whatsapp', delivery_contact: '', delivery_day: 'monday',
-  email: '', password: '', login_enabled: false,
+  email: '', password: '', login_enabled: false, look_tags: [],
 };
 
 export default function ModelsTab() {
   const [workspaceId, setWorkspaceId] = useState(null);
   const [models, setModels] = useState([]);
   const [niches, setNiches] = useState([]);
+  const [lookTags, setLookTags] = useState([]);
+  const [lookError, setLookError] = useState('');
   const [showForm, setShowForm] = useState(false);
   const [editingId, setEditingId] = useState(null);
   const [expandedModel, setExpandedModel] = useState(null);
@@ -50,6 +53,7 @@ export default function ModelsTab() {
   }, []);
 
   useEffect(() => { loadModels(); loadNiches(); }, [loadModels, loadNiches]);
+  useEffect(() => { getLookTags().then(({ data }) => setLookTags(data)).catch(err => setLookError(err.response?.data?.error || err.message)); }, []);
 
   const openNotion = async () => {
     setNotion((n) => ({ ...n, open: true, loading: true }));
@@ -122,6 +126,7 @@ export default function ModelsTab() {
       delivery_contact: model.delivery_contact || '',
       delivery_day: model.delivery_day || 'monday',
       email: model.email || '', password: '', login_enabled: !!model.login_enabled,
+      look_tags: model.look_tags || [],
     });
     setEditingId(model.id);
     setShowForm(true);
@@ -187,7 +192,7 @@ export default function ModelsTab() {
     done: 'Done',
   }[value] || 'No reaction yet');
 
-  if (workspaceId) return <ModelWorkspace modelId={workspaceId} onBack={() => { setWorkspaceId(null); loadModels(); }} />;
+  if (workspaceId) return <ModelWorkspace modelId={workspaceId} onBack={() => { setWorkspaceId(null); loadModels(); }} onEdit={model => { setWorkspaceId(null); handleEdit(model); }} />;
 
   return (
     <div className="space-y-6">
@@ -271,6 +276,11 @@ export default function ModelsTab() {
                 placeholder={form.delivery_method === 'whatsapp' ? '+1234567890' : form.delivery_method === 'sheet' ? 'Google Sheet URL' : 'Notion page ID'}
               />
             </div>
+          </div>
+
+          <div className="border-t border-gray-800 pt-4">
+            <LookTagPicker vocabulary={lookTags} selected={form.look_tags} onChange={look_tags => setForm({ ...form, look_tags })} />
+            {lookError && <p role="alert" className="mt-2 text-xs text-red-300">Could not load look tags: {lookError}</p>}
           </div>
 
           <div className="border-t border-gray-800 pt-4">
