@@ -8,6 +8,13 @@ const { sortConfig } = require('./sort-status');
 const { sortUsage } = require('./sort-runner');
 
 const cfg = { ...sortConfig({ GEMINI_API_KEY: 'fake-key' }), dailyMax: 100 };
+function lipSyncPrices(t, input = '', output = '') {
+  for (const [key, value] of [['LIPSYNC_PRICE_IN_PER_M', input], ['LIPSYNC_PRICE_OUT_PER_M', output]]) {
+    const previous = process.env[key];
+    process.env[key] = value;
+    t.after(() => { if (previous === undefined) delete process.env[key]; else process.env[key] = previous; });
+  }
+}
 function result(type, confidence = 0.9) {
   return { type, confidence, description: 'A person speaking.', audioKind: 'own_speech', suggestedType: null, usage: { inTokens: 10, outTokens: 5 } };
 }
@@ -509,4 +516,78 @@ test('text redecide preserves existing layout even when the result contains a ne
   assert.deepEqual(pool.sqlite.prepare('SELECT ai_layout FROM posts ORDER BY id').all(), [
     { ai_layout: 'split_screen' }, { ai_layout: null },
   ]);
+});
+
+test('lip-sync estimate counts unchecked auto talking with workspace priority', async t => {
+  lipSyncPrices(t);
+  const pool = await makeSortDb();
+  t.after(() => pool.sqlite.close());
+  pool.sqlite.exec(`INSERT INTO models(id) VALUES(9);
+    INSERT INTO model_creators(model_id,username) VALUES(9,'creator');
+    INSERT INTO posts(id,sort_status,content_type,video_cache_status,account_handle,ai_lipsync_checked_at)
+    VALUES(1,'auto','talking','cached','creator',NULL),(2,'auto','talking','cached','other',NULL),
+      (3,'manual','talking','cached','creator',NULL),(4,'auto','talking','cached','creator','2026-11-16')`);
+  const response = await inProcessRequest(pool, 'GET', '/sort/lipsync-recheck/estimate?modelId=9');
+  assert.equal(response.status, 200);
+  assert.equal(response.body.count, 2);
+  assert.equal(response.body.priorityCount, 1);
+  assert.ok(Math.abs(response.body.estUsd - 2 * 0.0122) < 1e-10);
+});
+
+test('lip-sync route estimate uses dedicated environment prices rather than sorter rates', async t => {
+  lipSyncPrices(t, '2', '10');
+  const pool = await makeSortDb();
+  t.after(() => pool.sqlite.close());
+  pool.sqlite.exec("INSERT INTO posts(id,sort_status,content_type,video_cache_status) VALUES(1,'auto','talking','cached')");
+  const response = await inProcessRequest(pool, 'GET', '/sort/lipsync-recheck/estimate', undefined,
+    { cfg: { ...cfg, priceInPerM: 999, priceOutPerM: 999 } });
+  assert.equal(response.status, 200);
+  assert.equal(response.body.count, 1);
+  assert.equal(response.body.priorityCount, 0);
+  assert.ok(Math.abs(response.body.estUsd - 0.044) < 1e-10);
+});
+
+test('lip-sync recheck accepts body options, rejects concurrent starts and releases guard', async t => {
+  const pool = await makeSortDb();
+  t.after(() => pool.sqlite.close());
+  pool.sqlite.exec('INSERT INTO models(id) VALUES(9)');
+  let release;
+  const active = new Promise(resolve => { release = resolve; });
+  const options = [];
+  const request = makeRequest(pool, { runLipSyncRecheck: async input => { options.push(input); await active; } });
+  assert.deepEqual((await request('POST', '/sort/lipsync-recheck', { modelId: 9, limit: 4 })).body, { started: true });
+  assert.deepEqual((await request('POST', '/sort/lipsync-recheck')).body, { started: false });
+  assert.equal(options.length, 1);
+  assert.equal(options[0].modelId, 9);
+  assert.equal(options[0].limit, 4);
+  release();
+  await new Promise(resolve => setImmediate(resolve));
+  assert.deepEqual((await request('POST', '/sort/lipsync-recheck')).body, { started: true });
+  await new Promise(resolve => setImmediate(resolve));
+});
+
+test('lip-sync recheck validates options before scheduling work', async t => {
+  const pool = await makeSortDb();
+  t.after(() => pool.sqlite.close());
+  const request = makeRequest(pool, { runLipSyncRecheck: async () => assert.fail('invalid request') });
+  for (const modelId of [0, -1, '1x', 1.5, 2147483648]) {
+    assert.equal((await request('GET', `/sort/lipsync-recheck/estimate?modelId=${modelId}`)).status, 400);
+    assert.equal((await request('POST', '/sort/lipsync-recheck', { modelId })).status, 400);
+  }
+  for (const limit of [0, -1, 1.5, '4']) {
+    assert.equal((await request('POST', '/sort/lipsync-recheck', { limit })).status, 400);
+  }
+  assert.equal((await request('POST', '/sort/lipsync-recheck', { modelId: 99 })).status, 404);
+});
+
+test('text redecide cannot undo lip-sync detector uncertainty or repeat conflict', async t => {
+  const pool = await makeSortDb();
+  t.after(() => pool.sqlite.close());
+  pool.sqlite.exec(`INSERT INTO posts(id,sort_status,content_type,ai_description,ai_suggested_type,ai_lipsync_checked_at,lipsync_repeat_of)
+    VALUES(1,'needs_look','talking','Speaking','lipsync','2026-11-16',NULL),
+      (2,'needs_look','talking','Speaking','lipsync',NULL,1),
+      (3,'needs_look','talking','Speaking','lipsync',NULL,NULL)`);
+  const before = pool.sqlite.prepare('SELECT * FROM posts ORDER BY id').all();
+  await redecideNeedsLook({ pool, cfg, redecide: async () => assert.fail('lip-sync evidence requires video/human review') });
+  assert.deepEqual(pool.sqlite.prepare('SELECT * FROM posts ORDER BY id').all(), before);
 });

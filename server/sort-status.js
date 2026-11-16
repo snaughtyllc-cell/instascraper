@@ -33,4 +33,16 @@ function sortConfig(env = process.env) {
   };
 }
 
-module.exports = { effectiveNicheExpr, decideSort, sortConfig };
+function lipSyncConfig(env = process.env) {
+  const price = (value, fallback) => {
+    if (value == null || String(value).trim() === '') return fallback;
+    const parsed = Number(value);
+    return Number.isFinite(parsed) && parsed >= 0 ? parsed : fallback;
+  };
+  return {
+    priceInPerM: price(env.LIPSYNC_PRICE_IN_PER_M, 0.50),
+    priceOutPerM: price(env.LIPSYNC_PRICE_OUT_PER_M, 3.00),
+  };
+}
+
+module.exports = { effectiveNicheExpr, decideSort, sortConfig, lipSyncConfig };

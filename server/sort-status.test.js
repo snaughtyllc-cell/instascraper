@@ -1,7 +1,7 @@
 const { test } = require('node:test');
 const assert = require('node:assert');
 const Database = require('better-sqlite3');
-const { decideSort, effectiveNicheExpr, sortConfig } = require('./sort-status');
+const { decideSort, effectiveNicheExpr, sortConfig, lipSyncConfig } = require('./sort-status');
 
 const typeValues = ['dance', 'talking'];
 test('confident known type → auto', () => {
@@ -60,4 +60,25 @@ test('sortConfig defaults and enabled key', () => {
     priceInPerM: 0.30, priceOutPerM: 2.50, enabled: false,
   });
   assert.strictEqual(sortConfig({ GEMINI_API_KEY: 'fake-key' }).enabled, true);
+});
+
+test('lipSyncConfig uses dedicated detector prices', () => {
+  assert.deepStrictEqual(lipSyncConfig({}), { priceInPerM: 0.50, priceOutPerM: 3.00 });
+  assert.deepStrictEqual(lipSyncConfig({
+    GEMINI_PRICE_IN_PER_M: '99', GEMINI_PRICE_OUT_PER_M: '99',
+  }), { priceInPerM: 0.50, priceOutPerM: 3.00 });
+  assert.deepStrictEqual(lipSyncConfig({
+    LIPSYNC_PRICE_IN_PER_M: '1.25', LIPSYNC_PRICE_OUT_PER_M: '4.5',
+  }), { priceInPerM: 1.25, priceOutPerM: 4.5 });
+  assert.deepStrictEqual(lipSyncConfig({
+    LIPSYNC_PRICE_IN_PER_M: '0', LIPSYNC_PRICE_OUT_PER_M: '0',
+  }), { priceInPerM: 0, priceOutPerM: 0 });
+});
+
+test('lipSyncConfig falls back for blank, invalid, nonfinite, and negative prices', () => {
+  for (const value of ['', ' ', 'invalid', 'Infinity', '-1']) {
+    assert.deepStrictEqual(lipSyncConfig({
+      LIPSYNC_PRICE_IN_PER_M: value, LIPSYNC_PRICE_OUT_PER_M: value,
+    }), { priceInPerM: 0.50, priceOutPerM: 3.00 });
+  }
 });

@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useState } from 'react';
-import { getBackfillEstimate, getModelCockpit, getSortUsage, getStartFreshPreview, startBackfill, startFresh, getLookTags, addLookTag, deleteLookTag, getLookBackfillEstimate, startLookBackfill, getTranscriptBackfillEstimate, startTranscriptBackfill, getTalkingRecheckEstimate, startTalkingRecheck, getLayoutRecheckEstimate, startLayoutRecheck } from '../api';
+import { getBackfillEstimate, getModelCockpit, getSortUsage, getStartFreshPreview, startBackfill, startFresh, getLookTags, addLookTag, deleteLookTag, getLookBackfillEstimate, startLookBackfill, getTranscriptBackfillEstimate, startTranscriptBackfill, getTalkingRecheckEstimate, startTalkingRecheck, getLipSyncRecheckEstimate, startLipSyncRecheck, getLayoutRecheckEstimate, startLayoutRecheck } from '../api';
 import { isStartFreshConfirmation } from '../utils/startFreshConfirmation';
 import ContentTypesManager from '../components/ContentTypesManager';
 
@@ -76,6 +76,7 @@ export default function AdminCockpitTab() {
 
       <AutoSortCard />
       <TalkingRecheckCard models={models} />
+      <LipSyncRecheckCard models={models} />
       <LayoutRecheckCard />
       <ContentTypesManager />
       <LookTagsCard />
@@ -382,6 +383,73 @@ function TalkingRecheckCard({ models }) {
     <div className="flex flex-wrap items-center gap-3">
       <button onClick={recheck} disabled={busy || !estimate} className="rounded-lg bg-gold px-4 py-2 text-sm font-semibold text-gray-950 hover:bg-gold-light disabled:opacity-50">{busy ? 'Preparing…' : 'Re-check talking reels'}</button>
       <p className="text-xs text-gray-400">{estimate ? `${num(estimate.count)} eligible reels · estimated ${cost(estimate.estUsd)}${modelId && estimate.priorityCount != null ? ` · ${num(estimate.priorityCount)} from this workspace` : ''}` : 'Loading estimate…'}</p>
+      <button type="button" disabled={busy} onClick={refresh} className="text-xs text-gray-400 underline underline-offset-4">Refresh</button>
+    </div>
+    {message && <p role="status" className="text-sm text-emerald-300">{message}</p>}
+    {error && <p role="alert" className="text-sm text-red-300">{error}</p>}
+  </section>;
+}
+
+function LipSyncRecheckCard({ models }) {
+  const [modelId, setModelId] = useState('');
+  const [estimate, setEstimate] = useState(null);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState('');
+  const [message, setMessage] = useState('');
+  const load = useCallback(async () => (await getLipSyncRecheckEstimate(modelId || undefined)).data, [modelId]);
+  useEffect(() => {
+    let active = true;
+    setEstimate(null);
+    setError('');
+    setMessage('');
+    load().then(data => { if (active) setEstimate(data); }).catch(err => {
+      if (active) setError(err.response?.data?.error || err.message);
+    });
+    return () => { active = false; };
+  }, [load]);
+  const cost = value => Number(value || 0).toLocaleString(undefined, { style: 'currency', currency: 'USD', minimumFractionDigits: 2, maximumFractionDigits: 4 });
+  const recheck = async () => {
+    setBusy(true);
+    setError('');
+    setMessage('');
+    try {
+      const data = await load();
+      setEstimate(data);
+      if (!Number(data.count)) { setMessage('All eligible talking reels have been checked for lip sync.'); return; }
+      const priority = modelId ? ` ${num(data.priorityCount)} reels from this model’s workspace creators run first.` : '';
+      if (!window.confirm(`Check ${num(data.count)} talking reels for lip sync? Estimated cost: ${cost(data.estUsd)}. Uncertain results go to Needs a look. The shared daily AI cap applies.${priority}`)) return;
+      const { data: result } = await startLipSyncRecheck(modelId || undefined);
+      setMessage(result.started ? 'Lip-sync check started. Refresh to update the remaining count.' : 'A lip-sync check is already running. Refresh to update the remaining count.');
+      setEstimate(await load());
+    } catch (err) {
+      setError(err.response?.data?.error || err.message);
+    } finally {
+      setBusy(false);
+    }
+  };
+  const refresh = async () => {
+    setBusy(true);
+    setError('');
+    setMessage('');
+    try { setEstimate(await load()); }
+    catch (err) { setError(err.response?.data?.error || err.message); }
+    finally { setBusy(false); }
+  };
+  return <section aria-labelledby="lipsync-recheck-title" className="space-y-4 rounded-xl border border-gray-800 bg-gray-900 p-5">
+    <div>
+      <h3 id="lipsync-recheck-title" className="text-lg font-semibold text-white">Lip sync or live speech</h3>
+      <p className="mt-1 text-sm text-gray-400">Check talking reels with a dedicated audio and video detector and repeated-audio evidence.</p>
+    </div>
+    <label className="flex flex-wrap items-center gap-3 text-sm text-gray-400">
+      <span>Prioritize model workspace</span>
+      <select disabled={busy} value={modelId} onChange={event => setModelId(event.target.value)} className="rounded-lg border border-gray-700 bg-gray-800 px-3 py-2 text-sm text-white">
+        <option value="">All creators</option>
+        {models.map(model => <option key={model.id} value={model.id}>{model.name}</option>)}
+      </select>
+    </label>
+    <div className="flex flex-wrap items-center gap-3">
+      <button onClick={recheck} disabled={busy || !estimate} className="rounded-lg bg-gold px-4 py-2 text-sm font-semibold text-gray-950 hover:bg-gold-light disabled:opacity-50">{busy ? 'Preparing…' : 'Check talking reels for lip sync'}</button>
+      <p className="text-xs text-gray-400">{estimate ? `${num(estimate.count)} eligible reels · estimated ${cost(estimate.estUsd)}${modelId && estimate.priorityCount != null ? ` · ${num(estimate.priorityCount)} from this workspace` : ''}` : error ? 'Estimate unavailable' : 'Loading estimate…'}</p>
       <button type="button" disabled={busy} onClick={refresh} className="text-xs text-gray-400 underline underline-offset-4">Refresh</button>
     </div>
     {message && <p role="status" className="text-sm text-emerald-300">{message}</p>}

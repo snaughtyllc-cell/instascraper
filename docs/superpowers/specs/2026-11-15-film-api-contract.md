@@ -42,7 +42,7 @@ Film (UI)  ──/api/filming/find/*──▶  HQ (knows the model)  ──/film
 }
 ```
 
-`transcript` is an additive `string | null` field, at most 4000 characters. It contains the verbatim clear speech by the person on screen in its original language, with line breaks between sentences or lines, for Film's teleprompter script. It has no speaker labels, timestamps or commentary, and never contains song lyrics. Missing transcripts and reels with no clear speech return `null` (including the internal empty-string sentinel).
+`transcript` is an additive `string | null` field, at most 4000 characters. For talking reels it contains the verbatim clear speech by the person on screen in its original language, with line breaks between sentences or lines, for Film's teleprompter script. For lipsync reels it contains the spoken words being mouthed from the recorded audio. It has no speaker labels, timestamps or commentary, and never contains song lyrics. Missing transcripts and reels with no clear speech return `null` (including the internal empty-string sentinel).
 
 `platform` is an additive `"instagram" | "tiktok"` field; legacy rows are Instagram.
 `sourceUrl` is the stored source post URL, falling back to the built Instagram reel URL.

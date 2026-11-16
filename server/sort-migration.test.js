@@ -38,6 +38,16 @@ test('first run adds columns, every existing reel unsorted', async () => {
   assert.deepStrictEqual(db.sqlite.prepare('SELECT ai_layout FROM posts ORDER BY id').all(), [
     { ai_layout: null }, { ai_layout: null },
   ]);
+  for (const [name, type] of [['ai_lipsync_verdict', 'TEXT'], ['ai_lipsync_confidence', 'REAL'],
+    ['ai_lipsync_evidence', 'TEXT'], ['ai_lipsync_checked_at', 'TEXT'], ['lipsync_repeat_of', 'INTEGER']]) {
+    const column = db.sqlite.prepare('PRAGMA table_info(posts)').all().find(item => item.name === name);
+    assert.ok(column, `${name} missing`);
+    assert.strictEqual(column.type, type);
+    assert.strictEqual(column.notnull, 0);
+    assert.deepStrictEqual(db.sqlite.prepare(`SELECT ${name} FROM posts ORDER BY id`).all(), [
+      { [name]: null }, { [name]: null },
+    ]);
+  }
   assert.deepStrictEqual(db.sqlite.prepare('SELECT ai_transcript FROM posts ORDER BY id').all(), [
     { ai_transcript: null }, { ai_transcript: null },
   ]);
@@ -61,4 +71,8 @@ test('PostgreSQL adds the performance column as nullable REAL', async () => {
   } }, { isPg: true });
   assert.ok(statements.includes('ALTER TABLE posts ADD COLUMN IF NOT EXISTS perf_score REAL'));
   assert.ok(statements.includes('ALTER TABLE posts ADD COLUMN IF NOT EXISTS ai_layout TEXT'));
+  for (const [name, type] of [['ai_lipsync_verdict', 'TEXT'], ['ai_lipsync_confidence', 'REAL'],
+    ['ai_lipsync_evidence', 'TEXT'], ['ai_lipsync_checked_at', 'TEXT'], ['lipsync_repeat_of', 'INTEGER']]) {
+    assert.ok(statements.includes(`ALTER TABLE posts ADD COLUMN IF NOT EXISTS ${name} ${type}`));
+  }
 });

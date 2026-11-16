@@ -17,6 +17,11 @@ const AI_COLUMNS = [
 const SORT_COLUMNS = [
   { name: 'sort_status', type: "TEXT DEFAULT 'unsorted'" },
   ...AI_COLUMNS,
+  { name: 'ai_lipsync_verdict', type: 'TEXT' },
+  { name: 'ai_lipsync_confidence', type: 'REAL' },
+  { name: 'ai_lipsync_evidence', type: 'TEXT' },
+  { name: 'ai_lipsync_checked_at', type: 'TEXT' },
+  { name: 'lipsync_repeat_of', type: 'INTEGER' },
   { name: 'perf_score', type: 'REAL' },
 ];
 

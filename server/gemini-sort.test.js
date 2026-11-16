@@ -3,7 +3,8 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs/promises');
 const os = require('node:os');
 const path = require('node:path');
-const { describeReel, redecideFromDescription, estimateCostUsd, cleanTranscript, cleanLayout } = require('./gemini-sort');
+const { describeReel, redecideFromDescription, estimateCostUsd, cleanTranscript, cleanLayout,
+  detectLipSync, cleanLipSyncResult } = require('./gemini-sort');
 const { describeReactSpeech, cleanReactUtterances } = require('./gemini-sort');
 
 const types = [
@@ -229,6 +230,166 @@ test('cleanTranscript truncates at sentence or word boundaries within 4000 chara
   assert.ok(truncated.endsWith('bonjour'));
   assert.ok(original.startsWith(truncated));
   assert.equal(cleanTranscript(' Hola.\r\nBien.\rGracias. '), 'Hola.\nBien.\nGracias.');
+});
+
+test('lip-sync cleaner rejects invalid verdicts and clamps confidence', () => {
+  for (const value of [null, [], 'lip_sync', {}, { verdict: 'talking' }, { verdict: 'LIVE_SPEECH' }]) {
+    assert.throws(() => cleanLipSyncResult(value), /Invalid lip-sync verdict/);
+  }
+  for (const [confidence, expected] of [[2, 1], [-2, 0], ['bad', 0], [Infinity, 0], [0.7, 0.7]]) {
+    assert.equal(cleanLipSyncResult({ verdict: 'unsure', confidence }).confidence, expected);
+  }
+  assert.deepEqual(cleanLipSyncResult({ verdict: 'lip_sync', confidence: 0.9,
+    evidence: [' One ', null, '', '  ', 'Two', 'Three', 'Four', 'Five'], words: ' Hola.\r\nBien. ' }), {
+    verdict: 'lip_sync', confidence: 0.9, evidence: ['One', 'Two', 'Three', 'Four'], words: 'Hola.\nBien.',
+  });
+  assert.deepEqual(cleanLipSyncResult({ verdict: 'live_speech', confidence: 0.8, evidence: 'bad', words: false }), {
+    verdict: 'live_speech', confidence: 0.8, evidence: [], words: null,
+  });
+  assert.equal(cleanLipSyncResult({ verdict: 'lip_sync', words: 'word '.repeat(900) }).words,
+    cleanTranscript('word '.repeat(900)));
+});
+
+test('lip-sync detector requests all structured fields and the dedicated model', async t => {
+  const client = fake({ text: JSON.stringify({ verdict: 'lip_sync', confidence: 0.95,
+    evidence: ['The soundbite does not match the room acoustics.'], words: 'Spoken soundbite.' }) });
+  const result = await detectLipSync({ filePath: await video(t), caption: 'A caption', handle: 'creator' },
+    { client, model: 'dedicated-model' });
+  const request = client.calls[0];
+  assert.equal(request.model, 'dedicated-model');
+  assert.equal(request.config.responseMimeType, 'application/json');
+  const schema = request.config.responseJsonSchema;
+  assert.deepEqual(Object.keys(schema.properties), ['verdict', 'confidence', 'evidence', 'words']);
+  assert.deepEqual(schema.required, ['verdict', 'confidence', 'evidence', 'words']);
+  assert.equal(schema.additionalProperties, false);
+  assert.deepEqual(schema.properties.verdict.enum, ['live_speech', 'lip_sync', 'unsure']);
+  assert.deepEqual(schema.properties.confidence, { type: 'number', minimum: 0, maximum: 1 });
+  assert.deepEqual(schema.properties.evidence, { type: 'array', items: { type: 'string' }, maxItems: 4 });
+  assert.deepEqual(schema.properties.words, { anyOf: [{ type: 'string', maxLength: 4000 }, { type: 'null' }] });
+  assert.equal(request.contents[0].parts[0].inlineData.mimeType, 'video/mp4');
+  const prompt = request.contents[0].parts[1].text;
+  for (const rule of ['audio acoustics', 'studio-clean or compressed voice in a car or bathroom', 'missing room echo',
+    'ambient noise', 'voice timbre, age and gender', 'lip, teeth and tongue articulation and timing',
+    'breaths and mouth noises', 'movie, podcast or TV soundbite', 'captions that quote the audio',
+    'cuts in the audio that do not match the video cuts', 'Answer unsure when evidence is weak',
+    'someone else\'s pre-recorded speech', 'never transcribe song lyrics', '"caption":"A caption"', '"handle":"creator"']) {
+    assert.ok(prompt.includes(rule), rule);
+  }
+  assert.deepEqual(result, { verdict: 'lip_sync', confidence: 0.95,
+    evidence: ['The soundbite does not match the room acoustics.'], words: 'Spoken soundbite.',
+    usage: { inTokens: 3400, outTokens: 80 } });
+});
+
+test('lip-sync detector takes its default model from the environment', async t => {
+  const previous = process.env.LIPSYNC_MODEL;
+  t.after(() => {
+    if (previous === undefined) delete process.env.LIPSYNC_MODEL;
+    else process.env.LIPSYNC_MODEL = previous;
+  });
+  const filePath = await video(t);
+  for (const [configured, expected] of [['custom-lipsync', 'custom-lipsync'], ['', 'gemini-3.5-flash']]) {
+    process.env.LIPSYNC_MODEL = configured;
+    const client = fake({ text: '{"verdict":"unsure","confidence":0,"evidence":[],"words":null}' });
+    await detectLipSync({ filePath }, { client });
+    assert.equal(client.calls[0].model, expected);
+  }
+});
+
+test('lip-sync detector includes thought tokens in billed output usage', async t => {
+  const filePath = await video(t);
+  for (const [candidatesTokenCount, thoughtsTokenCount, expected] of [
+    [80, 320, 400], [undefined, 320, 320], [80, undefined, 80], ['invalid', 'invalid', 0],
+  ]) {
+    const client = fake({ text: '{"verdict":"unsure","confidence":0,"evidence":[],"words":null}',
+      usageMetadata: { promptTokenCount: 3400, candidatesTokenCount, thoughtsTokenCount } });
+    const result = await detectLipSync({ filePath }, { client });
+    assert.deepEqual(result.usage, { inTokens: 3400, outTokens: expected });
+  }
+});
+
+function lipSyncConfigEnv(t) {
+  const keys = ['LIPSYNC_MEDIA_RESOLUTION', 'LIPSYNC_THINKING_LEVEL'];
+  const previous = Object.fromEntries(keys.map(key => [key, process.env[key]]));
+  t.after(() => {
+    for (const key of keys) {
+      if (previous[key] === undefined) delete process.env[key];
+      else process.env[key] = previous[key];
+    }
+  });
+  for (const key of keys) delete process.env[key];
+}
+
+test('lip-sync detector defaults to medium media resolution and medium thinking', async t => {
+  lipSyncConfigEnv(t);
+  const client = fake({ text: '{"verdict":"unsure","confidence":0,"evidence":[],"words":null}' });
+  await detectLipSync({ filePath: await video(t) }, { client });
+  assert.equal(client.calls[0].config.mediaResolution, 'MEDIA_RESOLUTION_MEDIUM');
+  assert.deepEqual(client.calls[0].config.thinkingConfig, { thinkingLevel: 'MEDIUM' });
+});
+
+test('lip-sync detector allows supported media and thinking overrides', async t => {
+  lipSyncConfigEnv(t);
+  const filePath = await video(t);
+  for (const mediaResolution of ['MEDIA_RESOLUTION_MEDIUM', 'MEDIA_RESOLUTION_HIGH']) {
+    for (const thinkingLevel of ['LOW', 'MEDIUM', 'HIGH', 'XHIGH']) {
+      process.env.LIPSYNC_MEDIA_RESOLUTION = mediaResolution;
+      process.env.LIPSYNC_THINKING_LEVEL = thinkingLevel;
+      const client = fake({ text: '{"verdict":"unsure","confidence":0,"evidence":[],"words":null}' });
+      await detectLipSync({ filePath }, { client });
+      assert.equal(client.calls[0].config.mediaResolution, mediaResolution);
+      assert.deepEqual(client.calls[0].config.thinkingConfig, { thinkingLevel });
+    }
+  }
+});
+
+test('lip-sync detector falls back for empty, invalid, forbidden and unspecified config values', async t => {
+  lipSyncConfigEnv(t);
+  const filePath = await video(t);
+  for (const [key, invalidValues, configKey, expected] of [
+    ['LIPSYNC_MEDIA_RESOLUTION', ['', ' ', 'unknown', 'medium', 'MEDIA_RESOLUTION_LOW', 'MEDIA_RESOLUTION_UNSPECIFIED'],
+      'mediaResolution', 'MEDIA_RESOLUTION_MEDIUM'],
+    ['LIPSYNC_THINKING_LEVEL', ['', ' ', 'unknown', 'medium', 'MINIMAL', 'THINKING_LEVEL_UNSPECIFIED'],
+      'thinkingConfig', { thinkingLevel: 'MEDIUM' }],
+  ]) {
+    for (const value of invalidValues) {
+      process.env[key] = value;
+      const client = fake({ text: '{"verdict":"unsure","confidence":0,"evidence":[],"words":null}' });
+      await detectLipSync({ filePath }, { client });
+      assert.deepEqual(client.calls[0].config[configKey], expected, `${key}=${JSON.stringify(value)}`);
+    }
+    delete process.env[key];
+  }
+});
+
+test('lip-sync detector rejects malformed output and cleans up uploaded video', async t => {
+  const events = [];
+  const client = fake({ text: '{"verdict":"talking"}' });
+  client.files = {
+    upload: async () => { events.push('upload'); return { name: 'lipsync/video', state: 'PROCESSING' }; },
+    get: async () => { events.push('get'); return { name: 'lipsync/video', state: 'ACTIVE', uri: 'fake://lipsync' }; },
+    delete: async () => { events.push('delete'); },
+  };
+  await assert.rejects(detectLipSync({ filePath: await video(t, 18 * 1024 * 1024 + 1) }, { client }), /Invalid lip-sync verdict/);
+  assert.deepEqual(events, ['upload', 'get', 'delete']);
+  await assert.rejects(detectLipSync({ filePath: await video(t) }, { client: fake({ text: '{invalid' }) }), SyntaxError);
+});
+
+test('lip-sync detector retries transient failures but never 403, and honors aborts', async t => {
+  const filePath = await video(t);
+  for (const status of [429, 503, 403]) {
+    let calls = 0;
+    const client = { models: { generateContent: async () => {
+      calls++;
+      throw Object.assign(new Error(`status ${status}`), { status });
+    } } };
+    await assert.rejects(detectLipSync({ filePath }, { client }), new RegExp(`status ${status}`));
+    assert.equal(calls, status === 403 ? 1 : 3);
+  }
+  const controller = new AbortController();
+  controller.abort();
+  const client = fake();
+  await assert.rejects(detectLipSync({ filePath }, { client, signal: controller.signal }), /abort/i);
+  assert.equal(client.calls.length, 0);
 });
 
 test('React speech uses existing client/model and strict role schema at temperature zero', async t => {

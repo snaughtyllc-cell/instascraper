@@ -7,6 +7,13 @@ const { makeSortDb } = require('./test-support/sort-db');
 const { runAutoSort, backfillEstimate, sortUsage } = require('./sort-runner');
 const { sortConfig } = require('./sort-status');
 const ai = { type: 'dance', confidence: 0.9, description: 'Dancing', suggestedType: null, usage: { inTokens: 3400, outTokens: 80 } };
+function lipSyncPrices(t, input, output) {
+  for (const [key, value] of [['LIPSYNC_PRICE_IN_PER_M', input], ['LIPSYNC_PRICE_OUT_PER_M', output]]) {
+    const previous = process.env[key];
+    process.env[key] = value;
+    t.after(() => { if (previous === undefined) delete process.env[key]; else process.env[key] = previous; });
+  }
+}
 async function setup(t, count = 2) {
   const pool = await makeSortDb();
   const videoDir = await fs.mkdtemp(path.join(os.tmpdir(), 'sort-runner-'));
@@ -15,7 +22,8 @@ async function setup(t, count = 2) {
     pool.sqlite.prepare("INSERT INTO posts(id,shortcode,posted_at,video_cache_status) VALUES(?,?,?,'cached')").run(id, `p${id}`, `2026-11-${10 + id}`);
     await fs.writeFile(path.join(videoDir, `${id}.mp4`), 'fake video');
   }
-  return { pool, videoDir, cfg: { ...sortConfig({ GEMINI_API_KEY: 'fake' }), enabled: true }, describe: async () => ai };
+  return { pool, videoDir, cfg: { ...sortConfig({ GEMINI_API_KEY: 'fake' }), enabled: true }, describe: async () => ai,
+    detect: async () => ({ verdict: 'live_speech', confidence: 0.95, evidence: ['Matching room acoustics'], words: null }) };
 }
 test('classifies cached unsorted reels, skips uncached and manual', async t => {
   const deps = await setup(t, 4);
@@ -228,4 +236,102 @@ test('auto-sort gates talking on audio, stores evidence and clears non-speech tr
     { content_type: null, sort_status: 'needs_look', ai_audio_kind: 'none', ai_transcript: null, ai_confidence: 0.9 },
     { content_type: 'talking', sort_status: 'auto', ai_audio_kind: 'own_speech', ai_transcript: 'My own words.', ai_confidence: 0.9 },
   ]);
+});
+
+test('new talking reel is checked for lip sync in the same pass and stores spoken words', async t => {
+  lipSyncPrices(t, '2', '10');
+  const deps = await setup(t, 1);
+  deps.cfg.priceInPerM = 0.1;
+  deps.cfg.priceOutPerM = 0.2;
+  deps.pool.sqlite.exec("INSERT INTO content_types(value,label) VALUES('lipsync','Lip sync')");
+  deps.describe = async () => ({ ...ai, type: 'talking', audioKind: 'own_speech', transcript: 'Original words' });
+  let calls = 0;
+  deps.detect = async input => {
+    calls++;
+    assert.equal(input.filePath, path.join(deps.videoDir, '1.mp4'));
+    assert.equal(deps.pool.sqlite.prepare('SELECT sort_status FROM posts').get().sort_status, 'needs_look',
+      'Film must not see unchecked talking while the detector is running');
+    return { verdict: 'lip_sync', confidence: 0.9, evidence: ['Studio voice in car'], words: 'Mouthed recorded speech',
+      usage: { inTokens: 1000, outTokens: 200 } };
+  };
+  assert.equal((await runAutoSort(deps)).classified, 1);
+  assert.equal(calls, 1);
+  const post = deps.pool.sqlite.prepare('SELECT * FROM posts').get();
+  assert.equal(post.content_type, 'lipsync');
+  assert.equal(post.ai_transcript, 'Mouthed recorded speech');
+  assert.ok(post.ai_lipsync_checked_at);
+  assert.ok(Math.abs(post.ai_cost_usd - (0.000356 + 0.004)) < 1e-10,
+    'sorter uses its configured rates while detector uses dedicated environment rates');
+  assert.equal(deps.pool.sqlite.prepare('SELECT cost_usd FROM look_backfill_attempts').get().cost_usd, 0);
+  assert.equal((await sortUsage(deps.pool, deps.cfg)).today, 2);
+});
+
+test('the detector budget cannot allow later sort calls to exceed the daily cap', async t => {
+  const deps = await setup(t, 3);
+  deps.cfg.dailyMax = 2;
+  deps.describe = async () => ({ ...ai, type: 'talking', audioKind: 'own_speech' });
+  assert.equal((await runAutoSort(deps)).classified, 1);
+  assert.equal((await sortUsage(deps.pool, deps.cfg)).today, 2);
+});
+
+test('a new transcript flags an older confidently-live reel for review without touching manual rows', async t => {
+  const deps = await setup(t, 3);
+  const transcript = 'These are exactly the same recorded spoken words across several different creators today';
+  deps.pool.sqlite.prepare(`UPDATE posts SET sort_status='auto',content_type='talking',ai_transcript=?,
+    ai_lipsync_verdict='live_speech',ai_lipsync_confidence=0.95,ai_lipsync_checked_at='2026-11-15' WHERE id=1`).run(transcript);
+  deps.pool.sqlite.prepare("UPDATE posts SET sort_status='manual',content_type='talking',ai_transcript=? WHERE id=2").run(transcript);
+  const manual = deps.pool.sqlite.prepare('SELECT * FROM posts WHERE id=2').get();
+  deps.describe = async () => ({ ...ai, type: 'talking', audioKind: 'own_speech', transcript });
+  deps.detect = async () => ({ verdict: 'lip_sync', confidence: 0.95, evidence: [], words: transcript });
+  await runAutoSort(deps);
+  const older = deps.pool.sqlite.prepare('SELECT * FROM posts WHERE id=1').get();
+  assert.equal(older.sort_status, 'needs_look');
+  assert.equal(older.content_type, 'talking');
+  assert.equal(older.ai_suggested_type, 'lipsync');
+  assert.deepEqual(deps.pool.sqlite.prepare('SELECT * FROM posts WHERE id=2').get(), manual);
+});
+
+test('manual correction during the new-reel detector wins', async t => {
+  const deps = await setup(t, 1);
+  deps.describe = async () => ({ ...ai, type: 'talking', audioKind: 'own_speech' });
+  let manual;
+  deps.detect = async () => {
+    deps.pool.sqlite.exec("UPDATE posts SET sort_status='manual',content_type='talking'");
+    manual = deps.pool.sqlite.prepare('SELECT * FROM posts').get();
+    return { verdict: 'lip_sync', confidence: 0.99, evidence: [], words: 'Recorded speech' };
+  };
+  await runAutoSort(deps);
+  assert.deepEqual(deps.pool.sqlite.prepare('SELECT * FROM posts').get(), manual);
+  const ledger = deps.pool.sqlite.prepare('SELECT cost_usd FROM look_backfill_attempts').get();
+  assert.ok(ledger.cost_usd > 0);
+});
+
+test('unchecked talking is sent to needs-look when the same-pass detector has no budget', async t => {
+  const deps = await setup(t, 1);
+  deps.cfg.dailyMax = 1;
+  deps.describe = async () => ({ ...ai, type: 'talking', audioKind: 'own_speech' });
+  deps.detect = async () => assert.fail('daily cap must prevent detector');
+  const result = await runAutoSort(deps);
+  assert.equal(result.auto, 0);
+  assert.equal(result.needsLook, 1);
+  assert.deepEqual(deps.pool.sqlite.prepare('SELECT content_type,sort_status,ai_suggested_type,ai_lipsync_checked_at FROM posts').get(),
+    { content_type: 'talking', sort_status: 'needs_look', ai_suggested_type: 'lipsync', ai_lipsync_checked_at: null });
+  assert.equal((await sortUsage(deps.pool, deps.cfg)).today, 1);
+});
+
+test('a failed same-pass detector cannot publish unchecked talking to Film', async t => {
+  lipSyncPrices(t, '2', '10');
+  const deps = await setup(t, 1);
+  deps.describe = async () => ({ ...ai, type: 'talking', audioKind: 'own_speech' });
+  deps.detect = async () => { throw new Error('Fake detector outage'); };
+  const result = await runAutoSort(deps);
+  assert.equal(result.needsLook, 1);
+  assert.equal(result.errored, 1);
+  const row = deps.pool.sqlite.prepare('SELECT * FROM posts').get();
+  assert.equal(row.sort_status, 'needs_look');
+  assert.equal(row.ai_suggested_type, 'lipsync');
+  assert.match(row.ai_error, /Fake detector outage/);
+  assert.ok(Math.abs(deps.pool.sqlite.prepare('SELECT cost_usd FROM look_backfill_attempts').get().cost_usd - 0.044) < 1e-10);
+  assert.ok(Math.abs(row.ai_cost_usd - 0.00122) < 1e-10, 'failed detector cost remains in the ledger');
+  assert.ok(Math.abs((await sortUsage(deps.pool, deps.cfg)).usd30d - (0.00122 + 0.044)) < 1e-10);
 });
