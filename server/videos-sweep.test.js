@@ -239,3 +239,27 @@ test('sweepVideos: never throws when a download rejects, and logs a metric line'
   assert.equal(row.video_cache_error, 'boom');
   assert.ok(logs.some(l => l.includes('[Metric] video_sweep')), 'emits a metric line');
 });
+
+test('sweepVideos: VIDEO_RETENTION_DAYS env widens the retention gate (backlog older than 30d)', async () => {
+  const { sqlite, query } = makeDb();
+  insertPost(sqlite, { id: 21, shortcode: 'backlog', video_url: 'http://x/21.mp4', video_cache_status: 'pending', posted_at: isoDaysAgo(40) });
+  const prior = process.env.VIDEO_RETENTION_DAYS;
+  process.env.VIDEO_RETENTION_DAYS = '90';
+  delete require.cache[require.resolve('./videos')];
+  const { sweepVideos: fresh } = require('./videos');
+  try {
+    const seen = [];
+    const res = await fresh({}, {
+      db: { query },
+      download: async (p) => { seen.push(p.shortcode); return { status: 'cached' }; },
+      delay: () => Promise.resolve(),
+      now: () => NOW,
+    });
+    assert.equal(res.attempted, 1);
+    assert.deepStrictEqual(seen, ['backlog']);
+  } finally {
+    if (prior === undefined) delete process.env.VIDEO_RETENTION_DAYS;
+    else process.env.VIDEO_RETENTION_DAYS = prior;
+    delete require.cache[require.resolve('./videos')];
+  }
+});

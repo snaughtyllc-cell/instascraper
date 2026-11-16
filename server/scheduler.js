@@ -432,7 +432,7 @@ function startScheduler(scraper) {
   scraperInstance = scraper;
   cron.schedule('0 3 * * *', () => runAutoScrape()); // daily; cadence interval + per-cycle cap control actual spend
   cron.schedule('30 3 * * *', () =>
-    require('./videos').pruneOldVideos({ maxAgeDays: 30 })
+    require('./videos').pruneOldVideos()
       .catch(e => console.error('[Cron] video prune failed:', e.message)));
   cron.schedule('45 3 * * *', () => runTasteRecompute());
   cron.schedule('0 0 * * 0', () => runEngagementRollup());
