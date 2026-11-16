@@ -171,10 +171,10 @@ test('sweepVideos: legacy catch-up — a NULL/NULL row with an OLD scraped_at is
 
 test('sweepVideos: a pending row whose posted_at is older than maxAgeDays is NOT selected (retention gate)', async () => {
   const { sqlite, query } = makeDb();
-  insertPost(sqlite, { id: 5, shortcode: 'old', video_url: 'http://x/5.mp4', video_cache_status: 'pending', posted_at: isoDaysAgo(40) });
+  insertPost(sqlite, { id: 5, shortcode: 'old', video_url: 'http://x/5.mp4', video_cache_status: 'pending', posted_at: isoDaysAgo(120) });
 
   const seen = [];
-  const res = await sweepVideos({}, {
+  const res = await sweepVideos({ maxAgeDays: 30 }, {
     db: { query },
     download: async (p) => { seen.push(p.shortcode); return { status: 'cached' }; },
     delay: () => Promise.resolve(),

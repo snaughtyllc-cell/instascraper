@@ -11,7 +11,7 @@ const VIDEO_MAX_MB = Number(process.env.VIDEO_MAX_MB || 60);
 // Sweep and prune share one retention window so a row can never be cached only
 // to be pruned on the next tick. Older backlog rows are skipped by the recheck
 // gate (video_cache_status must be "cached") whenever these drift apart.
-const VIDEO_RETENTION_DAYS = Number(process.env.VIDEO_RETENTION_DAYS || 30);
+const VIDEO_RETENTION_DAYS = Number(process.env.VIDEO_RETENTION_DAYS || 90);
 const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36';
 const sharedInflight = new Map();
 
