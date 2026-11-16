@@ -267,6 +267,50 @@ test('performance shares look and taste ranking across Film and /me/feed without
   for (const reel of response.body.reels) assert.deepEqual(Object.keys(reel).sort(), reelKeys);
 });
 
+test('creator rounds match across model, workspace and paginated Film feeds with full post columns', async (t) => {
+  const previousSpread = process.env.FEED_CREATOR_SPREAD;
+  const previousWeight = process.env.FEED_PERF_WEIGHT;
+  process.env.FEED_CREATOR_SPREAD = '2';
+  process.env.FEED_PERF_WEIGHT = '1';
+  t.after(() => {
+    if (previousSpread === undefined) delete process.env.FEED_CREATOR_SPREAD;
+    else process.env.FEED_CREATOR_SPREAD = previousSpread;
+    if (previousWeight === undefined) delete process.env.FEED_PERF_WEIGHT;
+    else process.env.FEED_PERF_WEIGHT = previousWeight;
+  });
+  await pool.query('DELETE FROM posts');
+  await pool.query('DELETE FROM model_taste');
+  await pool.query("INSERT INTO model_creators (model_id,username) VALUES (1,'third')");
+  for (let index = 0; index < 10; index++) {
+    await addPost(201 + index, {
+      account_handle: index < 6 ? 'mine' : index < 8 ? 'liked' : 'third',
+      perf_score: 20 - index, ai_transcript: `Transcript ${201 + index}`,
+    });
+  }
+  const model = await appRequest(app, { method: 'POST', path: '/login', body: { email: 'film-model@example.test', password: 'fake-model-password' } });
+  const admin = await appRequest(app, { method: 'POST', path: '/login', body: { password: 'fake-film-admin-password' } });
+  assert.equal(model.status, 200);
+  assert.equal(admin.status, 200);
+  const me = await appRequest(app, { path: '/me/feed', headers: { Cookie: model.headers['set-cookie'][0].split(';')[0] } });
+  const workspace = await appRequest(app, { path: '/workspaces/1/reels', headers: { Cookie: admin.headers['set-cookie'][0].split(';')[0] } });
+  const first = await request('GET', `${filmPath}/feed?limit=5`);
+  const second = await request('GET', `${filmPath}/feed?page=2&limit=5`);
+  for (const response of [me, workspace, first, second]) assert.equal(response.status, 200);
+  const expected = [201, 202, 207, 208, 209, 210, 203, 204, 205, 206];
+  assert.deepEqual(me.body.posts.map(row => row.id), expected);
+  assert.deepEqual(workspace.body.map(row => row.id), expected);
+  assert.deepEqual(first.body.reels.map(row => row.id), expected.slice(0, 5));
+  assert.deepEqual(second.body.reels.map(row => row.id), expected.slice(5));
+  assert.equal(first.body.hasMore, true);
+  assert.equal(second.body.hasMore, false);
+  assert.equal(me.body.hasMore, false);
+  const post = (await pool.query('SELECT * FROM posts WHERE id = $1', [201])).rows[0];
+  assert.deepEqual(Object.keys(workspace.body[0]).sort(), [...Object.keys(post), 'niche', 'look_match'].sort());
+  assert.equal(workspace.body[0].niche, 'talking');
+  assert.equal(first.body.reels[0].transcript, post.ai_transcript);
+  assert.equal(first.body.reels[0].creatorHandle, post.account_handle);
+});
+
 test('feed and saves return transcripts verbatim and expose missing or empty sentinels as null', async () => {
   const transcript = 'No traduzcas mis palabras.\nEsta es la próxima línea.';
   await pool.query('UPDATE posts SET ai_transcript = $1 WHERE id = $2', [transcript, 101]);
