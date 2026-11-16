@@ -9,6 +9,7 @@ const { sortConfig } = require('./sort-status');
 const { runAutoSort, sortUsage } = require('./sort-runner');
 const { videoFilePath } = require('./videos');
 const { ensureLookTables, ensureWorkspaceTables } = require('./workspace-migration');
+const { ensureSortStatus } = require('./sort-migration');
 
 const talking = { ai_type: 'talking', ai_confidence: 0.9, ai_classified_at: '2026-11-15T00:00:00Z', ai_error: null };
 const dance = { ...talking, ai_type: 'dance' };
@@ -45,6 +46,7 @@ async function setup(t, { source = 'Mia.Talks', count = 3 } = {}) {
     if (stmt.reader) { const rows = stmt.all(...params); return { rows, rowCount: rows.length }; }
     return { rows: [], rowCount: stmt.run(...params).changes };
   } };
+  await ensureSortStatus(pool, { isPg: false });
   await ensureWorkspaceTables(pool, { isPg: false });
   await ensureLookTables(pool, { isPg: false });
   const videoDir = await fs.mkdtemp(path.join(os.tmpdir(), 'candidate-routing-'));

@@ -2,6 +2,7 @@ import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { archivePost, createSuggestedType, getContentTypes, getNeedsLook, setPostContentType } from '../api';
 import API_URL from '../api-base';
 import { LookTagChips } from '../components/LookTags';
+import LipSyncDetails from '../components/LipSyncDetails';
 
 const PAGE_SIZE = 24;
 
@@ -60,6 +61,7 @@ export default function NeedsLookTab({ onTotalChange }) {
   };
 
   const labelFor = (value) => types.find((type) => type.value === value)?.label || value;
+  const newTypeSuggestions = suggestions.filter(suggestion => suggestion.value !== 'lipsync' || !types.some(type => type.value === 'lipsync'));
   const totalPages = Math.max(1, Math.ceil(total / PAGE_SIZE));
 
   return (
@@ -74,9 +76,9 @@ export default function NeedsLookTab({ onTotalChange }) {
 
       {error && <div role="alert" className="rounded-lg border border-red-500/30 bg-red-500/10 px-4 py-3 text-sm text-red-300">{error}</div>}
 
-      {suggestions.length > 0 && (
+      {newTypeSuggestions.length > 0 && (
         <section aria-label="Suggested new content types" className="flex flex-wrap gap-3">
-          {suggestions.map((suggestion) => (
+          {newTypeSuggestions.map((suggestion) => (
             <div key={suggestion.value} className="rounded-xl border border-gray-800 bg-gray-900 px-4 py-3">
               <p className="text-sm text-gray-300"><strong className="text-white">{suggestion.label}</strong> — {suggestion.count} reels</p>
               <button
@@ -111,12 +113,18 @@ export default function NeedsLookTab({ onTotalChange }) {
               <div className="space-y-3 p-3">
                 <p className="text-sm font-medium text-gold">@{post.account_handle}</p>
                 <p className="text-xs text-gray-400">
-                  AI guess: <span className="text-gray-200">{labelFor(post.ai_type) || post.ai_suggested_type || 'No matching type'}</span>
-                  {post.ai_confidence != null && ` · ${Math.round(Number(post.ai_confidence) * 100)}% confidence`}
+                  AI guess: <span className="text-gray-200">{post.ai_suggested_type === 'lipsync' ? labelFor('lipsync') : labelFor(post.ai_type) || post.ai_suggested_type || 'No matching type'}</span>
+                  {post.ai_suggested_type !== 'lipsync' && post.ai_confidence != null && ` · ${Math.round(Number(post.ai_confidence) * 100)}% confidence`}
                 </p>
                 <p className="text-sm leading-relaxed text-gray-300">{post.ai_description || 'No description available.'}</p>
                 <LookTagChips tags={post.ai_look_tags} />
+                <LipSyncDetails reel={post} />
                 {post.ai_error && <p className="text-xs text-red-300">{post.ai_error}</p>}
+                {post.ai_suggested_type === 'lipsync' && types.some(type => type.value === 'lipsync') && <button
+                  disabled={Boolean(pending[post.id]) || loading}
+                  onClick={() => act(post.id, () => setPostContentType(post.id, 'lipsync'))}
+                  className="rounded-lg bg-gold px-3 py-2 text-xs font-semibold text-gray-950 hover:bg-gold-light disabled:opacity-50"
+                >{pending[post.id] ? 'Saving...' : 'Confirm lip sync'}</button>}
                 <div className="flex flex-wrap gap-1.5" aria-label="Choose a content type">
                   {types.map((type) => (
                     <button

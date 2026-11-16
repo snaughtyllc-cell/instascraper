@@ -1,6 +1,7 @@
 const fs = require('node:fs/promises');
 const { decideSort, sortConfig } = require('./sort-status');
 const { describeReel, estimateCostUsd, makeGeminiClient, cleanAiLookTags, cleanTranscript, cleanAudioKind, cleanLayout } = require('./gemini-sort');
+const { decideTalkingVsLipSync } = require('./lipsync-signals');
 
 let running = false;
 let whenIdle = Promise.resolve();
@@ -33,10 +34,12 @@ async function withSortLock(work, { waitForIdle = true, skipped } = {}) {
   finally { running = false; release(); }
 }
 
-async function runAutoSort({ pool = require('./db'), describe, cfg = sortConfig(), limit, videoDir, waitForIdle = false } = {}) {
+async function runAutoSort({ pool = require('./db'), describe, detect, cfg = sortConfig(), limit, videoDir, waitForIdle = false } = {}) {
   const result = emptyResult();
   if (!cfg.enabled) return result;
   return withSortLock(async () => {
+    const { repeatedAudio, refreshRepeatedAudio, checkTalkingPost, lipSyncDetector } = require('./lipsync-recheck');
+    await refreshRepeatedAudio(pool, await repeatedAudio(pool));
     // Recover a process exit after claiming the final attempt, even at the cap.
     await pool.query(`UPDATE posts SET sort_status='needs_look', content_type=NULL,
       ai_error=COALESCE(ai_error,'Classification interrupted after final attempt')
@@ -55,7 +58,13 @@ async function runAutoSort({ pool = require('./db'), describe, cfg = sortConfig(
       describe = input => describeReel(input, { client, model: cfg.model });
     }
     let consecutiveDescribeFailures = 0;
-    for (const post of candidates) {
+    for (const [index, post] of candidates.entries()) {
+      // A talking reel spends another attempt on its dedicated detector, so
+      // the budget calculated before this batch is no longer sufficient.
+      if (await attemptsToday(pool) >= cfg.dailyMax) {
+        result.skippedCap += candidates.length - index;
+        break;
+      }
       const claim = await pool.query(`UPDATE posts SET ai_attempts = COALESCE(ai_attempts,0)+1, ai_last_attempt_at = $1
         WHERE id = $2 AND sort_status = 'unsorted' AND ${liveClause}`, [new Date().toISOString(), post.id]);
       if (!claim.rowCount) continue;
@@ -71,16 +80,55 @@ async function runAutoSort({ pool = require('./db'), describe, cfg = sortConfig(
         }
         consecutiveDescribeFailures = 0;
         const decision = decideSort({ ai, typeValues: types.map(t => t.value), threshold: cfg.minConfidence });
+        const checkTalking = decision.sortStatus === 'auto' && decision.contentType === 'talking';
         const cost = estimateCostUsd(ai.usage || {}, cfg);
         const update = await pool.query(`UPDATE posts SET content_type=$1, sort_status=$2,
           ai_type=$3, ai_confidence=$4, ai_description=$5, ai_suggested_type=$6, ai_model=$7,
           ai_classified_at=$8, ai_cost_usd=$9, ai_look_tags=$10, ai_transcript=$11, ai_audio_kind=$12, ai_layout=$13, ai_error=NULL
           WHERE id=$14 AND sort_status='unsorted' AND ${liveClause}`,
-        [decision.contentType, decision.sortStatus, ai.type, ai.confidence, ai.description, ai.suggestedType, cfg.model, new Date().toISOString(), cost, JSON.stringify(cleanAiLookTags(ai.lookTags, lookTags)), ai.audioKind === 'own_speech' ? cleanTranscript(ai.transcript) : null, cleanAudioKind(ai.audioKind), cleanLayout(ai.layout), post.id]);
+        [decision.contentType, checkTalking ? 'needs_look' : decision.sortStatus, ai.type, ai.confidence, ai.description,
+          checkTalking ? 'lipsync' : ai.suggestedType, cfg.model, new Date().toISOString(), cost,
+          JSON.stringify(cleanAiLookTags(ai.lookTags, lookTags)), ai.audioKind === 'own_speech' ? cleanTranscript(ai.transcript) : null,
+          cleanAudioKind(ai.audioKind), cleanLayout(ai.layout), post.id]);
         console.log(`[Sort] reel=${post.id} status=${decision.sortStatus} estimated_usd=${cost.toFixed(6)}`);
         if (update.rowCount) {
           result.classified++;
           result[decision.sortStatus === 'auto' ? 'auto' : 'needsLook']++;
+          if (checkTalking) {
+            let checked;
+            try {
+              detect ||= lipSyncDetector(cfg);
+              const repeats = await repeatedAudio(pool);
+              checked = await checkTalkingPost({ pool, post, detect, cfg, videoDir, repeated: repeats.get(post.id), pendingSort: true });
+              if (checked.updated && checked.decision.sortStatus === 'needs_look') {
+                result.auto--;
+                result.needsLook++;
+              }
+              if (checked.skippedCap) result.skippedCap++;
+            } catch (error) {
+              result.errored++;
+              console.error(`[Lip sync] reel=${post.id}:`, error.message);
+            } finally {
+              const repeats = await repeatedAudio(pool);
+              if (!checked?.detected) {
+                // A missing paid verdict is weak evidence too. Do not publish
+                // unchecked talking reels to Film when the cap or API fails.
+                const repeated = repeats.get(post.id);
+                const fallback = decideTalkingVsLipSync({ repeated });
+                const update = await pool.query(`UPDATE posts SET sort_status=$1,content_type=$2,
+                  ai_suggested_type=$3,lipsync_repeat_of=$4
+                  WHERE id=$5 AND sort_status='needs_look' AND ai_suggested_type='lipsync' AND content_type='talking'
+                    AND ai_lipsync_checked_at IS NULL AND ${liveClause}`,
+                [fallback.sortStatus, fallback.contentType || 'talking', fallback.suggestedType || null,
+                  repeated?.matchId ?? null, post.id]);
+                if (update.rowCount && fallback.sortStatus === 'needs_look') {
+                  result.auto--;
+                  result.needsLook++;
+                }
+              }
+              await refreshRepeatedAudio(pool, repeats);
+            }
+          }
         }
       } catch (error) {
         await pool.query(`UPDATE posts SET ai_error=$1,

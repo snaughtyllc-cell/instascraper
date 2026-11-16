@@ -4,6 +4,7 @@ const { redecideFromDescription, makeGeminiClient, estimateCostUsd, cleanAiLookT
 const { withSortLock, attemptsToday } = require('./sort-runner');
 
 const LIVE = '(soft_deleted = 0 OR soft_deleted IS NULL) AND (archived = 0 OR archived IS NULL)';
+const TEXT_REDECIDABLE = "NOT (COALESCE(ai_suggested_type,'')='lipsync' AND (COALESCE(content_type,'')='talking' OR ai_lipsync_checked_at IS NOT NULL OR lipsync_repeat_of IS NOT NULL))";
 const redecideQueues = new WeakMap();
 
 function groupSuggestions(rows) {
@@ -43,7 +44,7 @@ function redecideNeedsLook({ pool, redecide, cfg = sortConfig() }) {
       const types = (await pool.query('SELECT value, label, description FROM content_types ORDER BY sort_order, label')).rows;
       const lookTags = (await pool.query("SELECT value,label,category FROM look_tags WHERE category <> 'custom' ORDER BY category,sort_order,label")).rows;
       const rows = (await pool.query(`SELECT id, caption, ai_description, ai_audio_kind FROM posts
-        WHERE sort_status = 'needs_look' AND ai_description IS NOT NULL AND ai_description <> '' AND ${LIVE}
+        WHERE sort_status = 'needs_look' AND ai_description IS NOT NULL AND ai_description <> '' AND ${TEXT_REDECIDABLE} AND ${LIVE}
         ORDER BY id LIMIT $1`, [available])).rows;
       for (const row of rows) {
         let attemptId;
@@ -66,7 +67,7 @@ function redecideNeedsLook({ pool, redecide, cfg = sortConfig() }) {
               ai_cost_usd = COALESCE(ai_cost_usd, 0) + $9,
               ai_look_tags = COALESCE($10, ai_look_tags),
               ai_transcript = CASE WHEN ai_audio_kind = 'own_speech' THEN ai_transcript ELSE NULL END
-              WHERE id = $11 AND sort_status = 'needs_look' AND ${LIVE}`,
+              WHERE id = $11 AND sort_status = 'needs_look' AND ${TEXT_REDECIDABLE} AND ${LIVE}`,
             [decision.contentType, decision.sortStatus, ai.type, ai.confidence, ai.description,
               ai.suggestedType || null, currentCfg.model, new Date().toISOString(), cost,
               Array.isArray(ai.lookTags) ? JSON.stringify(cleanAiLookTags(ai.lookTags, lookTags)) : null, row.id]);
@@ -97,7 +98,7 @@ function redecideNeedsLook({ pool, redecide, cfg = sortConfig() }) {
   return state.promise;
 }
 
-function registerSortRoutes(app, { pool, runAutoSort, runLookBackfill, runTranscriptBackfill, runTalkingRecheck, runLayoutRecheck, redecide, cfg = sortConfig() }) {
+function registerSortRoutes(app, { pool, runAutoSort, runLookBackfill, runTranscriptBackfill, runTalkingRecheck, runLipSyncRecheck, runLayoutRecheck, redecide, cfg = sortConfig() }) {
   const route = (handler) => (req, res, next) => Promise.resolve(handler(req, res)).catch(next);
   const backgroundRedecide = () => {
     redecideNeedsLook({ pool, redecide, cfg }).catch((error) => console.error('[Sort] redecide:', error.message));
@@ -213,8 +214,9 @@ function registerSortRoutes(app, { pool, runAutoSort, runLookBackfill, runTransc
   }));
 
   const recheckModelId = async (req, res) => {
-    if (req.query.modelId === undefined) return undefined;
-    const raw = String(req.query.modelId);
+    const value = req.query.modelId ?? req.body?.modelId;
+    if (value === undefined) return undefined;
+    const raw = String(value);
     const modelId = Number(raw);
     if (!/^\d+$/.test(raw) || !Number.isSafeInteger(modelId) || modelId <= 0 || modelId > 2147483647) {
       res.status(400).json({ error: 'Invalid modelId' });
@@ -231,6 +233,28 @@ function registerSortRoutes(app, { pool, runAutoSort, runLookBackfill, runTransc
     const modelId = await recheckModelId(req, res);
     if (modelId === null) return;
     res.json(await require('./talking-recheck').talkingRecheckEstimate(pool, cfg, { modelId }));
+  }));
+
+  app.get('/sort/lipsync-recheck/estimate', route(async (req, res) => {
+    const modelId = await recheckModelId(req, res);
+    if (modelId === null) return;
+    res.json(await require('./lipsync-recheck').lipSyncRecheckEstimate(pool, cfg, { modelId }));
+  }));
+
+  let lipSyncRecheckRunning = false;
+  app.post('/sort/lipsync-recheck', route(async (req, res) => {
+    const modelId = await recheckModelId(req, res);
+    if (modelId === null) return;
+    const limit = req.body?.limit;
+    if (limit !== undefined && (!Number.isSafeInteger(limit) || limit <= 0)) {
+      return res.status(400).json({ error: 'Invalid limit' });
+    }
+    if (lipSyncRecheckRunning) return res.json({ started: false });
+    lipSyncRecheckRunning = true;
+    res.json({ started: true });
+    Promise.resolve().then(() => (runLipSyncRecheck || require('./lipsync-recheck').runLipSyncRecheck)({ pool, cfg, modelId, limit }))
+      .catch(error => console.error('[Lip sync recheck]:', error.message))
+      .finally(() => { lipSyncRecheckRunning = false; });
   }));
 
   let talkingRecheckRunning = false;

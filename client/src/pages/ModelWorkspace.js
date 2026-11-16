@@ -5,13 +5,14 @@ import {
   rejectWorkspaceProposal, confirmAllWorkspaceProposals, getWorkspaceSuggestions,
   approveWorkspaceSuggestion, dismissWorkspaceSuggestion, snoozeWorkspaceSuggestion,
   getContentTypes, getLookTags, getWorkspaceTaste, addCreatorLookTag, removeCreatorLookTag,
-  rejectWorkspaceReel, undoWorkspaceReelRejection,
+  rejectWorkspaceReel, undoWorkspaceReelRejection, setPostContentType,
 } from '../api';
 import API_URL from '../api-base';
 import { SuggestedReelStrip } from './SuggestedAccountsTab';
 import { LookTagChips } from '../components/LookTags';
 import Transcript from '../components/Transcript';
 import LayoutBadge from '../components/LayoutBadge';
+import LipSyncDetails from '../components/LipSyncDetails';
 
 const button = 'px-3 py-2 rounded-lg text-xs font-medium bg-gray-800 border border-gray-700 hover:border-gray-500 disabled:opacity-50';
 
@@ -124,6 +125,27 @@ function Workspace({ modelId, onBack, onEdit }) {
       if (mounted.current) { setBusy(false); setPendingReel(null); }
     }
   };
+  const correctReelType = async (reel, contentType) => {
+    if (busyRef.current) return;
+    busyRef.current = true;
+    setBusy(true);
+    setPendingReel({ id: reel.id, type: true });
+    setReelErrors(previous => ({ ...previous, [reel.id]: '' }));
+    let changed = false;
+    try {
+      await setPostContentType(reel.id, contentType);
+      if (!mounted.current) return;
+      changed = true;
+      pagingDirty.current = true;
+      setReels(previous => previous.map(item => item.id === reel.id ? { ...item, niche: contentType, content_type: contentType, sort_status: 'manual' } : item));
+      await reloadReels();
+    } catch (err) {
+      if (mounted.current) setReelErrors(previous => ({ ...previous, [reel.id]: `${changed ? 'Type saved, but the feed could not reload.' : 'Could not save this type. Try again.'} ${err.response?.data?.error || err.message}` }));
+    } finally {
+      busyRef.current = false;
+      if (mounted.current) { setBusy(false); setPendingReel(null); }
+    }
+  };
   const more = async () => {
     if (busyRef.current) return;
     busyRef.current = true;
@@ -227,8 +249,11 @@ function Workspace({ modelId, onBack, onEdit }) {
           <div className="grid grid-cols-2 md:grid-cols-3 xl:grid-cols-4 gap-4">
             {reels.map(reel => <article key={reel.id} className="bg-gray-900 rounded-xl overflow-hidden border border-gray-800">
               <video src={`${API_URL}/video/${reel.id}`} poster={`${API_URL}/thumb/${reel.id}`} controls playsInline preload="none" className="w-full aspect-[9/16] object-cover bg-black" />
-              <div className="p-3 text-sm"><p>@{reel.account_handle}{reel.platform === 'tiktok' && <span className="ml-2 px-1.5 py-0.5 rounded text-[10px] bg-gray-800 text-gray-400 border border-gray-700">TikTok</span>}</p><p className="text-xs text-gray-400">{labels[reel.niche] || reel.niche}{reel.ai_confidence != null && ` · ${Math.round(reel.ai_confidence * 100)}%`}</p><LayoutBadge layout={reel.ai_layout} /><LookTagChips tags={reel.ai_look_tags} vocabulary={lookTags} /><Transcript transcript={reel.ai_transcript} />
-                <button disabled={busy} onClick={() => reviewReel(reel)} className={`${button} mt-3 text-gray-300`}>{pendingReel?.id === reel.id && !pendingReel.undo ? 'Removing…' : 'Not a good pick'}</button>
+              <div className="p-3 text-sm"><p>@{reel.account_handle}{reel.platform === 'tiktok' && <span className="ml-2 px-1.5 py-0.5 rounded text-[10px] bg-gray-800 text-gray-400 border border-gray-700">TikTok</span>}</p><p className="text-xs text-gray-400">{labels[reel.niche] || reel.niche}{reel.ai_confidence != null && ` · ${Math.round(reel.ai_confidence * 100)}%`}</p><LayoutBadge layout={reel.ai_layout} /><LookTagChips tags={reel.ai_look_tags} vocabulary={lookTags} /><Transcript transcript={reel.ai_transcript} /><LipSyncDetails reel={reel} />
+                <div className="mt-3 flex flex-wrap gap-2">
+                  {['talking', 'lipsync'].includes(reel.niche || reel.content_type) && <button disabled={busy} onClick={() => correctReelType(reel, (reel.niche || reel.content_type) === 'talking' ? 'lipsync' : 'talking')} className={`${button} text-gold`}>{pendingReel?.id === reel.id && pendingReel.type ? 'Saving…' : (reel.niche || reel.content_type) === 'talking' ? 'Lip sync, not talking' : 'Talking, not lip sync'}</button>}
+                  <button disabled={busy} onClick={() => reviewReel(reel)} className={`${button} text-gray-300`}>{pendingReel?.id === reel.id && !pendingReel.undo && !pendingReel.type ? 'Removing…' : 'Not a good pick'}</button>
+                </div>
                 {reelErrors[reel.id] && <p role="alert" className="mt-2 text-xs text-red-300">{reelErrors[reel.id]}</p>}
               </div>
             </article>)}

@@ -34,6 +34,8 @@ export const getTranscriptBackfillEstimate = () => api.get('/sort/transcript-bac
 export const startTranscriptBackfill = () => api.post('/sort/transcript-backfill');
 export const getTalkingRecheckEstimate = (modelId) => api.get('/sort/talking-recheck/estimate', { params: modelId ? { modelId } : undefined });
 export const startTalkingRecheck = (modelId) => api.post('/sort/talking-recheck', { confirm: true }, { params: modelId ? { modelId } : undefined });
+export const getLipSyncRecheckEstimate = (modelId) => api.get('/sort/lipsync-recheck/estimate', { params: modelId ? { modelId } : undefined });
+export const startLipSyncRecheck = (modelId, limit) => api.post('/sort/lipsync-recheck', { ...(modelId ? { modelId } : {}), ...(limit !== undefined ? { limit } : {}) });
 export const getLayoutRecheckEstimate = () => api.get('/sort/layout-recheck/estimate');
 export const startLayoutRecheck = () => api.post('/sort/layout-recheck');
 
