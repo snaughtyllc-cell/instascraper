@@ -21,6 +21,14 @@ const positive = (value, fallback) => Number.isFinite(Number(value)) && Number(v
 const apifyToken = env => env.REACT_APIFY_API_KEY || env.APIFY_API_KEY;
 let warnedNoApifyKey = false;
 
+async function isTikTokReference(pool, shortcode) {
+  if (!shortcode.startsWith('tt_')) return false;
+  const result = await pool.query('SELECT * FROM posts WHERE shortcode = $1 LIMIT 1', [shortcode]);
+  // Stored legacy Instagram shortcodes may also begin with tt_. Only unknown
+  // references matching the generated TikTok numeric ID shape are excluded.
+  return result.rows[0] ? result.rows[0].platform === 'tiktok' : /^tt_\d+$/.test(shortcode);
+}
+
 function warnNoApifyKey() {
   if (warnedNoApifyKey) return;
   warnedNoApifyKey = true;
@@ -399,7 +407,7 @@ function createReactFetchWorker({ pool, env = process.env, now = Date.now, apify
   }
 
   async function request(shortcode, { analyze = true } = {}) {
-    if (!isValidShortcode(shortcode)) return unavailable();
+    if (!isValidShortcode(shortcode) || await isTikTokReference(pool, shortcode)) return unavailable();
     // Retain overlapping callers' interest even after a database claim commits
     // but before its transaction promise returns and registers the local claim.
     const interest = requestInterests.get(shortcode) || { count: 0, analyze: false };
@@ -488,4 +496,4 @@ function createReactFetchWorker({ pool, env = process.env, now = Date.now, apify
   return { start, request, waitForIdle };
 }
 
-module.exports = { createReactFetchWorker, createApifyClient, downloadReference, allowedVideoUrl };
+module.exports = { createReactFetchWorker, createApifyClient, downloadReference, allowedVideoUrl, isTikTokReference };

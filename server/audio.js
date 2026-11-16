@@ -125,7 +125,7 @@ function buildAudioReelsQuery(audioId, niches, { all = false, limit = 12, modelI
   params.push(limit);
   const sql = `
     SELECT posts.id, posts.shortcode, posts.audio_id, posts.view_count, posts.account_handle,
-           posts.caption, posts.post_url, posts.posted_at,
+           posts.caption, posts.post_url, posts.platform, posts.posted_at,
            ${effectiveNicheExpr()} AS niche
     FROM posts
     LEFT JOIN creator_types ct ON posts.account_handle = ct.account_handle
@@ -170,7 +170,7 @@ async function trendingAudio(db, { niches = [], all = false, cfg = audioConfig()
   }
   const nicheOrder = modelScoped && list.length ? `${nicheMatchExpr(list, exParams)} DESC, ` : '';
   const exSql = `
-    SELECT posts.id, posts.shortcode, posts.audio_id, posts.view_count, posts.account_handle, posts.post_url
+    SELECT posts.id, posts.shortcode, posts.audio_id, posts.view_count, posts.account_handle, posts.post_url, posts.platform
     FROM posts
     LEFT JOIN creator_types ct ON posts.account_handle = ct.account_handle
     WHERE posts.audio_id IN (${ph})

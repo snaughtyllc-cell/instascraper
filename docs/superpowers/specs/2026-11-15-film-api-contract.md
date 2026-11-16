@@ -36,11 +36,19 @@ Film (UI)  ──/api/filming/find/*──▶  HQ (knows the model)  ──/film
   "videoUrl": "https://<instascraper>/film/v1/media/123?exp=…&sig=…",
   "thumbUrl": "https://<instascraper>/film/v1/thumb/123?exp=…&sig=…",
   "instagramUrl": "https://www.instagram.com/reel/<shortcode>/",
+  "platform": "instagram",
+  "sourceUrl": "https://www.instagram.com/reel/<shortcode>/",
   "saved": false
 }
 ```
 
 `transcript` is an additive `string | null` field, at most 4000 characters. It contains the verbatim clear speech by the person on screen in its original language, with line breaks between sentences or lines, for Film's teleprompter script. It has no speaker labels, timestamps or commentary, and never contains song lyrics. Missing transcripts and reels with no clear speech return `null` (including the internal empty-string sentinel).
+
+`platform` is an additive `"instagram" | "tiktok"` field; legacy rows are Instagram.
+`sourceUrl` is the stored source post URL, falling back to the built Instagram reel URL.
+The existing `instagramUrl` field keeps its Instagram behavior and contains the TikTok
+post URL for TikTok reels. TikTok references support cached dance media; React mode
+and on-demand Instagram reference fetching exclude TikTok shortcodes (`tt_` prefix).
 
 ## Endpoints (all under `/film/v1`, bearer required except media)
 

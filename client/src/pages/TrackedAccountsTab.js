@@ -263,13 +263,14 @@ export default function TrackedAccountsTab() {
                 <div className="flex-1 min-w-0">
                   <div className="flex items-center gap-2">
                     <a
-                      href={`https://instagram.com/${account.username}`}
+                      href={account.platform === 'tiktok' ? `https://www.tiktok.com/@${account.username}` : `https://instagram.com/${account.username}`}
                       target="_blank"
                       rel="noopener noreferrer"
                       className="text-sm font-semibold text-gold hover:text-gold-light transition-colors"
                     >
                       @{account.username}
                     </a>
+                    {account.platform === 'tiktok' && <span className="px-1.5 py-0.5 rounded text-[10px] bg-gray-800 text-gray-400 border border-gray-700">TikTok</span>}
                     {account.tags && (
                       <div className="flex gap-1">
                         {account.tags.split(',').filter(Boolean).map(tag => (
@@ -335,6 +336,7 @@ export default function TrackedAccountsTab() {
               <div key={account.username} className="px-5 py-3.5 flex items-center gap-4 opacity-60">
                 <div className="flex-1 min-w-0">
                   <span className="text-sm font-semibold text-gray-400">@{account.username}</span>
+                  {account.platform === 'tiktok' && <span className="ml-2 px-1.5 py-0.5 rounded text-[10px] bg-gray-800 text-gray-400 border border-gray-700">TikTok</span>}
                   <OwnerChips owners={account.owners} />
                   <div className="text-xs text-gray-600 mt-0.5">
                     {formatCount(account.followers)} followers &middot; Last scraped {timeAgo(account.last_scraped_at)}

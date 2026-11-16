@@ -12,7 +12,7 @@ function makeDb() {
   const s = new Database(':memory:');
   s.exec(`CREATE TABLE posts (
     id INTEGER PRIMARY KEY, shortcode TEXT, content_type TEXT, account_handle TEXT, posted_at TEXT,
-    sort_status TEXT DEFAULT 'auto',
+    sort_status TEXT DEFAULT 'auto', platform TEXT,
     view_count INTEGER, caption TEXT, post_url TEXT, video_cache_status TEXT,
     soft_deleted INTEGER DEFAULT 0, archived INTEGER DEFAULT 0,
     audio_id TEXT, audio_title TEXT, audio_author TEXT, is_original_audio INTEGER)`);

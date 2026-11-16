@@ -138,7 +138,7 @@ export default api;
 export const getWorkspace = (id) => api.get(`/workspaces/${id}`);
 export const getWorkspaceTaste = (id) => api.get(`/workspaces/${id}/taste`);
 export const getWorkspaceCreators = (id) => api.get(`/workspaces/${id}/creators`);
-export const addWorkspaceCreator = (id, username) => api.post(`/workspaces/${id}/creators`, { username });
+export const addWorkspaceCreator = (id, username, platform) => api.post(`/workspaces/${id}/creators`, { username, ...(platform ? { platform } : {}) });
 export const removeWorkspaceCreator = (id, username) => api.delete(`/workspaces/${id}/creators/${encodeURIComponent(username)}`);
 export const getWorkspaceReels = (id, page = 1) => api.get(`/workspaces/${id}/reels`, { params: { page } });
 export const rejectWorkspaceReel = (id, postId) => api.post(`/workspaces/${id}/reels/${postId}/reject`);

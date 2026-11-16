@@ -63,6 +63,25 @@ async function fixture(t, options = {}) {
     advance: ms => { time += ms; }, time: () => time };
 }
 
+test('TikTok shortcodes never reserve or launch an Instagram reference fetch', async t => {
+  const f = await fixture(t);
+  assert.deepEqual(await f.worker.request('tt_7450000000000000000'), { state: 'unavailable', launched: false });
+  await f.worker.waitForIdle();
+  assert.equal(f.launches.length, 0);
+  assert.equal(f.db.prepare('SELECT COUNT(*) AS n FROM film_react_refs').get().n, 0);
+  assert.equal(f.db.prepare('SELECT COUNT(*) AS n FROM film_react_ref_attempts').get().n, 0);
+});
+
+test('Instagram references with tt_ prefixes retain their fetch behavior', async t => {
+  const f = await fixture(t);
+  f.db.prepare('INSERT INTO posts (shortcode) VALUES (?)').run('tt_123456789');
+  for (const shortcode of ['tt_ABCDEFGH', 'tt_123456789']) {
+    assert.deepEqual(await f.worker.request(shortcode), { state: 'fetching', launched: true });
+  }
+  await f.worker.waitForIdle();
+  assert.equal(f.launches.length, 2);
+});
+
 test('successful fetch publishes its pin before queuing analysis and tolerates analysis failure', async t => {
   const calls = [];
   const f = await fixture(t, { onReady: async (shortcode, reference) => {

@@ -13,7 +13,7 @@ const thumbnails = require('./thumbnails');
 const { isValidShortcode, ensureReactReference, getPinnedReferencePath, markDanceReference,
   availableReferencePath, usableFile } = require('./react-reference');
 const { createReactRenderWorker, validateRenderRequest } = require('./react-render');
-const { createReactFetchWorker } = require('./react-fetch');
+const { createReactFetchWorker, isTikTokReference } = require('./react-fetch');
 const { createReactAnalysisWorker } = require('./react-analysis');
 
 const MEDIA_TTL_SECONDS = 6 * 60 * 60;
@@ -119,6 +119,9 @@ async function reelPresenter(pool, req, res) {
       return result.href;
     };
     const type = post.niche || post.content_type || '';
+    const platform = post.platform === 'tiktok' ? 'tiktok' : 'instagram';
+    const instagramUrl = platform === 'tiktok' ? post.post_url
+      : `https://www.instagram.com/reel/${encodeURIComponent(post.shortcode)}/`;
     return {
       id,
       type,
@@ -133,7 +136,9 @@ async function reelPresenter(pool, req, res) {
       nicheMatch: niches.includes(type),
       videoUrl: url('media'),
       thumbUrl: url('thumb'),
-      instagramUrl: `https://www.instagram.com/reel/${encodeURIComponent(post.shortcode)}/`,
+      instagramUrl,
+      platform,
+      sourceUrl: post.post_url || instagramUrl,
       saved,
     };
   };
@@ -204,6 +209,9 @@ function registerFilmApi(app, { pool,
     }
     const mode = req.body.mode === undefined ? 'react' : req.body.mode;
     if (!['react', 'dance'].includes(mode)) return res.status(400).json({ error: 'invalid_mode' });
+    if (mode === 'react' && await isTikTokReference(pool, req.body.shortcode)) {
+      return res.status(404).json({ error: 'reel_not_available' });
+    }
     const secret = process.env.FILM_MEDIA_SECRET;
     if (!secret) return res.status(503).json({ error: 'media_unavailable' });
     const shortcode = req.body.shortcode;
@@ -253,6 +261,7 @@ function registerFilmApi(app, { pool,
     }
     let queued = 0;
     for (const shortcode of new Set(shortcodes)) {
+      if (await isTikTokReference(pool, shortcode)) continue;
       if (getPinnedReferencePath(shortcode)) continue;
       const existing = await pool.query('SELECT id FROM posts WHERE shortcode = $1 LIMIT 1', [shortcode]);
       if (existing.rows.length) continue;
@@ -265,6 +274,10 @@ function registerFilmApi(app, { pool,
   router.post('/react-render', asyncHandler(async (req, res) => {
     const error = validateRenderRequest(req.body);
     if (error) return res.status(400).json({ error });
+    if (req.body.output !== 'dance' && req.body.reference.kind === 'instagram'
+      && await isTikTokReference(pool, req.body.reference.shortcode)) {
+      return res.status(400).json({ error: 'invalid_reference' });
+    }
     try { await reactWorker.enqueue(req.body); }
     catch { return res.status(503).json({ error: 'render_unavailable' }); }
     return res.status(202).json({ accepted: true });

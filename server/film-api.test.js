@@ -174,11 +174,12 @@ test('feed matches /me/feed ranking, paginates in order, and emits exactly the R
   assert.deepEqual(reels.map(row => row.id), me.body.posts.map(row => row.id));
   assert.deepEqual(reels.map(row => row.nicheMatch), [true, true, true, true, false]);
   const reel = response.body.reels[1];
-  assert.deepEqual(Object.keys(reel).sort(), ['id', 'type', 'typeLabel', 'lookTags', 'caption', 'transcript', 'creatorHandle', 'postedAt', 'viewCount', 'likeCount', 'nicheMatch', 'videoUrl', 'thumbUrl', 'instagramUrl', 'saved'].sort());
+  assert.deepEqual(Object.keys(reel).sort(), ['id', 'type', 'typeLabel', 'lookTags', 'caption', 'transcript', 'creatorHandle', 'postedAt', 'viewCount', 'likeCount', 'nicheMatch', 'videoUrl', 'thumbUrl', 'instagramUrl', 'platform', 'sourceUrl', 'saved'].sort());
   assert.deepEqual({ ...reel, videoUrl: undefined, thumbUrl: undefined }, {
     id: 101, type: 'talking', typeLabel: 'Talking', lookTags: ['brunette', 'bedroom'], caption: 'My caption', transcript: 'My spoken words.\nMy next sentence.', creatorHandle: 'mine',
     postedAt: '2026-11-10T18:22:00Z', viewCount: 120000, likeCount: 9100, nicheMatch: true,
-    videoUrl: undefined, thumbUrl: undefined, instagramUrl: 'https://www.instagram.com/reel/film-101/', saved: false,
+    videoUrl: undefined, thumbUrl: undefined, instagramUrl: 'https://www.instagram.com/reel/film-101/', platform: 'instagram',
+    sourceUrl: 'https://www.instagram.com/reel/film-101/', saved: false,
   });
   for (const [kind, value] of [['media', reel.videoUrl], ['thumb', reel.thumbUrl]]) {
     const url = new URL(value);
@@ -190,6 +191,53 @@ test('feed matches /me/feed ranking, paginates in order, and emits exactly the R
   }
   process.env.PUBLIC_BASE_URL = 'https://public.example/';
   assert.equal(new URL((await request('GET', `${filmPath}/feed`)).body.reels[0].videoUrl).origin, 'https://public.example');
+});
+
+test('TikTok Film reels use their source URL while Instagram keeps its legacy link', async () => {
+  const postUrl = 'https://www.tiktok.com/@mine/video/7450000000000000000';
+  await pool.query('UPDATE posts SET platform = $1, shortcode = $2, post_url = $3 WHERE id = $4',
+    ['tiktok', 'tt_7450000000000000000', postUrl, 101]);
+  await pool.query('UPDATE posts SET post_url = $1 WHERE id = $2', ['https://www.instagram.com/p/film-102/', 102]);
+  for (const suffix of ['/feed', '/saves']) {
+    if (suffix === '/saves') {
+      for (const id of [101, 102]) await pool.query('INSERT INTO model_saved_posts (model_id,post_id) VALUES ($1,$2)', [1, id]);
+    }
+    const response = await request('GET', `${filmPath}${suffix}`);
+    assert.equal(response.status, 200);
+    const tiktok = response.body.reels.find(row => row.id === 101);
+    assert.equal(tiktok.instagramUrl, postUrl);
+    assert.equal(tiktok.sourceUrl, postUrl);
+    assert.equal(tiktok.platform, 'tiktok');
+    const instagram = response.body.reels.find(row => row.id === 102);
+    assert.equal(instagram.instagramUrl, 'https://www.instagram.com/reel/film-102/');
+    assert.equal(instagram.sourceUrl, 'https://www.instagram.com/p/film-102/');
+    assert.equal(instagram.platform, 'instagram');
+  }
+});
+
+test('TikTok references stay out of React mode and Instagram prefetch', async () => {
+  const shortcode = 'tt_7450000000000000000';
+  await pool.query('UPDATE posts SET platform = $1, shortcode = $2 WHERE id = $3', ['tiktok', shortcode, 101]);
+  fs.writeFileSync(path.join(dir, 'videos', '101.mp4'), 'tiktok dance reference');
+  const react = await request('POST', '/film/v1/react-reference', { shortcode });
+  assert.equal(react.status, 404);
+  const prefetch = await request('POST', '/film/v1/react-prefetch', { shortcodes: [shortcode, 'tt_7450000000000000001'] });
+  assert.equal(prefetch.status, 202);
+  assert.equal(prefetch.body.queued, 0);
+  assert.equal((await pool.query('SELECT COUNT(*) AS n FROM film_react_refs')).rows[0].n, 0);
+  const dance = await request('POST', '/film/v1/react-reference', { shortcode, mode: 'dance' });
+  assert.equal(dance.status, 200);
+  assert.equal(dance.body.analysis, null);
+  const url = new URL(dance.body.originalVideoUrl);
+  assert.equal((await request('GET', url.pathname + url.search)).text, 'tiktok dance reference');
+});
+
+test('Instagram tt_ shortcodes retain React reference access', async () => {
+  for (const shortcode of ['tt_ABCDEFGH', 'tt_123456789']) {
+    await pool.query('UPDATE posts SET shortcode = $1 WHERE id = $2', [shortcode, 101]);
+    fs.writeFileSync(path.join(dir, 'videos', '101.mp4'), 'instagram reference');
+    assert.equal((await request('POST', '/film/v1/react-reference', { shortcode })).status, 200);
+  }
 });
 
 test('performance shares look and taste ranking across Film and /me/feed without changing the Reel contract', async (t) => {
@@ -215,7 +263,7 @@ test('performance shares look and taste ranking across Film and /me/feed without
     'summed rank beats recency while preferred niches outrank the strongest nonpreferred reel');
   assert.deepEqual(response.body.reels.map(row => row.id), me.body.posts.map(row => row.id));
   assert.deepEqual(Object.keys(response.body).sort(), ['hasMore', 'page', 'reels']);
-  const reelKeys = ['id', 'type', 'typeLabel', 'lookTags', 'caption', 'transcript', 'creatorHandle', 'postedAt', 'viewCount', 'likeCount', 'nicheMatch', 'videoUrl', 'thumbUrl', 'instagramUrl', 'saved'].sort();
+  const reelKeys = ['id', 'type', 'typeLabel', 'lookTags', 'caption', 'transcript', 'creatorHandle', 'postedAt', 'viewCount', 'likeCount', 'nicheMatch', 'videoUrl', 'thumbUrl', 'instagramUrl', 'platform', 'sourceUrl', 'saved'].sort();
   for (const reel of response.body.reels) assert.deepEqual(Object.keys(reel).sort(), reelKeys);
 });
 

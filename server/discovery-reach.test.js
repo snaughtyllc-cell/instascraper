@@ -36,6 +36,11 @@ test('selectDiscoverySources: deterministic tie-break by username; empty input',
   assert.deepStrictEqual(selectDiscoverySources(undefined, 5), []);
 });
 
+test('selectDiscoverySources: TikTok accounts never become Instagram discovery sources', () => {
+  const accounts = [{ username: 'tiktok', platform: 'tiktok' }, { username: 'legacy' }, { username: 'instagram', platform: 'instagram' }];
+  assert.deepStrictEqual(selectDiscoverySources(accounts, 5).map(a => a.username), ['instagram', 'legacy']);
+});
+
 test('selectDiscoverySources: malformed date sorts as never-discovered (fail-open)', () => {
   const accounts = [
     { username: 'good', last_discovery_at: '2026-06-10T00:00:00Z' },

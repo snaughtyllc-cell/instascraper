@@ -95,7 +95,7 @@ export default function IdeaReel({ reel, active = false, onPlay, pageActive = tr
                   <circle cx="12" cy="12" r="3.6" />
                   <circle cx="17.4" cy="6.6" r="1" fill="currentColor" stroke="none" />
                 </svg>
-                Open on IG
+                Open on {reel.platform === 'tiktok' ? 'TikTok' : 'IG'}
               </a>
             ) : (
               <button
@@ -119,7 +119,7 @@ export default function IdeaReel({ reel, active = false, onPlay, pageActive = tr
         {formatCount(reel.view_count)}
       </div>
       {reel.account_handle && (
-        <div className="text-[11px] font-bold text-model-coral-ink truncate">@{reel.account_handle}</div>
+        <div className="text-[11px] font-bold text-model-coral-ink truncate">@{reel.account_handle}{reel.platform === 'tiktok' && <span className="ml-1 rounded border border-model-line bg-model-surface px-1 py-0.5 text-[9px] text-model-muted">TikTok</span>}</div>
       )}
     </div>
   );

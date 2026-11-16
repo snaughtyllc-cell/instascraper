@@ -3,6 +3,7 @@ const { ensureSortStatus, SORT_COLUMNS } = require('./sort-migration');
 const { ensureWorkspaceTables, ensureLookTables } = require('./workspace-migration');
 const { ensureFilmTables } = require('./film-migration');
 const { ensureContentTypeDescriptions } = require('./content-types-migration');
+const { ensureTikTokPlatform } = require('./tiktok-migration');
 
 const USE_PG = !!process.env.DATABASE_URL;
 
@@ -458,6 +459,7 @@ async function initDB() {
   }
 
   await ensureSortStatus(db, { isPg: USE_PG });
+  await ensureTikTokPlatform(db, { isPg: USE_PG });
   await ensureWorkspaceTables(db, { isPg: USE_PG });
   await ensureLookTables(db, { isPg: USE_PG });
   await ensureFilmTables(db, { isPg: USE_PG });

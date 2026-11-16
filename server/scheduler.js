@@ -84,6 +84,7 @@ function selectDiscoverySources(accounts, max) {
   // and -1 - -1 = 0 so the username tie-break still fires; -Infinity would yield NaN here).
   const ms = (iso) => { const t = iso ? new Date(iso).getTime() : NaN; return Number.isFinite(t) ? t : -1; };
   return (accounts || [])
+    .filter(a => a.platform !== 'tiktok')
     .slice()
     .sort((a, b) => {
       const d = ms(a.last_discovery_at) - ms(b.last_discovery_at);
@@ -98,6 +99,7 @@ function buildCadenceAccounts(accountRows, freqRows, cfg = cadenceConfig()) {
   const freq = new Map((freqRows || []).map(r => [r.username, Number(r.recent_post_count) || 0]));
   return (accountRows || []).map(a => ({
     username: a.username,
+    platform: a.platform || 'instagram',
     last_scraped_at: a.last_scraped_at || null,
     last_attempt_at: a.last_attempt_at || null,
     consecutive_failures: Number(a.consecutive_failures) || 0,
@@ -121,7 +123,7 @@ async function runAutoScrape() {
   console.log('[Scheduler] Auto-scrape starting...');
   try {
     const cfg = cadenceConfig();
-    const accountsRes = await pool.query("SELECT username, last_scraped_at, last_attempt_at, consecutive_failures FROM tracked_accounts WHERE status = 'active'");
+    const accountsRes = await pool.query("SELECT username, platform, last_scraped_at, last_attempt_at, consecutive_failures FROM tracked_accounts WHERE status = 'active'");
     if (accountsRes.rows.length === 0) { jobStatus.autoScrape.message = 'No active accounts'; jobStatus.autoScrape.status = 'idle'; return; }
 
     // posts.account_handle is raw-case (from the scraped owner username); tracked_accounts.username
@@ -144,7 +146,7 @@ async function runAutoScrape() {
     for (const account of due) {
       try {
         await pool.query(`UPDATE tracked_accounts SET last_attempt_at = TO_CHAR(NOW(), 'YYYY-MM-DD"T"HH24:MI:SS"Z"') WHERE username = $1`, [account.username]);
-        await scraperInstance.startScrapeJob({ query: account.username, queryType: 'username', minLikes: null, minViews: null, startDate: null, endDate: null, source: 'auto' });
+        await scraperInstance.startScrapeJob({ query: account.username, queryType: account.platform === 'tiktok' ? 'tiktok_username' : 'username', minLikes: null, minViews: null, startDate: null, endDate: null, source: 'auto' });
         scraped++;
         if (scraped < due.length) await new Promise(r => setTimeout(r, 30000));
       } catch (err) {
@@ -229,9 +231,10 @@ async function runDiscovery() {
   try {
     if (!scraperInstance || !scraperInstance.apiKey) { jobStatus.discovery.message = 'No Apify API key'; jobStatus.discovery.status = 'idle'; return; }
     const dcfg = discoveryConfig();
-    const trackedResult = await pool.query("SELECT username, last_discovery_at FROM tracked_accounts WHERE status = 'active'");
+    const trackedResult = await pool.query("SELECT username, platform, last_discovery_at FROM tracked_accounts WHERE status = 'active'");
+    const tiktokResult = await pool.query("SELECT username FROM tracked_accounts WHERE platform = 'tiktok'");
     const suggestedResult = await pool.query("SELECT username FROM suggested_accounts");
-    const trackedSet = new Set(trackedResult.rows.map(a => a.username));
+    const trackedSet = new Set([...trackedResult.rows, ...tiktokResult.rows].map(a => a.username));
     const suggestedSet = new Set(suggestedResult.rows.map(a => a.username));
 
     // Reach: rotate through all active accounts (least-recently-discovered first), capped per cycle.

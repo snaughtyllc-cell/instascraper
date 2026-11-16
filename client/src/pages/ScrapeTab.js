@@ -65,6 +65,7 @@ export default function ScrapeTab() {
                 className="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2.5 text-white text-sm"
               >
                 <option value="username">Username</option>
+                <option value="tiktok_username">TikTok username</option>
                 <option value="hashtag">Hashtag</option>
                 <option value="url">Post URL</option>
               </select>
@@ -73,13 +74,13 @@ export default function ScrapeTab() {
             {/* Query */}
             <div className="md:col-span-2">
               <label className="block text-sm text-gray-400 mb-1">
-                {queryType === 'username' ? 'Username' : queryType === 'hashtag' ? 'Hashtag' : 'Post URL'}
+                {queryType === 'username' ? 'Username' : queryType === 'tiktok_username' ? 'TikTok username' : queryType === 'hashtag' ? 'Hashtag' : 'Post URL'}
               </label>
               <input
                 type="text"
                 value={query}
                 onChange={(e) => setQuery(e.target.value)}
-                placeholder={queryType === 'username' ? 'garyvee' : queryType === 'hashtag' ? 'marketing' : 'https://instagram.com/p/...'}
+                placeholder={queryType === 'username' ? 'garyvee' : queryType === 'tiktok_username' ? '@pardisscarelllo' : queryType === 'hashtag' ? 'marketing' : 'https://instagram.com/p/...'}
                 className="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2.5 text-white text-sm placeholder-gray-500"
                 required
               />

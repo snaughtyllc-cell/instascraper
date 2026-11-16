@@ -1,26 +1,31 @@
 const { getCreators } = require('./creators-mix');
 const { creatorLookProfiles, creatorLookList } = require('./look-match');
+const { normalizeTikTokHandle } = require('./scraper');
 
 function normalizeUsername(username) {
   return typeof username === 'string' ? username.trim().replace(/^@/, '').toLowerCase() : '';
 }
 
-async function addCreator(pool, modelId, username, source = 'va') {
-  const clean = normalizeUsername(username);
+async function addCreator(pool, modelId, username, source = 'va', platform) {
+  if (platform !== undefined && !['instagram', 'tiktok'].includes(platform)) throw new Error('Invalid platform');
+  const clean = platform === 'tiktok' ? normalizeTikTokHandle(username) : normalizeUsername(username);
   if (!clean) throw new Error('username required');
-  const work = db => linkCreator(db, modelId, clean, source);
+  const work = db => linkCreator(db, modelId, clean, source, platform);
   return pool.transaction ? pool.transaction(work) : work(pool);
 }
 
-async function linkCreator(db, modelId, clean, source) {
+async function linkCreator(db, modelId, clean, source, platform) {
   const now = new Date().toISOString();
-  const tracked = await db.query("UPDATE tracked_accounts SET status = 'active', updated_at = $1 WHERE LOWER(username) = $2", [now, clean]);
+  const tracked = platform === undefined
+    ? await db.query("UPDATE tracked_accounts SET status = 'active', updated_at = $1 WHERE LOWER(username) = $2", [now, clean])
+    : await db.query("UPDATE tracked_accounts SET status = 'active', updated_at = $1, platform = $2 WHERE LOWER(username) = $3", [now, platform, clean]);
   if (!tracked.rowCount) {
-    const suggested = await db.query('SELECT followers, bio, avg_er FROM suggested_accounts WHERE LOWER(username) = $1', [clean]);
+    const suggested = platform === 'tiktok' ? { rows: [] }
+      : await db.query('SELECT followers, bio, avg_er FROM suggested_accounts WHERE LOWER(username) = $1', [clean]);
     const account = suggested.rows[0] || {};
-    await db.query(`INSERT INTO tracked_accounts (username, status, tags, followers, bio, avg_er, added_at, updated_at)
-      VALUES ($1, 'active', $2, $3, $4, $5, $6, $7) ON CONFLICT (username) DO UPDATE SET status = 'active'`,
-    [clean, source === 'suggestion' ? 'discovered' : '', account.followers || 0, account.bio || '', account.avg_er || 0, now, now]);
+    await db.query(`INSERT INTO tracked_accounts (username, status, tags, followers, bio, avg_er, added_at, updated_at, platform)
+      VALUES ($1, 'active', $2, $3, $4, $5, $6, $7, $8) ON CONFLICT (username) DO UPDATE SET status = 'active'${platform === undefined ? '' : ', platform = EXCLUDED.platform'}`,
+    [clean, source === 'suggestion' ? 'discovered' : '', account.followers || 0, account.bio || '', account.avg_er || 0, now, now, platform || 'instagram']);
   }
   const result = await db.query(`INSERT INTO model_creators (model_id, username, source, added_at)
     VALUES ($1, $2, $3, $4) ON CONFLICT (model_id, username) DO NOTHING`, [modelId, clean, source, now]);
@@ -59,7 +64,8 @@ async function approveForModel(pool, modelId, username) {
 }
 
 async function listWorkspaceCreators(pool, modelId) {
-  const result = await pool.query(`SELECT mc.username, mc.source, mc.added_at, ta.last_scraped_at, ta.status
+  const result = await pool.query(`SELECT mc.username, mc.source, mc.added_at, ta.last_scraped_at, ta.status,
+      COALESCE(ta.platform, 'instagram') AS platform
     FROM model_creators mc LEFT JOIN tracked_accounts ta ON LOWER(ta.username) = mc.username
     WHERE mc.model_id = $1 ORDER BY mc.added_at DESC, mc.username`, [modelId]);
   const mixes = new Map((await getCreators(pool)).map(creator => [creator.account_handle, creator.mix]));

@@ -75,13 +75,13 @@ export default function AudioTab() {
                   <span>{formatCount(a.creator_count)} creators</span>
                   <span>·</span>
                   <span>{formatCount(a.total_views)} views</span>
-                  <a
+                  {a.audio_id && !String(a.audio_id).startsWith('tt_') && <a
                     href={`https://www.instagram.com/reels/audio/${a.audio_id}/`}
                     target="_blank" rel="noopener noreferrer"
                     className="text-gold hover:text-gold-light"
                   >
                     Open on Instagram ↗
-                  </a>
+                  </a>}
                 </div>
               </div>
 

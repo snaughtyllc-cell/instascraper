@@ -7,10 +7,54 @@ const { refreshPerfScores } = require('./perf-score');
 const APIFY_BASE = 'https://api.apify.com/v2';
 const REEL_ACTOR_ID = 'apify~instagram-reel-scraper';
 const GENERIC_ACTOR_ID = 'apify~instagram-scraper';
+const TIKTOK_ACTOR_ID = 'clockworks~tiktok-scraper';
 
 // Engagement rate is view-based: of everyone who watched, what % liked or commented.
 // (Followers are unreliable from the reel actor and not the signal we care about.)
 const calcER = calcViewER;
+
+function normalizeTikTokHandle(query) {
+  const value = String(query || '').trim();
+  const profile = value.match(/^(?:https?:\/\/)?(?:www\.|m\.)?tiktok\.com\/@([^/?#]+)/i);
+  return (profile ? profile[1] : value.replace(/^@/, '')).toLowerCase();
+}
+
+// Only real downloadable videos can enter the shared library. TikTok may emit
+// private-account/error objects in a dataset whose run still succeeded.
+function mapTikTokItem(item, { query = '', nowIso } = {}) {
+  if (!item || isErrorStub(item) || item.isSlideshow || item.isAd || item.authorMeta?.privateAccount) return null;
+  const videoUrl = item.mediaUrls?.[0] || item.videoMeta?.downloadAddr;
+  if (!/^\d+$/.test(String(item.id || '')) || typeof videoUrl !== 'string' || !videoUrl) return null;
+  const views = typeof item.playCount === 'number' && Number.isFinite(item.playCount) ? item.playCount : null;
+  const likes = item.diggCount || 0;
+  const comments = item.commentCount || 0;
+  const { er_percent, er_label } = calcER(likes, comments, views);
+  const music = item.musicMeta || {};
+  return {
+    _type: 'Video',
+    _productType: '',
+    platform: 'tiktok',
+    shortcode: `tt_${item.id}`,
+    videoUrl,
+    thumbnailUrl: item.videoMeta?.coverUrl || null,
+    caption: item.text || '',
+    likeCount: likes,
+    commentCount: comments,
+    viewCount: views,
+    postedAt: item.createTimeISO || null,
+    accountHandle: normalizeTikTokHandle(item.authorMeta?.name || query),
+    postUrl: item.webVideoUrl || '',
+    sourceQuery: query,
+    followersAtScrape: item.authorMeta?.fans || 0,
+    erPercent: er_percent,
+    erLabel: er_label,
+    audioId: music.musicId != null ? `tt_${music.musicId}` : null,
+    audioTitle: music.musicName || null,
+    audioAuthor: music.musicAuthor || null,
+    isOriginalAudio: music.musicOriginal ? 1 : 0,
+    videoUrlRefreshedAt: nowIso,
+  };
+}
 
 // Views: Apify's reel actor returns a real videoPlayCount; the generic actor
 // (URL imports + small-result fallback) returns no view field at all. Return
@@ -385,6 +429,7 @@ class InstagramScraper {
   }
 
   async startScrapeJob({ query, queryType, minLikes, minViews, startDate, endDate, source }) {
+    if (queryType === 'tiktok_username') query = normalizeTikTokHandle(query);
     const jobSource = source || 'manual';
 
     // Footgun #2: skip if an active scrape for the same query is already running.
@@ -409,7 +454,7 @@ class InstagramScraper {
 
       await pool.query('UPDATE scrape_jobs SET apify_run_id = $1 WHERE id = $2', [run.id, jobId]);
 
-      this._pollAndStore(run.id, jobId, { minLikes, minViews, startDate, endDate, query });
+      this._pollAndStore(run.id, jobId, { minLikes, minViews, startDate, endDate, query, queryType });
       return { jobId, apifyRunId: run.id, status: 'running' };
     } catch (err) {
       if (err instanceof BudgetExceededError) {
@@ -422,7 +467,15 @@ class InstagramScraper {
   }
 
   _buildInput(query, queryType) {
-    if (queryType === 'username') {
+    if (queryType === 'tiktok_username') {
+      return {
+        actorId: TIKTOK_ACTOR_ID,
+        input: {
+          profiles: [normalizeTikTokHandle(query)], resultsPerPage: 50,
+          shouldDownloadVideos: true, shouldDownloadCovers: false, profileScrapeSections: ['videos'],
+        },
+      };
+    } else if (queryType === 'username') {
       return {
         actorId: REEL_ACTOR_ID,
         input: { username: [query.replace('@', '')], resultsLimit: 50 },
@@ -554,12 +607,24 @@ class InstagramScraper {
   }
 
   async _fetchAndStoreResults(runId, jobId, filters) {
+    const isTikTok = filters.queryType === 'tiktok_username';
     const res = await fetch(`${APIFY_BASE}/actor-runs/${runId}/dataset/items?token=${this.apiKey}`);
     let items = await res.json();
 
+    if (isTikTok && (!Array.isArray(items) || !items.some(item => mapTikTokItem(item, { query: filters.query })))) {
+      const message = 'TikTok account private or not found';
+      await pool.query(
+        `UPDATE scrape_jobs SET status = $1, error = $2, posts_found = 0, progress = 100, status_message = $3, completed_at = TO_CHAR(NOW(), 'YYYY-MM-DD"T"HH24:MI:SS"Z"') WHERE id = $4`,
+        ['failed', message, message, jobId]
+      );
+      await pool.query('UPDATE tracked_accounts SET consecutive_failures = COALESCE(consecutive_failures, 0) + 1 WHERE username = $1',
+        [normalizeTikTokHandle(filters.query)]);
+      return;
+    }
+
     // Fallback: if reel scraper returned very few items, retry with generic scraper
     const fallbackDisabled = /^(1|true|yes)$/i.test(process.env.APIFY_DISABLE_REEL_FALLBACK || '');
-    if (!fallbackDisabled && items.length <= 3 && filters.query && !filters.query.startsWith('#') && !filters.query.startsWith('http')) {
+    if (!isTikTok && !fallbackDisabled && items.length <= 3 && filters.query && !filters.query.startsWith('#') && !filters.query.startsWith('http')) {
       console.log(`[Scraper] Reel scraper returned only ${items.length} items for "${filters.query}", trying generic scraper...`);
       await pool.query('UPDATE scrape_jobs SET status_message = $1 WHERE id = $2', ['Retrying with generic scraper...', jobId]);
       try {
@@ -605,7 +670,7 @@ class InstagramScraper {
 
     let followersCount = 0;
     for (const item of items) {
-      const fc = item.ownerFollowerCount || item.followersCount || item.owner?.followerCount || 0;
+      const fc = isTikTok ? item?.authorMeta?.fans || 0 : item.ownerFollowerCount || item.followersCount || item.owner?.followerCount || 0;
       if (fc > 0) { followersCount = fc; break; }
     }
 
@@ -630,50 +695,57 @@ class InstagramScraper {
     const nowIso = new Date().toISOString();
 
     for (const item of items) {
-      const likes = (item.likesCount != null && item.likesCount >= 0) ? item.likesCount : (item.likes || 0);
-      const comments = (item.commentsCount != null && item.commentsCount >= 0) ? item.commentsCount : (item.comments || 0);
-      const views = extractViews(item);
+      let post;
+      let taggedJson = null;
+      if (isTikTok) {
+        post = mapTikTokItem(item, { query: filters.query, nowIso });
+        if (!post) continue;
+      } else {
+        const likes = (item.likesCount != null && item.likesCount >= 0) ? item.likesCount : (item.likes || 0);
+        const comments = (item.commentsCount != null && item.commentsCount >= 0) ? item.commentsCount : (item.comments || 0);
+        const views = extractViews(item);
 
-      let postedAt = null;
-      if (item.timestamp) {
-        postedAt = typeof item.timestamp === 'string' ? item.timestamp : new Date(item.timestamp * 1000).toISOString();
-      } else if (item.takenAtTimestamp) {
-        postedAt = new Date(item.takenAtTimestamp * 1000).toISOString();
+        let postedAt = null;
+        if (item.timestamp) {
+          postedAt = typeof item.timestamp === 'string' ? item.timestamp : new Date(item.timestamp * 1000).toISOString();
+        } else if (item.takenAtTimestamp) {
+          postedAt = new Date(item.takenAtTimestamp * 1000).toISOString();
+        }
+
+        const itemFollowers = item.ownerFollowerCount || item.followersCount || item.owner?.followerCount || followersCount;
+        const { er_percent, er_label } = calcER(likes, comments, views);
+
+        const taggedHandles = normalizeTaggedUsers(item, item.ownerUsername || item.owner?.username || '');
+        taggedJson = taggedHandles ? JSON.stringify(taggedHandles) : null;
+
+        // Audio/music track (Trending Audio). The reel actor returns musicInfo on
+        // every reel; we capture it here so audio trends can be aggregated over the
+        // reels we already scrape (no extra Apify cost). Absent → nulls.
+        const music = item.musicInfo || {};
+
+        post = {
+          _type: item.type || 'Unknown',
+          _productType: item.productType || '',
+          shortcode: item.shortCode || item.id || `post_${Date.now()}_${Math.random().toString(36).slice(2)}`,
+          videoUrl: item.videoUrl || null,
+          thumbnailUrl: item.displayUrl || (item.images && item.images[0]) || null,
+          caption: item.caption || '',
+          likeCount: likes,
+          commentCount: comments,
+          viewCount: views,
+          postedAt,
+          accountHandle: item.ownerUsername || item.owner?.username || '',
+          postUrl: item.url || (item.shortCode ? `https://www.instagram.com/p/${item.shortCode}/` : ''),
+          sourceQuery: filters.query || '',
+          followersAtScrape: itemFollowers,
+          erPercent: er_percent,
+          erLabel: er_label,
+          audioId: music.audio_id != null ? String(music.audio_id) : null,
+          audioTitle: music.song_name || null,
+          audioAuthor: music.artist_name || null,
+          isOriginalAudio: music.uses_original_audio ? 1 : 0,
+        };
       }
-
-      const itemFollowers = item.ownerFollowerCount || item.followersCount || item.owner?.followerCount || followersCount;
-      const { er_percent, er_label } = calcER(likes, comments, views);
-
-      const taggedHandles = normalizeTaggedUsers(item, item.ownerUsername || item.owner?.username || '');
-      const taggedJson = taggedHandles ? JSON.stringify(taggedHandles) : null;
-
-      // Audio/music track (Trending Audio). The reel actor returns musicInfo on
-      // every reel; we capture it here so audio trends can be aggregated over the
-      // reels we already scrape (no extra Apify cost). Absent → nulls.
-      const music = item.musicInfo || {};
-
-      const post = {
-        _type: item.type || 'Unknown',
-        _productType: item.productType || '',
-        shortcode: item.shortCode || item.id || `post_${Date.now()}_${Math.random().toString(36).slice(2)}`,
-        videoUrl: item.videoUrl || null,
-        thumbnailUrl: item.displayUrl || (item.images && item.images[0]) || null,
-        caption: item.caption || '',
-        likeCount: likes,
-        commentCount: comments,
-        viewCount: views,
-        postedAt,
-        accountHandle: item.ownerUsername || item.owner?.username || '',
-        postUrl: item.url || (item.shortCode ? `https://www.instagram.com/p/${item.shortCode}/` : ''),
-        sourceQuery: filters.query || '',
-        followersAtScrape: itemFollowers,
-        erPercent: er_percent,
-        erLabel: er_label,
-        audioId: music.audio_id != null ? String(music.audio_id) : null,
-        audioTitle: music.song_name || null,
-        audioAuthor: music.artist_name || null,
-        isOriginalAudio: music.uses_original_audio ? 1 : 0,
-      };
 
       if (!this._passesFilters(post, filters)) continue;
       matched++;
@@ -683,8 +755,8 @@ class InstagramScraper {
         const insertResult = await pool.query(`
           INSERT INTO posts (shortcode, video_url, thumbnail_url, caption, like_count, comment_count,
             view_count, posted_at, account_handle, post_url, source_query, followers_at_scrape, er_percent, er_label, tagged_users,
-            video_cache_status, video_url_refreshed_at, audio_id, audio_title, audio_author, is_original_audio)
-          VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21)
+            video_cache_status, video_url_refreshed_at, audio_id, audio_title, audio_author, is_original_audio, platform)
+          VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22)
           ON CONFLICT (shortcode) DO UPDATE SET
             thumbnail_url = EXCLUDED.thumbnail_url,
             video_url = EXCLUDED.video_url,
@@ -701,7 +773,10 @@ class InstagramScraper {
             audio_id = EXCLUDED.audio_id,
             audio_title = EXCLUDED.audio_title,
             audio_author = EXCLUDED.audio_author,
-            is_original_audio = EXCLUDED.is_original_audio
+            is_original_audio = EXCLUDED.is_original_audio,
+            platform = EXCLUDED.platform,
+            account_handle = CASE WHEN EXCLUDED.platform = 'tiktok' THEN EXCLUDED.account_handle ELSE posts.account_handle END,
+            post_url = CASE WHEN EXCLUDED.platform = 'tiktok' THEN EXCLUDED.post_url ELSE posts.post_url END
           RETURNING account_handle
         `, [
           post.shortcode, post.videoUrl, post.thumbnailUrl, post.caption,
@@ -710,12 +785,14 @@ class InstagramScraper {
           post.followersAtScrape, post.erPercent, post.erLabel, taggedJson,
           'pending', nowIso,
           post.audioId, post.audioTitle, post.audioAuthor, post.isOriginalAudio,
+          post.platform || null,
         ]);
         if (insertResult.rowCount > 0) {
           count++; // counts both new inserts and refreshed rows
           savedHandles.add(insertResult.rows[0].account_handle);
         }
       } catch (e) {
+        if (isTikTok) throw e;
         // skip on error
       }
     }
@@ -780,13 +857,15 @@ class InstagramScraper {
   // per-candidate Apify enrichment + gender filter. The caller (runDiscovery)
   // then enriches/classifies the deduped batch once, globally.
   async discoverRelated(username, opts = {}) {
+    const tracked = await pool.query('SELECT platform FROM tracked_accounts WHERE username = $1', [username.toLowerCase()]);
+    if (tracked.rows[0]?.platform === 'tiktok') return [];
     const { enrich = true } = opts;
     const candidates = [];
     const seen = new Set();
 
     // Phase 1: Mine existing posts in DB for @mentions and tagged collaborators
     const postsResult = await pool.query(
-      "SELECT caption, tagged_users FROM posts WHERE account_handle = $1",
+      "SELECT caption, tagged_users FROM posts WHERE account_handle = $1 AND (platform IS NULL OR platform != 'tiktok')",
       [username]
     );
 
@@ -925,7 +1004,7 @@ class InstagramScraper {
 
       const existing = await pool.query(
         `SELECT COUNT(*) as cnt, ROUND(AVG(er_percent)::numeric, 2) as avg_er, MAX(followers_at_scrape) as followers
-         FROM posts WHERE account_handle = $1`,
+         FROM posts WHERE account_handle = $1 AND (platform IS NULL OR platform != 'tiktok')`,
         [candidate.username]
       );
       const row = existing.rows[0];
@@ -935,7 +1014,7 @@ class InstagramScraper {
         candidate.avgEr = parseFloat(row.avg_er) || 0;
 
         const datesResult = await pool.query(
-          'SELECT posted_at FROM posts WHERE account_handle = $1 AND posted_at IS NOT NULL ORDER BY posted_at',
+          "SELECT posted_at FROM posts WHERE account_handle = $1 AND (platform IS NULL OR platform != 'tiktok') AND posted_at IS NOT NULL ORDER BY posted_at",
           [candidate.username]
         );
         const dates = datesResult.rows;
@@ -1206,6 +1285,9 @@ class InstagramScraper {
 }
 
 module.exports = InstagramScraper;
+module.exports.TIKTOK_ACTOR_ID = TIKTOK_ACTOR_ID;
+module.exports.normalizeTikTokHandle = normalizeTikTokHandle;
+module.exports.mapTikTokItem = mapTikTokItem;
 module.exports.isoNoMillis = isoNoMillis;
 module.exports.BudgetExceededError = BudgetExceededError;
 module.exports.extractUsageUsd = extractUsageUsd;
