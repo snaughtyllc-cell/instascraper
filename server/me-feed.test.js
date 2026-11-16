@@ -25,7 +25,7 @@ test('empty niches still show sorted reels', () => {
   sqlite.exec(`INSERT INTO posts (id,content_type,sort_status,video_cache_status) VALUES
     (1,'talking','auto','cached'),(2,'dance','manual','cached'),(3,'talking','unsorted','cached')`);
   const { sql, params } = buildMeFeedQuery([], {});
-  assert.deepStrictEqual(sqlite.prepare(sql.replace(/\$\d+/g, '?')).all(...params).map(row => row.id), [1, 2]);
+  assert.deepStrictEqual(sqlite.prepare(sql.replace(/\$\d+/g, '?')).all(...params).map(row => row.id), [2, 1]);
 });
 test('nicheVisibilityClause uses IN() placeholders (not ANY) + archived + soft_deleted', () => {
   const { clause, params } = nicheVisibilityClause(['talking', 'dance'], 5);
@@ -313,7 +313,7 @@ test('model feed excludes assigned, saved, and not-interested reels without hidi
   const { sql, params } = buildMeFeedQuery(['talking'], { modelId: 7, limit: 24 });
   const rows = sqlite.prepare(sql.replace(/\$\d+/g, '?')).all(...params);
   assert.deepStrictEqual(rows.map((row) => row.id), [4]);
-  assert.deepStrictEqual(params, [7, 7, 7, 7, 7, 'talking', 24, 0]);
+  assert.deepStrictEqual(params, ['talking', 7, 7, 7, 7, 7, 24, 0]);
 });
 
 for (const [name, status, contentType, creatorType, expected] of [
@@ -385,7 +385,7 @@ test('niche rank precedes look match, learned taste, and recency', () => {
 
 test('no model tags still ranks by performance', () => {
   assert.deepStrictEqual(buildMeFeedQuery(['talking'], { lookTags: [] }), buildMeFeedQuery(['talking']));
-  assert.match(buildMeFeedQuery(['talking'], { lookTags: [] }).sql, /THEN 1 ELSE 0 END DESC, \(COALESCE\(posts\.perf_score, 0\) \* 1\) DESC, posts\.posted_at DESC/);
+  assert.match(buildMeFeedQuery(['talking'], { lookTags: [] }).sql, /COALESCE\(posts\.perf_score, 0\) \* 1/);
 });
 
 test('shuffle ignores look tags', () => {
@@ -518,8 +518,162 @@ for (const weight of ['invalid', 'NaN', 'Infinity', '-Infinity', '-1', '1; SELEC
   test(`invalid performance weight ${JSON.stringify(weight)} falls back to one`, () => {
     withPerfWeight(weight, () => {
       const query = buildMeFeedQuery(['talking']);
-      assert.match(query.sql, /COALESCE\(posts\.perf_score, 0\) \* 1\) DESC/);
+      assert.match(query.sql, /COALESCE\(posts\.perf_score, 0\) \* 1/);
       withPerfWeight(undefined, () => assert.deepStrictEqual(query, buildMeFeedQuery(['talking'])));
     });
+  });
+}
+
+function withCreatorSpread(value, run) {
+  const previous = process.env.FEED_CREATOR_SPREAD;
+  if (value === undefined) delete process.env.FEED_CREATOR_SPREAD;
+  else process.env.FEED_CREATOR_SPREAD = value;
+  try { run(); } finally {
+    if (previous === undefined) delete process.env.FEED_CREATOR_SPREAD;
+    else process.env.FEED_CREATOR_SPREAD = previous;
+  }
+}
+
+function makeCreatorSpreadDb(t) {
+  const sqlite = makePostsDb();
+  t.after(() => sqlite.close());
+  const insert = sqlite.prepare(`INSERT INTO posts
+    (id,account_handle,content_type,posted_at,video_cache_status,perf_score)
+    VALUES (?,?,'talking','2026-11-15','cached',?)`);
+  for (const [id, creator, score] of [
+    [1, 'a', 100], [2, 'a', 99], [3, 'a', 98], [4, 'a', 97], [5, 'a', 96], [6, 'a', 95],
+    [7, 'b', 50], [8, 'b', 49], [9, 'c', 40], [10, 'c', 39],
+  ]) insert.run(id, creator, score);
+  return sqlite;
+}
+
+test('creator spread defaults to two reels per creator in each score-ranked round', (t) => {
+  const sqlite = makeCreatorSpreadDb(t);
+  withPerfWeight(undefined, () => withCreatorSpread(undefined, () => {
+    assert.deepStrictEqual(rankedReels(sqlite, {}), [1, 2, 7, 8, 9, 10, 3, 4, 5, 6]);
+  }));
+});
+
+test('zero creator spread restores the exact legacy ordering and bind parameters', (t) => {
+  const sqlite = makeCreatorSpreadDb(t);
+  withPerfWeight(undefined, () => withCreatorSpread('0', () => {
+    assert.deepStrictEqual(rankedReels(sqlite, {}), [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
+    const { sql, params } = buildMeFeedQuery(['talking'], { page: 2, limit: 4 });
+    assert.doesNotMatch(sql, /ROW_NUMBER|creator_pos|rank_score|niche_rank/);
+    assert.match(sql, /ORDER BY CASE WHEN CASE WHEN posts\.sort_status IN \('auto','manual'\) THEN posts\.content_type ELSE NULL END IN \(\$1\) THEN 1 ELSE 0 END DESC, \(COALESCE\(posts\.perf_score, 0\) \* 1\) DESC, posts\.posted_at DESC\s+LIMIT \$2 OFFSET \$3/);
+    assert.deepStrictEqual(params, ['talking', 4, 4]);
+    withPerfWeight('0', () => {
+      assert.match(buildMeFeedQuery([], { all: true }).sql, /ORDER BY posts\.posted_at DESC\s+LIMIT/);
+    });
+  }));
+});
+
+test('creator spread keeps every preferred-niche reel first and resets rounds per niche rank', (t) => {
+  const sqlite = makePostsDb();
+  t.after(() => sqlite.close());
+  sqlite.exec(`INSERT INTO posts (id,account_handle,content_type,posted_at,video_cache_status,perf_score) VALUES
+    (1,'a','talking','2026-11-15','cached',100),(2,'a','talking','2026-11-15','cached',90),
+    (3,'a','talking','2026-11-15','cached',80),(4,'a','dance','2026-11-15','cached',70),
+    (5,'a','dance','2026-11-15','cached',60),(6,'b','dance','2026-11-15','cached',50),
+    (7,'b','dance','2026-11-15','cached',40), (8,'c','dance','2026-11-16','cached',1000)`);
+  withPerfWeight(undefined, () => withCreatorSpread(undefined, () => {
+    assert.deepStrictEqual(rankedReels(sqlite, {}), [1, 2, 3, 8, 4, 5, 6, 7]);
+  }));
+});
+
+test('creator spread groups account handles without case sensitivity', (t) => {
+  const sqlite = makePostsDb();
+  t.after(() => sqlite.close());
+  sqlite.exec(`INSERT INTO posts (id,account_handle,content_type,posted_at,video_cache_status,perf_score) VALUES
+    (1,'Alice','talking','2026-11-15','cached',100),(2,'alice','talking','2026-11-15','cached',90),
+    (3,'ALICE','talking','2026-11-15','cached',80),(4,'aLiCe','talking','2026-11-15','cached',70),
+    (5,'bob','talking','2026-11-15','cached',60),(6,'BOB','talking','2026-11-15','cached',50)`);
+  withPerfWeight(undefined, () => withCreatorSpread(undefined, () => {
+    assert.deepStrictEqual(rankedReels(sqlite, {}), [1, 2, 5, 6, 3, 4]);
+  }));
+});
+
+test('creator spread applies pagination after ranking and preserves pageSize lookahead', (t) => {
+  const sqlite = makeCreatorSpreadDb(t);
+  withPerfWeight(undefined, () => withCreatorSpread(undefined, () => {
+    const expected = [1, 2, 7, 8, 9, 10, 3, 4, 5, 6];
+    const first = rankedReels(sqlite, { page: 1, limit: 5 });
+    const second = rankedReels(sqlite, { page: 2, limit: 5 });
+    assert.deepStrictEqual([...first, ...second], expected);
+    assert.equal(new Set([...first, ...second]).size, expected.length, 'pages never repeat a reel');
+    assert.deepStrictEqual(rankedReels(sqlite, { page: 1, limit: 5 }), first, 'repeated pages are stable');
+
+    const lookaheadPages = [1, 2, 3].map(page => rankedReels(sqlite, { page, limit: 5, pageSize: 4 }));
+    assert.deepStrictEqual(lookaheadPages, [expected.slice(0, 5), expected.slice(4, 9), expected.slice(8)]);
+    assert.deepStrictEqual(lookaheadPages.flatMap(rows => rows.slice(0, 4)), expected,
+      'discarding each lookahead row loses no reels between pages');
+  }));
+});
+
+test('creator spread uses posted date and id to break score ties consistently', (t) => {
+  const sqlite = makePostsDb();
+  t.after(() => sqlite.close());
+  sqlite.exec(`INSERT INTO posts (id,account_handle,content_type,posted_at,video_cache_status) VALUES
+    (1,'a','talking','2026-11-14','cached'),(2,'a','talking','2026-11-15','cached'),
+    (3,'a','talking','2026-11-15','cached'),(4,'b','talking','2026-11-15','cached'),
+    (5,'b','talking','2026-11-15','cached')`);
+  withPerfWeight(undefined, () => withCreatorSpread(undefined, () => {
+    assert.deepStrictEqual(rankedReels(sqlite, {}), [5, 4, 3, 2, 1]);
+    assert.deepStrictEqual(rankedReels(sqlite, { page: 2, limit: 2 }), [3, 2]);
+  }));
+});
+
+test('creator spread works with no rank terms or niche ordering and retains post columns', (t) => {
+  const sqlite = makeCreatorSpreadDb(t);
+  withPerfWeight('0', () => withCreatorSpread(undefined, () => {
+    assert.deepStrictEqual(rankedReels(sqlite, { all: true }), [10, 9, 8, 7, 6, 5, 4, 3, 2, 1]);
+    const { sql, params } = buildMeFeedQuery([], { all: true });
+    assert.doesNotMatch(sql, /perf_score/);
+    const rows = sqlite.prepare(sql.replace(/\$\d+/g, '?')).all(...params);
+    const post = sqlite.prepare('SELECT * FROM posts WHERE id = ?').get(rows[0].id);
+    for (const [column, value] of Object.entries(post)) assert.deepStrictEqual(rows[0][column], value, column);
+    assert.equal(rows[0].niche, 'talking');
+  }));
+});
+
+test('creator spread preserves one ascending placeholder per bind with scope, filters, look and taste', (t) => {
+  const sqlite = makeCreatorSpreadDb(t);
+  sqlite.exec("INSERT INTO model_creators VALUES (7,'a'),(7,'b'),(7,'c')");
+  withPerfWeight(undefined, () => withCreatorSpread(undefined, () => {
+    const options = { modelId: 7, niche: 'talking', lookTags: ['alt', 'bedroom'],
+      taste: { types: [['talking', 0.5]], tags: [['alt', -0.25]], creators: [['a', 0.5]] } };
+    assert.deepStrictEqual(rankedReels(sqlite, options), [1, 2, 7, 8, 9, 10, 3, 4, 5, 6]);
+  }));
+});
+
+test('shuffle query stays unchanged for every creator spread setting', () => {
+  const options = { modelId: 7, niche: 'talking', shuffle: true, lookTags: ['alt'],
+    taste: { creators: [['a', 1]] }, page: 2, limit: 25, pageSize: 24 };
+  let baseline;
+  withCreatorSpread(undefined, () => { baseline = buildMeFeedQuery(['talking'], options); });
+  for (const value of ['0', '1', '3', 'invalid']) {
+    withCreatorSpread(value, () => assert.deepStrictEqual(buildMeFeedQuery(['talking'], options), baseline));
+  }
+  assert.match(baseline.sql, /ORDER BY RANDOM\(\)/);
+  assert.doesNotMatch(baseline.sql, /ROW_NUMBER|creator_pos|rank_score|niche_rank/);
+});
+
+for (const [value, expected] of [
+  ['1', [1, 7, 9, 2, 8, 10, 3, 4, 5, 6]],
+  ['3', [1, 2, 3, 7, 8, 9, 10, 4, 5, 6]],
+]) {
+  test(`FEED_CREATOR_SPREAD=${value} uses the configured positive integer round size`, (t) => {
+    const sqlite = makeCreatorSpreadDb(t);
+    withPerfWeight(undefined, () => withCreatorSpread(value, () => {
+      assert.deepStrictEqual(rankedReels(sqlite, {}), expected);
+    }));
+  });
+}
+
+for (const value of ['', ' ', '-1', '1.5', 'NaN', 'Infinity', '2garbage', '2; SELECT 1']) {
+  test(`invalid creator spread ${JSON.stringify(value)} falls back to two`, () => {
+    let baseline;
+    withCreatorSpread(undefined, () => { baseline = buildMeFeedQuery(['talking']); });
+    withCreatorSpread(value, () => assert.deepStrictEqual(buildMeFeedQuery(['talking']), baseline));
   });
 }

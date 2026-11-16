@@ -94,6 +94,7 @@ function buildMeFeedQuery(niches, { page = 1, limit = 24, pageSize = limit, all 
       )`;
   }
 
+  let nicheRank = '0';
   let nicheOrder = '';
   const preferredNiches = [...new Set((Array.isArray(niches) ? niches : []).filter(Boolean))];
   if (!all && !shuffle && preferredNiches.length) {
@@ -101,7 +102,8 @@ function buildMeFeedQuery(niches, { page = 1, limit = 24, pageSize = limit, all 
       params.push(value);
       return `$${params.length}`;
     }).join(', ');
-    nicheOrder = `CASE WHEN ${effectiveNicheExpr()} IN (${ph}) THEN 1 ELSE 0 END DESC, `;
+    nicheRank = `CASE WHEN ${effectiveNicheExpr()} IN (${ph}) THEN 1 ELSE 0 END`;
+    nicheOrder = `${nicheRank} DESC, `;
   }
   const lookTerms = shuffle ? [] : [...new Set(lookTags)].map(tag => {
     params.push(`%"${tag}"%`);
@@ -128,13 +130,47 @@ function buildMeFeedQuery(niches, { page = 1, limit = 24, pageSize = limit, all 
   const limIdx = params.length + 1, offIdx = params.length + 2;
   const easyFilmClause = ['0', 'false', 'off'].includes(String(process.env.FEED_REQUIRE_EASY_FILM || '').trim().toLowerCase())
     ? '' : ` AND ${buildEasyFilmClause()}`;
-  const sql = `
+  const selection = `
     SELECT posts.*, ${effectiveNicheExpr()} AS niche
     FROM posts
     LEFT JOIN creator_types ct ON posts.account_handle = ct.account_handle
-    WHERE ${clause} AND ${PLAYABLE_CLAUSE}${easyFilmClause}${modelClause}
+    WHERE ${clause} AND ${PLAYABLE_CLAUSE}${easyFilmClause}${modelClause}`;
+  let sql = `${selection}
     ORDER BY ${order}
     LIMIT $${limIdx} OFFSET $${offIdx}`;
+  const configuredSpread = String(process.env.FEED_CREATOR_SPREAD ?? '2').trim();
+  const creatorSpread = /^\d+$/.test(configuredSpread) && Number.isSafeInteger(Number(configuredSpread))
+    ? Number(configuredSpread) : 2;
+  if (!shuffle && creatorSpread > 0) {
+    const rankScore = rankTerms.length ? `(${rankTerms.join(' + ')})` : '0';
+    sql = `
+    SELECT posts.*, ranked.niche
+    FROM (
+      SELECT scored.id, scored.niche, scored.niche_rank, scored.rank_score, scored.posted_at,
+        ROW_NUMBER() OVER (
+          PARTITION BY LOWER(scored.account_handle), scored.niche_rank
+          ORDER BY scored.rank_score DESC, scored.posted_at DESC, scored.id DESC
+        ) AS creator_pos
+      FROM (
+        SELECT posts.*, ${nicheRank} AS niche_rank, ${rankScore} AS rank_score
+        FROM (${selection}
+        ) posts
+      ) scored
+    ) ranked
+    JOIN posts ON posts.id = ranked.id
+    ORDER BY ranked.niche_rank DESC, ((ranked.creator_pos - 1) / ${creatorSpread}) ASC,
+      ranked.rank_score DESC, ranked.posted_at DESC, ranked.id DESC
+    LIMIT $${limIdx} OFFSET $${offIdx}`;
+    // Scores precede the filters in SQL text. Bind in that order for SQLite's
+    // positional adapter, while retaining PostgreSQL's ascending placeholders.
+    const sourceParams = [...params, limit, offset];
+    const orderedParams = [];
+    sql = sql.replace(/\$(\d+)/g, (_, index) => {
+      orderedParams.push(sourceParams[Number(index) - 1]);
+      return `$${orderedParams.length}`;
+    });
+    return { sql, params: orderedParams };
+  }
   return { sql, params: [...params, limit, offset] };
 }
 module.exports = { buildMeFeedQuery, nicheVisibilityClause, parseNiches, allowedNicheOptions, visibilityOnlyClause, sortedVisibilityClause, PLAYABLE_CLAUSE, EASY_FILM_CLAUSE };
