@@ -32,6 +32,32 @@ test('add reactivates a paused creator', async t => {
   assert.equal(pool.sqlite.prepare('SELECT COUNT(*) AS n FROM tracked_accounts').get().n, 1);
 });
 
+test('creator platform defaults on insert and only changes when explicitly provided', async t => {
+  const pool = await makeWorkspaceDb(t);
+  await addCreator(pool, 1, 'instagram.creator');
+  assert.equal(pool.sqlite.prepare("SELECT platform FROM tracked_accounts WHERE username = 'instagram.creator'").get().platform, 'instagram');
+  await addCreator(pool, 1, 'https://www.tiktok.com/@TikTok.Creator/video/123?lang=en', 'va', 'tiktok');
+  assert.equal(pool.sqlite.prepare("SELECT platform FROM tracked_accounts WHERE username = 'tiktok.creator'").get().platform, 'tiktok');
+  await addCreator(pool, 2, '@TIKTOK.CREATOR');
+  assert.equal(pool.sqlite.prepare("SELECT platform FROM tracked_accounts WHERE username = 'tiktok.creator'").get().platform, 'tiktok');
+  assert.equal((await listWorkspaceCreators(pool, 2))[0].platform, 'tiktok');
+  await addCreator(pool, 2, 'tiktok.creator', 'va', 'instagram');
+  assert.equal(pool.sqlite.prepare("SELECT platform FROM tracked_accounts WHERE username = 'tiktok.creator'").get().platform, 'instagram');
+});
+
+test('workspace creator route accepts TikTok platform and rejects unsupported platforms', async t => {
+  const pool = await makeWorkspaceDb(t);
+  const app = appFor(pool);
+  const response = await appRequest(app, { method: 'POST', path: '/workspaces/1/creators',
+    body: { username: 'https://www.tiktok.com/@TikTok.Creator', platform: 'tiktok' } });
+  assert.equal(response.status, 200);
+  assert.deepEqual(pool.sqlite.prepare('SELECT username, platform FROM tracked_accounts').get(), { username: 'tiktok.creator', platform: 'tiktok' });
+  for (const platform of ['youtube', '', null, 1, {}]) {
+    assert.equal((await appRequest(app, { method: 'POST', path: '/workspaces/1/creators', body: { username: 'other', platform } })).status, 400);
+  }
+  assert.equal(pool.sqlite.prepare('SELECT COUNT(*) AS n FROM tracked_accounts').get().n, 1);
+});
+
 test('add recreates a tracked row removed before activation', async t => {
   const pool = await makeWorkspaceDb(t);
   pool.sqlite.exec("INSERT INTO tracked_accounts (username, status) VALUES ('mia.talks', 'paused')");

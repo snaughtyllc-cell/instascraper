@@ -29,6 +29,7 @@ function Workspace({ modelId, onBack, onEdit }) {
   const [hasMore, setHasMore] = useState(false);
   const [tab, setTab] = useState('Creators');
   const [username, setUsername] = useState('');
+  const [platform, setPlatform] = useState('instagram');
   const [labels, setLabels] = useState({});
   const [lookTags, setLookTags] = useState([]);
   const [taste, setTaste] = useState({ liked: [], disliked: [] });
@@ -178,15 +179,19 @@ function Workspace({ modelId, onBack, onEdit }) {
           </button>)}
         </div>
         {tab === 'Creators' && <div className="space-y-5">
-          <form onSubmit={e => { e.preventDefault(); if (username.trim()) act(async () => { await addWorkspaceCreator(modelId, username.trim()); setUsername(''); }); }} className="flex gap-2">
-            <input aria-label="Add creator username" value={username} onChange={e => setUsername(e.target.value)} placeholder="@username" className="flex-1 min-w-0 bg-gray-900 border border-gray-700 rounded-lg p-3 text-sm" />
+          <form onSubmit={e => { e.preventDefault(); if (username.trim()) act(async () => { await addWorkspaceCreator(modelId, username.trim(), platform); setUsername(''); }); }} className="flex flex-wrap gap-2">
+            <div role="group" aria-label="Creator platform" className="flex gap-1">
+              {[['instagram', 'Instagram'], ['tiktok', 'TikTok']].map(([value, label]) => <button key={value} type="button" aria-pressed={platform === value} onClick={() => setPlatform(value)} className={`${button} ${platform === value ? 'text-gold border-gold' : 'text-gray-400'}`}>{label}</button>)}
+            </div>
+            <input aria-label="Add creator username" value={username} onChange={e => { const value = e.target.value; setUsername(value); if (/^(?:https?:\/\/)?(?:(?:www|m)\.)?tiktok\.com\/@[^/?#\s]+(?:[/?#]|$)/i.test(value.trim())) setPlatform('tiktok'); }} placeholder="@username" className="flex-1 min-w-0 bg-gray-900 border border-gray-700 rounded-lg p-3 text-sm" />
             <button disabled={busy || !username.trim()} className={`${button} text-gold`}>Add creator</button>
           </form>
           <div className="rounded-xl border border-gray-800 divide-y divide-gray-800 bg-gray-900">
             {!creators.length && <p className="p-5 text-gray-500">No creators added yet.</p>}
             {creators.map(creator => <div key={creator.username} className="flex items-center gap-4 p-4">
               <div className="flex-1 min-w-0">
-                <a className="font-semibold text-gold" href={`https://instagram.com/${creator.username}`} target="_blank" rel="noopener noreferrer">@{creator.username}</a>
+                <a className="font-semibold text-gold" href={creator.platform === 'tiktok' ? `https://www.tiktok.com/@${creator.username}` : `https://instagram.com/${creator.username}`} target="_blank" rel="noopener noreferrer">@{creator.username}</a>
+                {creator.platform === 'tiktok' && <span className="ml-2 px-1.5 py-0.5 rounded text-[10px] bg-gray-800 text-gray-400 border border-gray-700">TikTok</span>}
                 <p className="text-xs text-gray-400 mt-1">{creator.mix.map(m => `${labels[m.type] || m.type} ${m.pct}%`).join(' · ') || 'No sorted reels yet'}</p>
                 <LookTagChips tags={creator.look} vocabulary={lookTags} disabled={busy} onRemove={tag => act(() => removeCreatorLookTag(creator.username, tag))} />
                 <select value="" aria-label={`Add look tag to @${creator.username}`} disabled={busy} onChange={e => { if (e.target.value) act(() => addCreatorLookTag(creator.username, e.target.value)); }} className="mt-2 max-w-full rounded-lg border border-gray-700 bg-gray-800 px-2 py-2 text-xs text-gray-300">
@@ -222,7 +227,7 @@ function Workspace({ modelId, onBack, onEdit }) {
           <div className="grid grid-cols-2 md:grid-cols-3 xl:grid-cols-4 gap-4">
             {reels.map(reel => <article key={reel.id} className="bg-gray-900 rounded-xl overflow-hidden border border-gray-800">
               <video src={`${API_URL}/video/${reel.id}`} poster={`${API_URL}/thumb/${reel.id}`} controls playsInline preload="none" className="w-full aspect-[9/16] object-cover bg-black" />
-              <div className="p-3 text-sm"><p>@{reel.account_handle}</p><p className="text-xs text-gray-400">{labels[reel.niche] || reel.niche}{reel.ai_confidence != null && ` · ${Math.round(reel.ai_confidence * 100)}%`}</p><LayoutBadge layout={reel.ai_layout} /><LookTagChips tags={reel.ai_look_tags} vocabulary={lookTags} /><Transcript transcript={reel.ai_transcript} />
+              <div className="p-3 text-sm"><p>@{reel.account_handle}{reel.platform === 'tiktok' && <span className="ml-2 px-1.5 py-0.5 rounded text-[10px] bg-gray-800 text-gray-400 border border-gray-700">TikTok</span>}</p><p className="text-xs text-gray-400">{labels[reel.niche] || reel.niche}{reel.ai_confidence != null && ` · ${Math.round(reel.ai_confidence * 100)}%`}</p><LayoutBadge layout={reel.ai_layout} /><LookTagChips tags={reel.ai_look_tags} vocabulary={lookTags} /><Transcript transcript={reel.ai_transcript} />
                 <button disabled={busy} onClick={() => reviewReel(reel)} className={`${button} mt-3 text-gray-300`}>{pendingReel?.id === reel.id && !pendingReel.undo ? 'Removing…' : 'Not a good pick'}</button>
                 {reelErrors[reel.id] && <p role="alert" className="mt-2 text-xs text-red-300">{reelErrors[reel.id]}</p>}
               </div>

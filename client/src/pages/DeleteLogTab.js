@@ -108,7 +108,7 @@ export default function DeleteLogTab() {
                 <div key={entry.id} className={`grid grid-cols-12 gap-2 px-5 py-3 items-center ${entry.restored_at ? 'opacity-40' : ''}`}>
                   <div className="col-span-2">
                     <a
-                      href={`https://www.instagram.com/p/${entry.shortcode}/`}
+                      href={entry.platform === 'tiktok' ? entry.post_url || undefined : `https://www.instagram.com/p/${entry.shortcode}/`}
                       target="_blank"
                       rel="noopener noreferrer"
                       className="text-xs text-gold hover:text-gold-light font-mono"

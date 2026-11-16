@@ -181,7 +181,7 @@ export default function EngagementTab() {
                   </span>
                 </div>
                 <a
-                  href={`https://www.instagram.com/p/${summary.best.shortcode}/`}
+                  href={summary.best.platform === 'tiktok' ? summary.best.post_url || undefined : `https://www.instagram.com/p/${summary.best.shortcode}/`}
                   target="_blank"
                   rel="noopener noreferrer"
                   className="text-xs text-gold hover:text-gold-light mt-1 inline-block"
@@ -202,7 +202,7 @@ export default function EngagementTab() {
                   </span>
                 </div>
                 <a
-                  href={`https://www.instagram.com/p/${summary.worst.shortcode}/`}
+                  href={summary.worst.platform === 'tiktok' ? summary.worst.post_url || undefined : `https://www.instagram.com/p/${summary.worst.shortcode}/`}
                   target="_blank"
                   rel="noopener noreferrer"
                   className="text-xs text-gold hover:text-gold-light mt-1 inline-block"

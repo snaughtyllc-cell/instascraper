@@ -65,3 +65,11 @@ test('failed approval rolls back creator ownership and activation', async t => {
   assert.equal(pool.sqlite.prepare('SELECT COUNT(*) AS n FROM model_creators').get().n, 0);
   assert.equal(pool.sqlite.prepare('SELECT COUNT(*) AS n FROM tracked_accounts').get().n, 0);
 });
+
+test('Instagram suggestions ignore a same-name tracked TikTok creator', async t => {
+  const { pool, app } = await setup(t);
+  pool.sqlite.exec("INSERT INTO tracked_accounts (username, platform) VALUES ('candidate', 'tiktok')");
+  assert.deepEqual((await appRequest(app, { path: '/workspaces/1/suggestions' })).body, []);
+  assert.equal((await appRequest(app, { method: 'POST', path: '/workspaces/1/suggestions/candidate/approve' })).status, 404);
+  assert.equal(pool.sqlite.prepare('SELECT COUNT(*) AS n FROM model_creators').get().n, 0);
+});

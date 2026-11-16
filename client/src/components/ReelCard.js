@@ -280,8 +280,8 @@ export default function ReelCard({
             rel="noopener noreferrer"
             onClick={(e) => e.stopPropagation()}
             className="w-11 h-11 rounded-full border border-model-ink/15 bg-model-surface/95 text-model-ink shadow-lg backdrop-blur flex items-center justify-center transition-transform active:scale-95 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white"
-            title="Open on Instagram"
-            aria-label="Open on Instagram"
+            title={`Open on ${post.platform === 'tiktok' ? 'TikTok' : 'Instagram'}`}
+            aria-label={`Open on ${post.platform === 'tiktok' ? 'TikTok' : 'Instagram'}`}
           >
             <svg className="w-[21px] h-[21px]" fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24">
               <rect x="3" y="3" width="18" height="18" rx="5" />
@@ -314,6 +314,7 @@ export default function ReelCard({
         <div className="flex items-center gap-2 text-sm font-bold text-white">
           <span className="w-6 h-6 rounded-full bg-model-coral ring-[1.5px] ring-white/80 shrink-0" />
           @{post.account_handle}
+          {post.platform === 'tiktok' && <span className="rounded border border-white/25 bg-black/40 px-1.5 py-0.5 text-[10px] font-semibold">TikTok</span>}
         </div>
         <div className="mt-1.5 flex flex-wrap items-center gap-x-2.5 gap-y-1 text-xs font-semibold text-white/90">
           {post.er_percent != null && post.er_label && (

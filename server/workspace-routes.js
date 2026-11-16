@@ -39,9 +39,11 @@ function registerWorkspaceRoutes(app, { pool }) {
     res.json(await listWorkspaceCreators(pool, req.workspaceModelId));
   }));
   app.post('/workspaces/:modelId/creators', wrap(async (req, res) => {
-    const username = normalizeUsername(req.body?.username);
-    if (!username) return res.status(400).json({ error: 'username required' });
-    res.json(await addCreator(pool, req.workspaceModelId, username));
+    const { platform } = req.body || {};
+    if (platform !== undefined && !['instagram', 'tiktok'].includes(platform)) return res.status(400).json({ error: 'Invalid platform' });
+    const username = req.body?.username;
+    if (typeof username !== 'string' || !normalizeUsername(username)) return res.status(400).json({ error: 'username required' });
+    res.json(await addCreator(pool, req.workspaceModelId, username, 'va', platform));
   }));
   app.delete('/workspaces/:modelId/creators/:username', wrap(async (req, res) => {
     res.json(await removeCreator(pool, req.workspaceModelId, req.params.username));
@@ -108,6 +110,7 @@ function registerWorkspaceRoutes(app, { pool }) {
       ms.status, ms.snoozed_until, ms.reviewed_at, ms.created_at
       FROM model_suggestions ms JOIN suggested_accounts sa ON LOWER(sa.username) = ms.username
       WHERE ms.model_id = $1 AND ms.status = 'pending' AND (ms.snoozed_until IS NULL OR ms.snoozed_until <= $2)
+        AND NOT EXISTS (SELECT 1 FROM tracked_accounts ta WHERE LOWER(ta.username) = ms.username AND ta.platform = 'tiktok')
       ORDER BY ms.fit DESC, sa.suggestion_score DESC, ms.username`, [req.workspaceModelId, new Date().toISOString()]);
     let reels = [];
     if (rows.length) {
@@ -134,7 +137,8 @@ function registerWorkspaceRoutes(app, { pool }) {
   }));
   app.post('/workspaces/:modelId/suggestions/:username/approve', wrap(async (req, res) => {
     const username = normalizeUsername(req.params.username);
-    const suggested = await pool.query('SELECT username FROM suggested_accounts WHERE LOWER(username) = $1', [username]);
+    const suggested = await pool.query(`SELECT username FROM suggested_accounts WHERE LOWER(username) = $1
+      AND NOT EXISTS (SELECT 1 FROM tracked_accounts ta WHERE LOWER(ta.username) = LOWER(suggested_accounts.username) AND ta.platform = 'tiktok')`, [username]);
     if (!suggested.rows.length) return res.status(404).json({ error: 'Suggestion not found' });
     await approveForModel(pool, req.workspaceModelId, username);
     res.json({ success: true });

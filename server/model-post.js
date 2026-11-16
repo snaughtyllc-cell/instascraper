@@ -1,5 +1,5 @@
 const MODEL_POST_FIELDS = [
-  'id', 'shortcode', 'account_handle', 'posted_at', 'caption',
+  'id', 'shortcode', 'account_handle', 'platform', 'posted_at', 'caption',
   'view_count', 'like_count', 'comment_count', 'er_percent', 'er_label',
   'post_url', 'content_type', 'niche',
 ];

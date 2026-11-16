@@ -190,7 +190,7 @@ export default function SoundsPage({ active = true }) {
                       )}
                     </div>
 
-                    {sound.audio_id && (
+                    {sound.audio_id && !String(sound.audio_id).startsWith('tt_') && (
                       <a
                         href={`https://www.instagram.com/reels/audio/${sound.audio_id}/`}
                         target="_blank"

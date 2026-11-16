@@ -540,7 +540,8 @@ app.post('/tracked', async (req, res) => {
 
 app.post('/tracked/:username/scrape', async (req, res) => {
   try {
-    const result = await scraper.startScrapeJob({ query: req.params.username, queryType: 'username', minLikes: null, minViews: null, startDate: null, endDate: null, source: 'manual' });
+    const account = (await pool.query('SELECT platform FROM tracked_accounts WHERE LOWER(username) = $1', [req.params.username.toLowerCase()])).rows[0];
+    const result = await scraper.startScrapeJob({ query: req.params.username, queryType: account?.platform === 'tiktok' ? 'tiktok_username' : 'username', minLikes: null, minViews: null, startDate: null, endDate: null, source: 'manual' });
     if (result && result.skipped) return res.json({ skipped: true, message: 'A scrape for this account is already running.' });
     res.json(result);
   } catch (err) {
@@ -579,7 +580,8 @@ app.post('/tracked/scrape-bulk', async (req, res) => {
   let stopped = null;
   for (const username of usernames) {
     try {
-      const r = await scraper.startScrapeJob({ query: username, queryType: 'username', minLikes: null, minViews: null, startDate: null, endDate: null, source: 'manual' });
+      const account = (await pool.query('SELECT platform FROM tracked_accounts WHERE LOWER(username) = $1', [username.toLowerCase()])).rows[0];
+      const r = await scraper.startScrapeJob({ query: username, queryType: account?.platform === 'tiktok' ? 'tiktok_username' : 'username', minLikes: null, minViews: null, startDate: null, endDate: null, source: 'manual' });
       if (!(r && r.skipped)) {
         // un-pause only when a scrape actually started, so the account joins the active rotation
         await pool.query("UPDATE tracked_accounts SET status = 'active' WHERE username = $1", [username]);
@@ -597,7 +599,8 @@ app.post('/tracked/scrape-bulk', async (req, res) => {
 
 app.get('/suggested', async (req, res) => {
   const { status = 'pending', sort = 'score' } = req.query;
-  let where = 'WHERE 1=1';
+  let where = `WHERE NOT EXISTS (SELECT 1 FROM tracked_accounts ta
+    WHERE LOWER(ta.username) = LOWER(suggested_accounts.username) AND ta.platform = 'tiktok')`;
   const params = [];
   let idx = 1;
   if (status) { where += ` AND status = $${idx++}`; params.push(status); }
@@ -642,7 +645,8 @@ app.post('/suggested/:username/approve', async (req, res) => {
   const modelIds = await approvalModelIds(req, res);
   if (!modelIds) return;
   const username = req.params.username.toLowerCase();
-  const suggestion = await pool.query('SELECT username FROM suggested_accounts WHERE LOWER(username) = $1', [username]);
+  const suggestion = await pool.query(`SELECT username FROM suggested_accounts WHERE LOWER(username) = $1
+    AND NOT EXISTS (SELECT 1 FROM tracked_accounts ta WHERE LOWER(ta.username) = LOWER(suggested_accounts.username) AND ta.platform = 'tiktok')`, [username]);
   if (!suggestion.rows.length) return res.status(404).json({ error: 'Not found' });
   for (const modelId of modelIds) await approveForModel(pool, modelId, username);
   res.json({ success: true });
@@ -655,7 +659,8 @@ app.post('/suggested/approve-bulk', async (req, res) => {
     .filter(u => typeof u === 'string' && u.trim()).map(u => u.trim().toLowerCase()))];
   let approved = 0;
   for (const username of usernames) {
-    const suggestion = await pool.query('SELECT username FROM suggested_accounts WHERE LOWER(username) = $1', [username]);
+    const suggestion = await pool.query(`SELECT username FROM suggested_accounts WHERE LOWER(username) = $1
+      AND NOT EXISTS (SELECT 1 FROM tracked_accounts ta WHERE LOWER(ta.username) = LOWER(suggested_accounts.username) AND ta.platform = 'tiktok')`, [username]);
     if (!suggestion.rows.length) continue;
     for (const modelId of modelIds) await approveForModel(pool, modelId, username);
     approved++;
@@ -679,7 +684,7 @@ app.get('/delete-log', async (req, res) => {
   const page = Math.max(1, parseInt(req.query.page, 10) || 1);
   const limit = Math.min(100, Math.max(1, parseInt(req.query.limit, 10) || 50));
   const result = await pool.query(`
-    SELECT dl.*, p.view_count, p.like_count FROM deletion_log dl
+    SELECT dl.*, p.view_count, p.like_count, p.platform, p.post_url FROM deletion_log dl
     LEFT JOIN posts p ON dl.post_id = p.id
     ORDER BY dl.deleted_at DESC, dl.id DESC LIMIT $1 OFFSET $2
   `, [limit, (page - 1) * limit]);
@@ -988,7 +993,7 @@ app.post('/engagement/backfill-bulk', async (req, res) => {
 app.get('/engagement/summary/:handle', async (req, res) => {
   const handle = req.params.handle;
   const thirtyDaysAgo = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString();
-  const result = await pool.query(`SELECT shortcode, posted_at, like_count, comment_count, followers_at_scrape, er_percent, er_label FROM posts WHERE account_handle = $1 AND (archived = 0 OR archived IS NULL) AND (soft_deleted = 0 OR soft_deleted IS NULL) AND posted_at >= $2 ORDER BY posted_at ASC`, [handle, thirtyDaysAgo]);
+  const result = await pool.query(`SELECT shortcode, platform, post_url, posted_at, like_count, comment_count, followers_at_scrape, er_percent, er_label FROM posts WHERE account_handle = $1 AND (archived = 0 OR archived IS NULL) AND (soft_deleted = 0 OR soft_deleted IS NULL) AND posted_at >= $2 ORDER BY posted_at ASC`, [handle, thirtyDaysAgo]);
   const posts = result.rows;
   if (posts.length === 0) return res.json({ handle, postCount: 0, avgER: 0, erLabel: null, best: null, worst: null, trend: 'Stable' });
 
@@ -1012,8 +1017,8 @@ app.get('/engagement/summary/:handle', async (req, res) => {
 
   res.json({
     handle, postCount: posts.length, avgER, erLabel: avgLabel,
-    best: { shortcode: best.shortcode, er_percent: best.er_percent, er_label: best.er_label, posted_at: best.posted_at },
-    worst: { shortcode: worst.shortcode, er_percent: worst.er_percent, er_label: worst.er_label, posted_at: worst.posted_at },
+    best: { shortcode: best.shortcode, platform: best.platform, post_url: best.post_url, er_percent: best.er_percent, er_label: best.er_label, posted_at: best.posted_at },
+    worst: { shortcode: worst.shortcode, platform: worst.platform, post_url: worst.post_url, er_percent: worst.er_percent, er_label: worst.er_label, posted_at: worst.posted_at },
     trend, firstHalfAvg: Math.round(firstAvg * 100) / 100, secondHalfAvg: Math.round(secondAvg * 100) / 100,
   });
 });
@@ -1652,7 +1657,7 @@ app.get('/me/ideas', asyncHandler(async (req, res) => {
     const ph = all.map((_, i) => `$${i + 1}`).join(', ');
     const scope = modelScopeClause('posts', all.length + 1);
     const pr = await pool.query(
-      `SELECT id, shortcode, view_count, caption, post_url, content_type, account_handle, posted_at,
+      `SELECT id, shortcode, view_count, caption, post_url, platform, content_type, account_handle, posted_at,
               ${effectiveNicheExpr()} AS niche
        FROM posts WHERE shortcode IN (${ph})
          AND (soft_deleted = 0 OR soft_deleted IS NULL)
