@@ -2,12 +2,26 @@ const fs = require('node:fs/promises');
 const { sortConfig } = require('./sort-status');
 
 const pause = ms => new Promise(resolve => setTimeout(resolve, ms));
+const RETRY_MAX = 6;
+const RETRY_BASE_MS = 1000;
+const RETRY_CAP_MS = 60000;
+function retryDelayMs(attempt, error) {
+  // Gemini puts the wait in Retry-After (seconds) and in the error body as
+  // "retryDelay": "24s". Honour it, then fall back to exponential backoff so a
+  // 429 does not burn all attempts inside one second.
+  const header = Number(error?.response?.headers?.['retry-after']);
+  if (Number.isFinite(header) && header > 0) return header * 1000;
+  const body = String(error?.message || '');
+  const match = body.match(/"retryDelay"\s*:\s*"(\d+(?:\.\d+)?)s"/);
+  if (match) return Number(match[1]) * 1000;
+  return Math.min(RETRY_BASE_MS * 2 ** attempt, RETRY_CAP_MS);
+}
 async function retry(work) {
   for (let attempt = 0; ; attempt++) {
     try { return await work(); } catch (error) {
       const status = Number(error.status || error.code || error.response?.status);
-      if (attempt >= 2 || !(status === 429 || (status >= 500 && status <= 599))) throw error;
-      await pause(250 * 2 ** attempt);
+      if (attempt >= RETRY_MAX - 1 || !(status === 429 || (status >= 500 && status <= 599))) throw error;
+      await pause(retryDelayMs(attempt, error));
     }
   }
 }

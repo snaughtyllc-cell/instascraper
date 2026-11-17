@@ -383,7 +383,7 @@ test('lip-sync detector retries transient failures but never 403, and honors abo
       throw Object.assign(new Error(`status ${status}`), { status });
     } } };
     await assert.rejects(detectLipSync({ filePath }, { client }), new RegExp(`status ${status}`));
-    assert.equal(calls, status === 403 ? 1 : 3);
+    assert.equal(calls, status === 403 ? 1 : 6);
   }
   const controller = new AbortController();
   controller.abort();
