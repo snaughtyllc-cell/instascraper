@@ -53,7 +53,7 @@ after(() => fs.rmSync(dir, { recursive: true, force: true }));
 test('feed and workspace agree: niche first, then other sorted reels from allowed creators', async () => {
   const feed = await request('GET', '/me/feed');
   assert.equal(feed.status, 200);
-  assert.deepEqual(ids(feed), [3, 1, 2], 'niche rank outranks stronger look and learned taste');
+  assert.deepEqual(ids(feed), [1, 3, 2], 'primary niche, then secondary niche, outrank stronger look and learned taste');
   const workspace = await request('GET', '/workspaces/11/reels', undefined, adminCookie);
   assert.equal(workspace.status, 200);
   assert.deepEqual(workspace.body.map(post => post.id), ids(feed));
@@ -74,7 +74,7 @@ test('zero creators fallback shows all sorted creators with niche matches first'
   try {
     const feed = await request('GET', '/me/feed');
     assert.equal(feed.status, 200);
-    assert.deepEqual(ids(feed), [8, 3, 1, 2, 7], 'look and taste still rank the non-niche group');
+    assert.deepEqual(ids(feed), [8, 1, 3, 2, 7], 'look and taste still rank the non-niche group');
     assert.deepEqual(ids(await request('GET', '/me/feed?niche=talking')), [8, 1]);
   } finally {
     await pool.query("INSERT INTO model_creators (model_id, username) VALUES (11, 'owned')");
@@ -98,5 +98,5 @@ test('non-niche sorted reels can be saved, while historical saved and assigned r
   assert.equal((await request('POST', '/me/saves/4')).status, 404);
   assert.equal((await request('POST', '/me/saves/5')).status, 404);
   assert.equal((await request('POST', '/me/saves/7')).status, 404);
-  assert.deepEqual(ids(await request('GET', '/me/feed')), [3, 1]);
+  assert.deepEqual(ids(await request('GET', '/me/feed')), [1, 3]);
 });

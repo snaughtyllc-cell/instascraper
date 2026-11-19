@@ -31,7 +31,7 @@ test('description migration upgrades old tables idempotently before seeding defa
   await ensureContentTypeDescriptions(db, { isPg: false });
   await seedContentTypes(db);
   const { rows } = await db.query('SELECT value, description FROM content_types ORDER BY sort_order');
-  assert.deepStrictEqual(rows.map(r => r.value), ['talking', 'dance', 'skit', 'snapchat', 'omegle', 'osc', 'lipsync']);
+  assert.deepStrictEqual(rows.map(r => r.value), ['talking', 'dance', 'skit', 'snapchat', 'omegle', 'osc', 'lipsync', 'reveal']);
   for (const row of rows) assert.strictEqual(row.description, CONTENT_TYPE_DESCRIPTIONS[row.value]);
 });
 
@@ -41,7 +41,7 @@ test('seedContentTypes is idempotent (no duplicates on second run)', async () =>
   await seedContentTypes(db);
   await seedContentTypes(db);
   const { rows } = await db.query('SELECT COUNT(*) AS n FROM content_types');
-  assert.strictEqual(Number(rows[0].n), 7);
+  assert.strictEqual(Number(rows[0].n), 8);
 });
 
 test('seed fills production definitions by value while preserving edited labels and descriptions', async () => {
@@ -56,7 +56,7 @@ test('seed fills production definitions by value while preserving edited labels 
   await seedContentTypes(db);
   await seedContentTypes(db);
   const { rows } = await db.query('SELECT value, label, description FROM content_types');
-  assert.strictEqual(rows.length, 13);
+  assert.strictEqual(rows.length, 14);
   for (const value of Object.keys(CONTENT_TYPE_DESCRIPTIONS)) {
     const row = rows.find(item => item.value === value);
     assert.strictEqual(row.label, `Production ${value}`);

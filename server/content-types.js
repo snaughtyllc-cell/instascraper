@@ -6,6 +6,7 @@ const DEFAULT_CONTENT_TYPES = [
   { value: 'omegle', label: 'Omegle' },
   { value: 'osc', label: 'OSC' },
   { value: 'lipsync', label: 'Lip sync' },
+  { value: 'reveal', label: 'Reveal' },
 ];
 
 const CONTENT_TYPE_DESCRIPTIONS = {
@@ -16,7 +17,8 @@ const CONTENT_TYPE_DESCRIPTIONS = {
   snapchat: 'A casual Snapchat-style selfie clip, often using face filters, lenses or quick personal updates.',
   omegle: 'A recorded random video-chat interaction with another participant, often in a split-screen layout.',
   osc: 'On-screen captions or text carry the main message while the person reacts, poses or performs silently.',
-  'thirst-trap': 'The main focus is a deliberately flirtatious or alluring pose, expression or appearance reveal.',
+  'thirst-trap': 'The main focus is a deliberately flirtatious or alluring pose or expression. Tattoo, body or outfit reveals belong in Reveal.',
+  reveal: 'The clip builds to a reveal of a tattoo, body or outfit, often as a double take, a turn to camera or a cut from covered to shown.',
   grwm: 'The person gets ready on camera, showing steps such as makeup, hair, skincare or choosing an outfit.',
   lifestyle: 'Everyday activities, routines, outings or personal moments are the main focus.',
   fitness: 'Exercise, workouts, sports training or demonstrations of fitness movements are the main focus.',
