@@ -43,8 +43,25 @@ test('buildMeFeedQuery ranks niches first and includes other sorted types', () =
     (3,'skit','2026-07-03',0,'cached'),(4,'talking','2026-07-04',1,'cached')`).run();
   const { sql, params } = buildMeFeedQuery(['talking', 'dance'], { page: 1, limit: 24 });
   const rows = sqlite.prepare(sql.replace(/\$\d+/g, '?')).all(...params);
-  assert.deepStrictEqual(rows.map(r => r.id), [2, 1, 3], 'niche reels rank above newer skit; archived excluded');
+  assert.deepStrictEqual(rows.map(r => r.id), [1, 2, 3], 'primary, then secondary, then newer skit; archived excluded');
 });
+for (const spread of ['2', '0']) {
+  test(`primary niche outranks stronger secondary and other reels with creator spread ${spread}`, () => {
+    const saved = process.env.FEED_CREATOR_SPREAD;
+    process.env.FEED_CREATOR_SPREAD = spread;
+    try {
+      const sqlite = makePostsDb();
+      sqlite.exec(`INSERT INTO posts (id, content_type, account_handle, posted_at, perf_score, video_cache_status) VALUES
+        (1,'talking','a','2026-07-01',0,'cached'),(2,'dance','b','2026-07-02',99,'cached'),
+        (3,'skit','c','2026-07-03',99,'cached'),(4,'talking','d','2026-07-04',0,'cached')`);
+      const { sql, params } = buildMeFeedQuery(['talking', 'dance'], { page: 1, limit: 24 });
+      const rows = sqlite.prepare(sql.replace(/\$\d+/g, '?')).all(...params);
+      assert.deepStrictEqual(rows.map(r => r.id), [4, 1, 2, 3]);
+    } finally {
+      if (saved === undefined) delete process.env.FEED_CREATOR_SPREAD; else process.env.FEED_CREATOR_SPREAD = saved;
+    }
+  });
+}
 test('parseNiches builds a flat list from primary + comma-separated secondary niches', () => {
   assert.deepStrictEqual(
     parseNiches({ primary_niche: 'talking', secondary_niches: 'dance, skit' }),

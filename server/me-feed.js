@@ -98,11 +98,15 @@ function buildMeFeedQuery(niches, { page = 1, limit = 24, pageSize = limit, all 
   let nicheOrder = '';
   const preferredNiches = [...new Set((Array.isArray(niches) ? niches : []).filter(Boolean))];
   if (!all && !shuffle && preferredNiches.length) {
-    const ph = preferredNiches.map(value => {
+    // parseNiches lists the primary niche first. It outranks secondaries so a
+    // secondary can be enabled without displacing the primary in the mixed feed.
+    const [primary, ...secondary] = preferredNiches.map(value => {
       params.push(value);
       return `$${params.length}`;
-    }).join(', ');
-    nicheRank = `CASE WHEN ${effectiveNicheExpr()} IN (${ph}) THEN 1 ELSE 0 END`;
+    });
+    nicheRank = secondary.length
+      ? `CASE WHEN ${effectiveNicheExpr()} = ${primary} THEN 2 WHEN ${effectiveNicheExpr()} IN (${secondary.join(', ')}) THEN 1 ELSE 0 END`
+      : `CASE WHEN ${effectiveNicheExpr()} IN (${primary}) THEN 1 ELSE 0 END`;
     nicheOrder = `${nicheRank} DESC, `;
   }
   const lookTerms = shuffle ? [] : [...new Set(lookTags)].map(tag => {
