@@ -3,10 +3,10 @@ const { test } = require('node:test');
 const assert = require('node:assert');
 const { DEFAULT_CONTENT_TYPES, slugifyTypeLabel, validateTypeLabel, validateContentTypeInput } = require('./content-types');
 
-test('DEFAULT_CONTENT_TYPES preserves the current six and includes lip sync', () => {
+test('DEFAULT_CONTENT_TYPES preserves the current six and includes lip sync and reveal', () => {
   assert.deepStrictEqual(
     DEFAULT_CONTENT_TYPES.map(t => t.value),
-    ['talking', 'dance', 'skit', 'snapchat', 'omegle', 'osc', 'lipsync']
+    ['talking', 'dance', 'skit', 'snapchat', 'omegle', 'osc', 'lipsync', 'reveal']
   );
 });
 
