@@ -68,7 +68,7 @@ beforeEach(async () => {
   process.env.HQ_PUBLIC_URL = 'https://hq.example.test';
   fs.rmSync(process.env.REACT_REF_DIR, { recursive: true, force: true });
   refreshed = [];
-  for (const table of ['film_react_analysis', 'film_react_refs', 'film_reel_items', 'model_taste', 'model_saved_posts', 'model_post_feedback', 'model_assigned_posts', 'model_creators', 'posts', 'models']) {
+  for (const table of ['film_react_analysis', 'film_react_refs', 'film_reel_items', 'model_taste', 'model_saved_posts', 'model_post_feedback', 'model_assigned_posts', 'model_hidden_creators', 'model_creators', 'posts', 'models']) {
     await pool.query(`DELETE FROM ${table}`);
   }
   await pool.query(`INSERT INTO models (id,name,primary_niche,secondary_niches,look_tags,hq_project_id,email,password_hash,login_enabled)
@@ -454,6 +454,87 @@ test('workspace reel reject and undo require admin auth', async () => {
   }
   assert.deepEqual((await pool.query('SELECT * FROM model_post_feedback')).rows, []);
   assert.deepEqual(refreshed, []);
+});
+
+test('workspace hidden creator routes require admin auth', async () => {
+  const login = await appRequest(app, { method: 'POST', path: '/login', body: { email: 'film-model@example.test', password: 'fake-model-password' } });
+  assert.equal(login.status, 200);
+  const cookie = login.headers['set-cookie'][0].split(';')[0];
+  for (const [method, suffix] of [['GET', ''], ['POST', ''], ['DELETE', '/mine']]) {
+    for (const headers of [{}, { Authorization: 'Bearer fake-film-service-key' }, { Cookie: cookie }]) {
+      const response = await appRequest(app, {
+        method, path: `/workspaces/1/hidden-creators${suffix}`,
+        body: method === 'POST' ? { usernames: ['mine'] } : undefined, headers,
+      });
+      assert.equal(response.status, 403, method);
+      assert.deepEqual(response.body, { error: 'Admin only' });
+    }
+  }
+  assert.deepEqual((await pool.query('SELECT * FROM model_hidden_creators')).rows, []);
+});
+
+test('admin creator hides update model, workspace and Film Find feeds without changing other models', async () => {
+  const admin = await appRequest(app, { method: 'POST', path: '/login', body: { password: 'fake-film-admin-password' } });
+  const model = await appRequest(app, { method: 'POST', path: '/login', body: { email: 'film-model@example.test', password: 'fake-model-password' } });
+  assert.equal(admin.status, 200);
+  assert.equal(model.status, 200);
+  const headers = { Cookie: admin.headers['set-cookie'][0].split(';')[0] };
+  const modelHeaders = { Cookie: model.headers['set-cookie'][0].split(';')[0] };
+  await pool.query("INSERT INTO model_creators (model_id,username) VALUES (2,'mine')");
+  const creators = (await pool.query('SELECT * FROM model_creators ORDER BY model_id, username')).rows;
+  const tracked = (await pool.query('SELECT * FROM tracked_accounts ORDER BY username')).rows;
+  const containsCreator = async (expected, fallback = false) => {
+    const workspace = await appRequest(app, { path: '/workspaces/1/reels', headers });
+    const me = await appRequest(app, { path: '/me/feed', headers: modelHeaders });
+    const film = await request('GET', `${filmPath}/feed`);
+    for (const response of [workspace, me, film]) assert.equal(response.status, 200);
+    for (const rows of [workspace.body, me.body.posts, film.body.reels]) {
+      assert.equal(rows.some(row => row.id === 101), expected);
+      assert.equal(rows.some(row => row.id === 102), expected, 'all posts by the creator follow the hide');
+      assert.ok(rows.some(row => row.id === 103), 'a visible approved creator remains');
+      assert.equal(rows.some(row => row.id === 104), fallback, 'approved-creator fallback stays unchanged');
+    }
+    const other = await appRequest(app, { path: '/workspaces/2/reels', headers });
+    assert.equal(other.status, 200);
+    assert.ok(other.body.some(row => row.id === 101), 'another model still sees the same creator');
+  };
+  await containsCreator(true);
+  const hidden = await appRequest(app, { method: 'POST', path: '/workspaces/1/hidden-creators', headers, body: { usernames: ['@MINE'] } });
+  assert.equal(hidden.status, 200);
+  await containsCreator(false);
+  assert.deepEqual((await pool.query('SELECT * FROM model_creators ORDER BY model_id, username')).rows, creators);
+  assert.deepEqual((await pool.query('SELECT * FROM tracked_accounts ORDER BY username')).rows, tracked);
+  await pool.query('DELETE FROM model_creators WHERE model_id = $1', [1]);
+  await containsCreator(false, true);
+  const unhidden = await appRequest(app, { method: 'DELETE', path: '/workspaces/1/hidden-creators/mine', headers });
+  assert.equal(unhidden.status, 200);
+  assert.deepEqual(unhidden.body, []);
+  await containsCreator(true, true);
+  assert.deepEqual(refreshed, [], 'hiding does not alter learned taste');
+});
+
+test('hidden creator saved reels remain visible in model and Film saves', async () => {
+  const saved = await request('POST', `${filmPath}/reels/101/save`, { saved: true });
+  assert.equal(saved.status, 200);
+  const admin = await appRequest(app, { method: 'POST', path: '/login', body: { password: 'fake-film-admin-password' } });
+  const model = await appRequest(app, { method: 'POST', path: '/login', body: { email: 'film-model@example.test', password: 'fake-model-password' } });
+  assert.equal(admin.status, 200);
+  assert.equal(model.status, 200);
+  const hidden = await appRequest(app, {
+    method: 'POST', path: '/workspaces/1/hidden-creators', body: { usernames: ['mine'] },
+    headers: { Cookie: admin.headers['set-cookie'][0].split(';')[0] },
+  });
+  assert.equal(hidden.status, 200);
+  const me = await appRequest(app, { path: '/me/saves', headers: { Cookie: model.headers['set-cookie'][0].split(';')[0] } });
+  const film = await request('GET', `${filmPath}/saves`);
+  assert.equal(me.status, 200);
+  assert.equal(film.status, 200);
+  assert.deepEqual(me.body.posts.map(row => row.id), [101]);
+  assert.deepEqual(film.body.reels.map(row => row.id), [101]);
+  const feed = await request('GET', `${filmPath}/feed`);
+  assert.equal(feed.status, 200);
+  assert.ok(!feed.body.reels.some(row => row.creatorHandle === 'mine'));
+  assert.equal((await pool.query('SELECT COUNT(*) AS n FROM model_saved_posts WHERE model_id = $1', [1])).rows[0].n, 1);
 });
 
 test('admin workspace rejection and undo update all model feeds and learned taste only for that model', async () => {

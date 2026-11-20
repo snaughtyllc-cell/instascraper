@@ -6,6 +6,7 @@ import {
   approveWorkspaceSuggestion, dismissWorkspaceSuggestion, snoozeWorkspaceSuggestion,
   getContentTypes, getLookTags, getWorkspaceTaste, addCreatorLookTag, removeCreatorLookTag,
   rejectWorkspaceReel, undoWorkspaceReelRejection, setPostContentType,
+  getWorkspaceHiddenCreators, hideWorkspaceCreators, unhideWorkspaceCreator,
 } from '../api';
 import API_URL from '../api-base';
 import { SuggestedReelStrip } from './SuggestedAccountsTab';
@@ -23,6 +24,9 @@ export default function ModelWorkspace(props) {
 function Workspace({ modelId, onBack, onEdit }) {
   const [workspace, setWorkspace] = useState(null);
   const [creators, setCreators] = useState([]);
+  const [hiddenCreators, setHiddenCreators] = useState([]);
+  const [hiddenInput, setHiddenInput] = useState('');
+  const [hiddenError, setHiddenError] = useState('');
   const [proposals, setProposals] = useState([]);
   const [suggestions, setSuggestions] = useState([]);
   const [reels, setReels] = useState([]);
@@ -45,13 +49,15 @@ function Workspace({ modelId, onBack, onEdit }) {
   const pagingDirty = useRef(false);
   const load = useCallback(async () => {
     const version = ++loadVersion.current;
-    const [summary, owned, proposed, routed, feed, learned, vocabulary] = await Promise.all([
+    const [summary, owned, proposed, routed, feed, learned, vocabulary, hidden] = await Promise.all([
       getWorkspace(modelId), getWorkspaceCreators(modelId), getWorkspaceProposals(modelId),
       getWorkspaceSuggestions(modelId), getWorkspaceReels(modelId), getWorkspaceTaste(modelId), getLookTags(),
+      getWorkspaceHiddenCreators(modelId),
     ]);
     if (!mounted.current || version !== loadVersion.current) return;
     setWorkspace(summary.data);
     setCreators(owned.data);
+    setHiddenCreators(hidden.data);
     setProposals(proposed.data);
     setSuggestions(routed.data);
     setReels(feed.data);
@@ -77,6 +83,30 @@ function Workspace({ modelId, onBack, onEdit }) {
     try { await action(); if (mounted.current) await load(); }
     catch (err) { if (mounted.current) setError(err.response?.data?.error || err.message); }
     finally { busyRef.current = false; if (mounted.current) setBusy(false); }
+  };
+  const changeHiddenCreators = async (usernames, unhide = false) => {
+    if (busyRef.current) return;
+    busyRef.current = true;
+    setBusy(true);
+    setHiddenError('');
+    let changed = false;
+    try {
+      const { data } = await (unhide ? unhideWorkspaceCreator(modelId, usernames[0]) : hideWorkspaceCreators(modelId, usernames));
+      if (!mounted.current) return;
+      changed = true;
+      setHiddenCreators(data);
+      if (!unhide) setHiddenInput('');
+      const hidden = new Set(data.map(item => item.username));
+      setReels(previous => previous.filter(reel => !hidden.has((reel.account_handle || '').toLowerCase())));
+      setRemovedReels(previous => previous.filter(item => !hidden.has((item.reel.account_handle || '').toLowerCase())));
+      pagingDirty.current = true;
+      await load();
+    } catch (err) {
+      if (mounted.current) setHiddenError(`${changed ? 'Hidden list saved, but the workspace could not reload. ' : ''}${err.response?.data?.error || err.message}`);
+    } finally {
+      busyRef.current = false;
+      if (mounted.current) setBusy(false);
+    }
   };
   const reloadReels = async () => {
     const pages = await Promise.all(Array.from({ length: page }, (_, index) => getWorkspaceReels(modelId, index + 1)));
@@ -194,7 +224,22 @@ function Workspace({ modelId, onBack, onEdit }) {
             </div>)}
           </div>
         </section>
-        {workspace.fallback && <p className="p-4 rounded-xl border border-gold/30 bg-gold/10 text-gold">No creators yet — showing every sorted reel, with her content types first.</p>}
+        <section aria-labelledby="hidden-creators-title" className="rounded-xl border border-gray-800 bg-gray-900 p-4 space-y-3">
+          <h3 id="hidden-creators-title" className="font-semibold text-white">Hidden from feed</h3>
+          <p className="text-xs text-gray-500">Hide creators from {workspace.model.name}’s Find feed. Saved reels stay available.</p>
+          {hiddenError && <p role="alert" className="text-sm text-red-300">{hiddenError}</p>}
+          <form onSubmit={e => { e.preventDefault(); const handles = hiddenInput.split(/[,\s]+/).filter(Boolean); if (handles.length) changeHiddenCreators(handles); }} className="flex flex-wrap items-start gap-2">
+            <textarea aria-label="Handles to hide" value={hiddenInput} onChange={e => setHiddenInput(e.target.value)} rows={2} placeholder="@username, @another (up to 50)" className="flex-1 min-w-0 bg-gray-800 border border-gray-700 rounded-lg p-3 text-sm" />
+            <button disabled={busy || !hiddenInput.split(/[,\s]+/).some(Boolean)} className={`${button} text-gold`}>Hide</button>
+          </form>
+          {hiddenCreators.length ? <ul className="space-y-2 text-sm">
+            {hiddenCreators.map(creator => <li key={creator.username} className="flex items-center justify-between gap-3">
+              <span>@{creator.username}</span>
+              <button disabled={busy} aria-label={`Unhide @${creator.username}`} onClick={() => changeHiddenCreators([creator.username], true)} className={button}>Unhide</button>
+            </li>)}
+          </ul> : <p className="text-xs text-gray-500">No hidden creators.</p>}
+        </section>
+        {workspace.fallback && <p className="p-4 rounded-xl border border-gold/30 bg-gold/10 text-gold">No creators yet — showing sorted reels, with her content types first.</p>}
         <div className="flex gap-2 border-b border-gray-800 pb-3" role="tablist" aria-label="Workspace sections">
           {['Creators', 'Reels', 'Suggested'].map(name => <button key={name} role="tab" aria-selected={tab === name} onClick={() => setTab(name)} className={`${button} ${tab === name ? 'text-gold border-gold' : 'text-gray-400'}`}>
             {name}{name === 'Creators' ? ` (${creators.length})` : name === 'Suggested' ? ` (${suggestions.length})` : ''}
@@ -253,6 +298,7 @@ function Workspace({ modelId, onBack, onEdit }) {
                 <div className="mt-3 flex flex-wrap gap-2">
                   {['talking', 'lipsync'].includes(reel.niche || reel.content_type) && <button disabled={busy} onClick={() => correctReelType(reel, (reel.niche || reel.content_type) === 'talking' ? 'lipsync' : 'talking')} className={`${button} text-gold`}>{pendingReel?.id === reel.id && pendingReel.type ? 'Saving…' : (reel.niche || reel.content_type) === 'talking' ? 'Lip sync, not talking' : 'Talking, not lip sync'}</button>}
                   <button disabled={busy} onClick={() => reviewReel(reel)} className={`${button} text-gray-300`}>{pendingReel?.id === reel.id && !pendingReel.undo && !pendingReel.type ? 'Removing…' : 'Not a good pick'}</button>
+                  <button disabled={busy} aria-label={`Hide @${reel.account_handle} from feed`} onClick={() => changeHiddenCreators([reel.account_handle])} className={`${button} text-gray-300`}>Hide</button>
                 </div>
                 {reelErrors[reel.id] && <p role="alert" className="mt-2 text-xs text-red-300">{reelErrors[reel.id]}</p>}
               </div>

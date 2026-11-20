@@ -10,6 +10,7 @@ jest.mock('./api', () => ({
   getWorkspace: jest.fn(), getWorkspaceCreators: jest.fn(), getWorkspaceProposals: jest.fn(),
   getWorkspaceSuggestions: jest.fn(), getWorkspaceReels: jest.fn(), getWorkspaceTaste: jest.fn(),
   getContentTypes: jest.fn(), getLookTags: jest.fn(),
+  getWorkspaceHiddenCreators: jest.fn(),
 }));
 
 const transcript = 'Estas son mis palabras.\nSin traducción.';
@@ -65,7 +66,7 @@ test('transcript hides empty sentinels and reports clipboard failures', async ()
 
 test('workspace Reels view includes collapsed transcripts and copy controls', async () => {
   api.getWorkspace.mockResolvedValue({ data: { model: { id: 1, name: 'Logan', primary_niche: 'talking' } } });
-  for (const method of ['getWorkspaceCreators', 'getWorkspaceProposals', 'getWorkspaceSuggestions', 'getContentTypes', 'getLookTags']) api[method].mockResolvedValue({ data: [] });
+  for (const method of ['getWorkspaceCreators', 'getWorkspaceProposals', 'getWorkspaceSuggestions', 'getContentTypes', 'getLookTags', 'getWorkspaceHiddenCreators']) api[method].mockResolvedValue({ data: [] });
   api.getWorkspaceTaste.mockResolvedValue({ data: { liked: [], disliked: [] } });
   api.getWorkspaceReels.mockResolvedValue({ data: [{ id: 1, account_handle: 'creator', niche: 'talking', ai_transcript: transcript }] });
   await render(<ModelWorkspace modelId={1} onBack={jest.fn()} onEdit={jest.fn()} />);
