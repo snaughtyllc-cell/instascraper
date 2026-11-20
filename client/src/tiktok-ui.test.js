@@ -20,6 +20,7 @@ jest.mock('./api', () => ({
   getWorkspace: jest.fn(), getWorkspaceCreators: jest.fn(), getWorkspaceProposals: jest.fn(),
   getWorkspaceSuggestions: jest.fn(), getWorkspaceReels: jest.fn(), getWorkspaceTaste: jest.fn(),
   getContentTypes: jest.fn(), getLookTags: jest.fn(), addWorkspaceCreator: jest.fn(),
+  getWorkspaceHiddenCreators: jest.fn(),
   getTrackedAccounts: jest.fn(), getCreators: jest.fn(), getSchedulerStatus: jest.fn(),
   getTrendingAudio: jest.fn(), getMyTrendingAudio: jest.fn(),
   triggerScrape: jest.fn(), getScrapeJobs: jest.fn(),
@@ -36,7 +37,7 @@ beforeEach(() => {
   document.body.appendChild(container);
   root = createRoot(container);
   api.getWorkspace.mockResolvedValue({ data: { model: { id: 9, name: 'Destiny' } } });
-  for (const method of ['getWorkspaceCreators', 'getWorkspaceProposals', 'getWorkspaceSuggestions', 'getWorkspaceReels', 'getContentTypes', 'getLookTags', 'getTrackedAccounts', 'getCreators', 'getScrapeJobs']) api[method].mockResolvedValue({ data: [] });
+  for (const method of ['getWorkspaceCreators', 'getWorkspaceProposals', 'getWorkspaceSuggestions', 'getWorkspaceReels', 'getContentTypes', 'getLookTags', 'getTrackedAccounts', 'getCreators', 'getScrapeJobs', 'getWorkspaceHiddenCreators']) api[method].mockResolvedValue({ data: [] });
   api.getWorkspaceTaste.mockResolvedValue({ data: { liked: [], disliked: [] } });
   api.addWorkspaceCreator.mockResolvedValue({ data: {} });
   api.triggerScrape.mockResolvedValue({ data: {} });
@@ -51,7 +52,7 @@ afterAll(() => { delete globalThis.IS_REACT_ACT_ENVIRONMENT; });
 async function render(element) { await act(async () => { root.render(element); }); }
 async function change(element, value) { await act(async () => { Simulate.change(element, { target: { value } }); }); }
 async function click(element) { await act(async () => { element.dispatchEvent(new MouseEvent('click', { bubbles: true })); }); }
-async function submit() { await act(async () => { Simulate.submit(container.querySelector('form')); }); }
+async function submit(form = container.querySelector('form')) { await act(async () => { Simulate.submit(form); }); }
 function button(text) { return [...container.querySelectorAll('button')].find(element => element.textContent.trim() === text); }
 
 test('workspace defaults to Instagram and allows a TikTok handle or pasted URL', async () => {
@@ -59,11 +60,11 @@ test('workspace defaults to Instagram and allows a TikTok handle or pasted URL',
   const username = container.querySelector('input[aria-label="Add creator username"]');
   expect(button('Instagram').getAttribute('aria-pressed')).toBe('true');
   await change(username, '@instagram_creator');
-  await submit();
+  await submit(username.closest('form'));
   expect(api.addWorkspaceCreator).toHaveBeenLastCalledWith(9, '@instagram_creator', 'instagram');
   await click(button('TikTok'));
   await change(username, '@tiktok_creator');
-  await submit();
+  await submit(username.closest('form'));
   expect(api.addWorkspaceCreator).toHaveBeenLastCalledWith(9, '@tiktok_creator', 'tiktok');
   await click(button('Instagram'));
   for (const host of ['www.tiktok.com', 'm.tiktok.com']) {
@@ -71,7 +72,7 @@ test('workspace defaults to Instagram and allows a TikTok handle or pasted URL',
     const url = `https://${host}/@pardisscarelllo/video/123?lang=en`;
     await change(username, url);
     expect(button('TikTok').getAttribute('aria-pressed')).toBe('true');
-    await submit();
+    await submit(username.closest('form'));
     expect(api.addWorkspaceCreator).toHaveBeenLastCalledWith(9, url, 'tiktok');
   }
 });

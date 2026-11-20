@@ -14,6 +14,7 @@ jest.mock('./api', () => ({
   addLookTag: jest.fn(), deleteLookTag: jest.fn(),
   getWorkspace: jest.fn(), getWorkspaceCreators: jest.fn(), getWorkspaceProposals: jest.fn(),
   getWorkspaceSuggestions: jest.fn(), getWorkspaceReels: jest.fn(), getWorkspaceTaste: jest.fn(),
+  getWorkspaceHiddenCreators: jest.fn(),
   getContentTypes: jest.fn(), addContentType: jest.fn(), updateContentType: jest.fn(), addCreatorLookTag: jest.fn(), removeCreatorLookTag: jest.fn(),
 }));
 
@@ -33,6 +34,7 @@ beforeEach(() => {
   document.body.appendChild(container);
   root = createRoot(container);
   api.getLookTags.mockResolvedValue({ data: vocabulary });
+  api.getWorkspaceHiddenCreators.mockResolvedValue({ data: [] });
   api.getModelCockpit.mockResolvedValue({ data: { summary: {}, models: [], actionQueue: [], recent: [] } });
   api.getSortUsage.mockResolvedValue({ data: { reels30d: 0, usd30d: 0, today: 0, dailyMax: 10 } });
   api.getLookBackfillEstimate.mockResolvedValue({ data: { count: 8, estUsd: 0.01016 } });

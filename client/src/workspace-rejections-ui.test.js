@@ -7,6 +7,7 @@ jest.mock('./api', () => ({
   getWorkspace: jest.fn(), getWorkspaceCreators: jest.fn(), getWorkspaceProposals: jest.fn(),
   getWorkspaceSuggestions: jest.fn(), getWorkspaceReels: jest.fn(), getWorkspaceTaste: jest.fn(),
   getContentTypes: jest.fn(), getLookTags: jest.fn(),
+  getWorkspaceHiddenCreators: jest.fn(),
   rejectWorkspaceReel: jest.fn(), undoWorkspaceReelRejection: jest.fn(),
   confirmWorkspaceProposal: jest.fn(),
 }));
@@ -50,7 +51,7 @@ beforeEach(() => {
   rows = [];
   originals = [];
   api.getWorkspace.mockImplementation(async id => ({ data: { model: { id, name: id === 1 ? 'Logan' : 'Mia', primary_niche: 'talking' } } }));
-  for (const method of ['getWorkspaceCreators', 'getWorkspaceProposals', 'getWorkspaceSuggestions', 'getContentTypes', 'getLookTags']) api[method].mockResolvedValue({ data: [] });
+  for (const method of ['getWorkspaceCreators', 'getWorkspaceProposals', 'getWorkspaceSuggestions', 'getContentTypes', 'getLookTags', 'getWorkspaceHiddenCreators']) api[method].mockResolvedValue({ data: [] });
   api.getWorkspaceTaste.mockResolvedValue({ data: { liked: [], disliked: [] } });
   api.getWorkspaceReels.mockImplementation(async (id, page = 1) => ({ data: rows.slice((page - 1) * 24, page * 24) }));
   api.rejectWorkspaceReel.mockImplementation(async (id, postId) => {

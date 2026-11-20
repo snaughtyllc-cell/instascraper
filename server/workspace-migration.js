@@ -13,6 +13,11 @@ async function ensureWorkspaceTables(db, { isPg }) {
     source TEXT NOT NULL DEFAULT 'va', added_at TEXT,
     PRIMARY KEY (model_id, username)
   )`);
+  await db.query(`CREATE TABLE IF NOT EXISTS model_hidden_creators (
+    model_id INTEGER NOT NULL REFERENCES models(id) ON DELETE CASCADE,
+    username TEXT NOT NULL, hidden_at TEXT NOT NULL,
+    PRIMARY KEY (model_id, username)
+  )`);
   await db.query(`CREATE TABLE IF NOT EXISTS model_creator_proposals (
     model_id INTEGER NOT NULL, username TEXT NOT NULL, share REAL,
     status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'confirmed', 'rejected')),

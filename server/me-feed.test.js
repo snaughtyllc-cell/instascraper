@@ -17,6 +17,7 @@ function makePostsDb() {
   sqlite.exec(`CREATE TABLE model_post_feedback (model_id INTEGER, post_id INTEGER, feedback TEXT)`);
   sqlite.exec(`CREATE TABLE model_saved_posts (model_id INTEGER, post_id INTEGER)`);
   sqlite.exec(`CREATE TABLE model_creators (model_id INTEGER, username TEXT)`);
+  sqlite.exec(`CREATE TABLE model_hidden_creators (model_id INTEGER, username TEXT, hidden_at TEXT)`);
   return sqlite;
 }
 
@@ -330,7 +331,7 @@ test('model feed excludes assigned, saved, and not-interested reels without hidi
   const { sql, params } = buildMeFeedQuery(['talking'], { modelId: 7, limit: 24 });
   const rows = sqlite.prepare(sql.replace(/\$\d+/g, '?')).all(...params);
   assert.deepStrictEqual(rows.map((row) => row.id), [4]);
-  assert.deepStrictEqual(params, ['talking', 7, 7, 7, 7, 7, 24, 0]);
+  assert.deepStrictEqual(params, ['talking', 7, 7, 7, 7, 7, 7, 24, 0]);
 });
 
 for (const [name, status, contentType, creatorType, expected] of [

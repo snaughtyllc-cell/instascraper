@@ -3,7 +3,7 @@ const { modelScopeClause } = require('./model-scope');
 const { applyModelReaction, undoModelRejection } = require('./model-reactions');
 const { addCreator, removeCreator, listWorkspaceCreators, approveForModel, normalizeUsername } = require('./workspaces');
 const { computeProposals, confirmAllProposals } = require('./proposals');
-const { attachTopReels } = require('./scraper');
+const { attachTopReels, normalizeTikTokHandle } = require('./scraper');
 const { parseTagList, cleanModelLookTags } = require('./look-tags');
 const { reelLookMatch, creatorLookProfiles, creatorLookMatch, candidateLookProfile } = require('./look-match');
 const { loadTaste, tasteForFeed, creatorTaste } = require('./model-taste');
@@ -11,6 +11,19 @@ const { loadTaste, tasteForFeed, creatorTaste } = require('./model-taste');
 async function workspaceLook(pool, model) {
   const { rows } = await pool.query('SELECT value FROM look_tags');
   return { tags: cleanModelLookTags(parseTagList(model.look_tags), rows), known: new Set(rows.map(row => row.value)) };
+}
+
+function hiddenUsername(value) {
+  if (typeof value !== 'string') return null;
+  const username = /^(?:https?:\/\/)?(?:www\.|m\.)?tiktok\.com\/@/i.test(value.trim())
+    ? normalizeTikTokHandle(value) : normalizeUsername(value);
+  return /^[a-z0-9._]{1,30}$/.test(username) ? username : null;
+}
+
+async function listHiddenCreators(pool, modelId) {
+  const { rows } = await pool.query(`SELECT username, hidden_at FROM model_hidden_creators
+    WHERE model_id = $1 ORDER BY hidden_at DESC, username`, [modelId]);
+  return rows;
 }
 
 function registerWorkspaceRoutes(app, { pool }) {
@@ -47,6 +60,30 @@ function registerWorkspaceRoutes(app, { pool }) {
   }));
   app.delete('/workspaces/:modelId/creators/:username', wrap(async (req, res) => {
     res.json(await removeCreator(pool, req.workspaceModelId, req.params.username));
+  }));
+  app.get('/workspaces/:modelId/hidden-creators', wrap(async (req, res) => {
+    res.json(await listHiddenCreators(pool, req.workspaceModelId));
+  }));
+  app.post('/workspaces/:modelId/hidden-creators', wrap(async (req, res) => {
+    const input = req.body?.usernames;
+    if (!Array.isArray(input) || input.length < 1 || input.length > 50) {
+      return res.status(400).json({ error: 'Provide 1 to 50 usernames' });
+    }
+    const normalized = input.map(hiddenUsername);
+    if (normalized.some(username => !username)) return res.status(400).json({ error: 'Invalid username: use 1 to 30 letters, numbers, periods or underscores' });
+    const usernames = [...new Set(normalized)];
+    const now = new Date().toISOString();
+    const values = usernames.map((_, i) => `($${i * 3 + 1}, $${i * 3 + 2}, $${i * 3 + 3})`).join(', ');
+    await pool.query(`INSERT INTO model_hidden_creators (model_id, username, hidden_at)
+      VALUES ${values} ON CONFLICT (model_id, username) DO NOTHING`,
+    usernames.flatMap(username => [req.workspaceModelId, username, now]));
+    res.json(await listHiddenCreators(pool, req.workspaceModelId));
+  }));
+  app.delete('/workspaces/:modelId/hidden-creators/:username', wrap(async (req, res) => {
+    const username = hiddenUsername(req.params.username);
+    if (!username) return res.status(400).json({ error: 'Invalid username' });
+    await pool.query('DELETE FROM model_hidden_creators WHERE model_id = $1 AND username = $2', [req.workspaceModelId, username]);
+    res.json(await listHiddenCreators(pool, req.workspaceModelId));
   }));
   app.get('/workspaces/:modelId/reels', wrap(async (req, res) => {
     const { tags, known } = await workspaceLook(pool, req.workspaceModel);

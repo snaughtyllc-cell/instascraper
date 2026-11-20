@@ -73,6 +73,9 @@ function buildMeFeedQuery(niches, { page = 1, limit = 24, pageSize = limit, all 
       clause += ` AND ${scope.clause}`;
       params.push(...scope.params(Number(modelId)));
     }
+    params.push(Number(modelId));
+    clause += ` AND NOT EXISTS (SELECT 1 FROM model_hidden_creators mhc
+      WHERE mhc.model_id = $${params.length} AND mhc.username = LOWER(posts.account_handle))`;
     const assignmentModelIdx = params.length + 1;
     params.push(Number(modelId));
     const feedbackModelIdx = params.length + 1;
